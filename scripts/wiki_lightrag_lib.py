@@ -1864,29 +1864,162 @@ def _section_rank_lists(
     return _section_rank_lists_scalar(sections, embeddings, src_kind, tgt_kind, k, min_cosine)
 
 
-def build_section_similarity_edges(
-    sections: list[dict[str, Any]],
+def _section_similarity_directed_rank_lists_for_parameters(
+    sections_by_id: dict[str, dict[str, Any]],
     embeddings: dict[str, list[float]],
-    same_kind_k: int = 5,
-    cross_kind_k: int = 3,
-    same_kind_min_cosine: float = 0.72,
-    cross_kind_min_cosine: float = 0.76,
-    cross_kind_pairs: list[tuple[str, str]] | None = None,
-    mutual: bool = True,
-    embedding_model: str = "unknown",
-    embedding_dim: int | None = None,
-) -> list[dict[str, Any]]:
-    """Build sparse semantic-neighbor candidate edges between raw-section embeddings."""
-    sections_by_id = {str(section.get("section_id")): section for section in sections if section.get("section_id") in embeddings}
-    section_kinds = sorted({str(section.get("section_kind", "")) for section in sections_by_id.values() if section.get("section_kind")})
-    cross_kind_pairs = cross_kind_pairs or []
+    same_kind_k: int,
+    cross_kind_k: int,
+    same_kind_min_cosine: float,
+    cross_kind_min_cosine: float,
+    cross_kind_pairs: list[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    section_values = list(sections_by_id.values())
+    section_kinds = sorted({str(section.get("section_kind", "")) for section in section_values if section.get("section_kind")})
     directed: dict[tuple[str, str], dict[str, Any]] = {}
     for kind in section_kinds:
-        directed.update(_section_rank_lists(list(sections_by_id.values()), embeddings, kind, kind, same_kind_k, same_kind_min_cosine))
+        directed.update(_section_rank_lists(section_values, embeddings, kind, kind, same_kind_k, same_kind_min_cosine))
     for left, right in cross_kind_pairs:
-        directed.update(_section_rank_lists(list(sections_by_id.values()), embeddings, left, right, cross_kind_k, cross_kind_min_cosine))
-        directed.update(_section_rank_lists(list(sections_by_id.values()), embeddings, right, left, cross_kind_k, cross_kind_min_cosine))
+        directed.update(_section_rank_lists(section_values, embeddings, left, right, cross_kind_k, cross_kind_min_cosine))
+        directed.update(_section_rank_lists(section_values, embeddings, right, left, cross_kind_k, cross_kind_min_cosine))
+    return directed
 
+
+def _section_similarity_index_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        create table if not exists section_similarity_rank(
+          family_id text not null,
+          src_id text not null,
+          tgt_id text not null,
+          src_kind text not null,
+          tgt_kind text not null,
+          cosine real not null,
+          rank integer not null,
+          src_text_hash text not null,
+          tgt_text_hash text not null,
+          embedding_model text not null,
+          embedding_dim integer,
+          updated_at text not null,
+          primary key(family_id, src_id, tgt_id)
+        )
+        """
+    )
+    conn.execute("create index if not exists idx_section_similarity_rank_src on section_similarity_rank(src_kind, tgt_kind, src_id, rank)")
+
+
+def write_section_similarity_index(
+    index_path: Path,
+    sections_by_id: dict[str, dict[str, Any]],
+    directed: dict[tuple[str, str], dict[str, Any]],
+    *,
+    embedding_model: str = "unknown",
+    embedding_dim: int | None = None,
+) -> dict[str, Any]:
+    index_path = Path(index_path)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[tuple[Any, ...]] = []
+    updated_at = now_stamp()
+    for (src_id, tgt_id), item in sorted(directed.items(), key=lambda pair: (pair[0][0], int(pair[1].get("rank", 0)), pair[0][1])):
+        src = sections_by_id[src_id]
+        tgt = sections_by_id[tgt_id]
+        src_kind = str(src.get("section_kind") or "")
+        tgt_kind = str(tgt.get("section_kind") or "")
+        rows.append(
+            (
+                f"{src_kind}:{tgt_kind}",
+                src_id,
+                tgt_id,
+                src_kind,
+                tgt_kind,
+                float(item["cosine"]),
+                int(item["rank"]),
+                sha256_text(section_similarity_embedding_text(src)),
+                sha256_text(section_similarity_embedding_text(tgt)),
+                embedding_model,
+                int(embedding_dim) if embedding_dim is not None else None,
+                updated_at,
+            )
+        )
+    with sqlite3.connect(index_path) as conn:
+        _section_similarity_index_schema(conn)
+        conn.execute("delete from section_similarity_rank")
+        conn.executemany(
+            """
+            insert into section_similarity_rank
+            (family_id, src_id, tgt_id, src_kind, tgt_kind, cosine, rank, src_text_hash, tgt_text_hash, embedding_model, embedding_dim, updated_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    return section_similarity_index_summary(index_path)
+
+
+def section_similarity_index_summary(index_path: Path) -> dict[str, Any]:
+    index_path = Path(index_path)
+    if not index_path.exists():
+        return {"index_path": index_path.as_posix(), "directed_rows": 0, "family_count": 0, "families": {}}
+    with sqlite3.connect(index_path) as conn:
+        _section_similarity_index_schema(conn)
+        directed_rows = int(conn.execute("select count(*) from section_similarity_rank").fetchone()[0])
+        family_rows = conn.execute("select family_id, count(*) from section_similarity_rank group by family_id order by family_id").fetchall()
+    return {
+        "index_path": index_path.as_posix(),
+        "directed_rows": directed_rows,
+        "family_count": len(family_rows),
+        "families": {str(family): int(count) for family, count in family_rows},
+    }
+
+
+def _read_section_similarity_index_directed(
+    index_path: Path,
+    sections_by_id: dict[str, dict[str, Any]],
+    *,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    index_path = Path(index_path)
+    if not index_path.exists():
+        raise FileNotFoundError(index_path)
+    directed: dict[tuple[str, str], dict[str, Any]] = {}
+    with sqlite3.connect(index_path) as conn:
+        _section_similarity_index_schema(conn)
+        rows = conn.execute(
+            """
+            select src_id, tgt_id, cosine, rank, src_text_hash, tgt_text_hash, embedding_model, embedding_dim
+            from section_similarity_rank
+            order by family_id, src_id, rank, tgt_id
+            """
+        ).fetchall()
+    for src_id, tgt_id, cosine, rank, src_text_hash, tgt_text_hash, row_model, row_dim in rows:
+        src_id = str(src_id)
+        tgt_id = str(tgt_id)
+        if src_id not in sections_by_id or tgt_id not in sections_by_id:
+            continue
+        src = sections_by_id[src_id]
+        tgt = sections_by_id[tgt_id]
+        if src_text_hash != sha256_text(section_similarity_embedding_text(src)):
+            raise ValueError(f"stale section similarity index row for {src_id}: src_text_hash mismatch")
+        if tgt_text_hash != sha256_text(section_similarity_embedding_text(tgt)):
+            raise ValueError(f"stale section similarity index row for {tgt_id}: tgt_text_hash mismatch")
+        if embedding_model is not None and str(row_model) != embedding_model:
+            raise ValueError(f"stale section similarity index row for {src_id}->{tgt_id}: embedding_model mismatch")
+        if embedding_dim is not None and row_dim is not None and int(row_dim) != int(embedding_dim):
+            raise ValueError(f"stale section similarity index row for {src_id}->{tgt_id}: embedding_dim mismatch")
+        directed[(src_id, tgt_id)] = {"cosine": float(cosine), "rank": int(rank), "src": src, "tgt": tgt}
+    return directed
+
+
+def _build_section_similarity_edges_from_directed(
+    sections_by_id: dict[str, dict[str, Any]],
+    embeddings: dict[str, list[float]],
+    directed: dict[tuple[str, str], dict[str, Any]],
+    *,
+    cross_kind_pairs: list[tuple[str, str]],
+    mutual: bool,
+    embedding_model: str,
+    embedding_dim: int | None,
+) -> list[dict[str, Any]]:
+    section_kinds = sorted({str(section.get("section_kind", "")) for section in sections_by_id.values() if section.get("section_kind")})
     edges: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str, str]] = set()
 
@@ -1945,6 +2078,67 @@ def build_section_similarity_edges(
                 add_edge(src_id, tgt_id, (left, right))
     edges.sort(key=lambda edge: (str(edge.get("pair_kind", "")), -float(edge.get("cosine", 0)), str(edge.get("src_id")), str(edge.get("tgt_id"))))
     return edges
+
+
+def build_section_similarity_edges_from_index(
+    index_path: Path,
+    sections: list[dict[str, Any]],
+    embeddings: dict[str, list[float]],
+    *,
+    cross_kind_pairs: list[tuple[str, str]] | None = None,
+    mutual: bool = True,
+    embedding_model: str = "unknown",
+    embedding_dim: int | None = None,
+) -> list[dict[str, Any]]:
+    sections_by_id = {str(section.get("section_id")): section for section in sections if section.get("section_id") in embeddings}
+    directed = _read_section_similarity_index_directed(index_path, sections_by_id, embedding_model=embedding_model, embedding_dim=embedding_dim)
+    return _build_section_similarity_edges_from_directed(
+        sections_by_id,
+        embeddings,
+        directed,
+        cross_kind_pairs=cross_kind_pairs or [],
+        mutual=mutual,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
+    )
+
+
+def build_section_similarity_edges(
+    sections: list[dict[str, Any]],
+    embeddings: dict[str, list[float]],
+    same_kind_k: int = 5,
+    cross_kind_k: int = 3,
+    same_kind_min_cosine: float = 0.72,
+    cross_kind_min_cosine: float = 0.76,
+    cross_kind_pairs: list[tuple[str, str]] | None = None,
+    mutual: bool = True,
+    embedding_model: str = "unknown",
+    embedding_dim: int | None = None,
+    index_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Build sparse semantic-neighbor candidate edges between raw-section embeddings."""
+    sections_by_id = {str(section.get("section_id")): section for section in sections if section.get("section_id") in embeddings}
+    cross_kind_pairs = cross_kind_pairs or []
+    directed = _section_similarity_directed_rank_lists_for_parameters(
+        sections_by_id,
+        embeddings,
+        same_kind_k,
+        cross_kind_k,
+        same_kind_min_cosine,
+        cross_kind_min_cosine,
+        cross_kind_pairs,
+    )
+    if index_path is not None:
+        write_section_similarity_index(index_path, sections_by_id, directed, embedding_model=embedding_model, embedding_dim=embedding_dim)
+    return _build_section_similarity_edges_from_directed(
+        sections_by_id,
+        embeddings,
+        directed,
+        cross_kind_pairs=cross_kind_pairs,
+        mutual=mutual,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
+    )
 
 
 def section_similarity_edge_to_custom_kg_relationship(edge: dict[str, Any]) -> dict[str, Any]:

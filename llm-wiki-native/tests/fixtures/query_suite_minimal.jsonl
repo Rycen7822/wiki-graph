@@ -1,0 +1,1 @@
+{"id":"q001","query":"How should evidence retrieval be tested?","mode":"mix","top_k":20,"chunk_top_k":10,"must_include_paths":["concepts/evidence.md"],"must_include_entities":["compiled:evidence"],"notes":"minimal query-suite schema fixture"}

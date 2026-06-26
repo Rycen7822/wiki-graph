@@ -1,0 +1,10 @@
+# Local progress notes / scratch
+note.md
+
+# Python/test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local temp artifacts
+.tmp_*/

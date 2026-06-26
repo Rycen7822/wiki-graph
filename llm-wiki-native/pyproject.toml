@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-wiki-native"
+version = "0.1.0"
+description = "Shadow native retrieval kernel for llm-wiki."
+requires-python = ">=3.12"
+dependencies = ["numpy", "starlette"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+llm-wiki-native = "llm_wiki_native.cli:main"

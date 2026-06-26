@@ -380,6 +380,57 @@ def test_review_wiki_integration_status_blocks_lightrag_with_manual_review_actio
     assert graph_status["raw_fast_pending_wiki_integration_count"] == 1
 
 
+def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in_review_queue(tmp_path: Path) -> None:
+    from wiki_integration_plan import build_wiki_integration_plan
+
+    root_a = sample_wiki(tmp_path / "a")
+    root_b = sample_wiki(tmp_path / "b")
+    state_a = tmp_path / "a" / "state"
+    state_b = tmp_path / "b" / "state"
+    items = [
+        {
+            "raw_path": "raw/clip/2601/26010102_Routed.md",
+            "title": "Routed",
+            "source_id": "source:routed",
+            "topic_hints": ["retrieval", "agents"],
+            "required_sections": ["summary"],
+        },
+        {
+            "raw_path": "raw/clip/2601/26010101_Ambiguous.md",
+            "title": "Ambiguous",
+            "source_id": "source:ambiguous",
+            "topic_hints": [],
+            "required_sections": ["summary"],
+        },
+    ]
+    for item in items:
+        mark_pending_wiki_integration(state_a, root_a, **item)
+    for item in reversed(items):
+        mark_pending_wiki_integration(state_b, root_b, **item)
+
+    plan_a = build_wiki_integration_plan(root_a, state_a, reason="manual")
+    plan_b = build_wiki_integration_plan(root_b, state_b, reason="manual")
+
+    assert plan_a["plan_hash"] == plan_b["plan_hash"]
+    assert plan_a["dry_run"] is True
+    assert plan_a["writes_wiki"] is False
+    assert plan_a["compiled_page_writes"] == []
+    operations = plan_a["operations"]
+    assert [op["raw_path"] for op in operations if op["op"] == "raw_map_upsert"] == [
+        "raw/clip/2601/26010102_Routed.md"
+    ]
+    review_ops = [op for op in operations if op["op"] == "review_queue_add"]
+    assert review_ops == [
+        {
+            "op": "review_queue_add",
+            "raw_path": "raw/clip/2601/26010101_Ambiguous.md",
+            "title": "Ambiguous",
+            "reason": "missing_topic_hints",
+        }
+    ]
+    assert wiki_root_machine_pollution(root_a) == []
+
+
 def test_pending_lightrag_refresh_status_triggers_at_threshold(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "lightrag" / "state"
@@ -996,7 +1047,7 @@ def test_custom_kg_payload_includes_raw_section_chunks_and_relationships(tmp_pat
 
 
 def test_custom_kg_manifest_resolves_sources_and_dedupes_relationships(tmp_path: Path) -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, relation_vdb_id
+    from custom_kg_incremental import build_custom_kg_manifest, relation_vdb_id, stable_hash
 
     payload = {
         "chunks": [
@@ -1015,8 +1066,18 @@ def test_custom_kg_manifest_resolves_sources_and_dedupes_relationships(tmp_path:
     manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
 
     chunk_id = next(iter(manifest["chunks"]))
+    chunk = manifest["chunks"][chunk_id]
     assert manifest["source_to_chunk"]["doc:a"] == chunk_id
+    assert chunk["record_type"] == "chunk"
+    assert chunk["record_id"] == chunk_id
+    assert chunk["canonical_id"] == chunk_id
+    assert chunk["vector_text_hash"] == stable_hash(chunk["content"])
     assert manifest["entities"]["topic:x"]["source_chunk_id"] == chunk_id
+    topic = manifest["entities"]["topic:x"]
+    assert topic["record_type"] == "entity"
+    assert topic["record_id"] == topic["vdb_id"]
+    assert topic["canonical_id"] == "topic:x"
+    assert topic["vector_text_hash"] == stable_hash(topic["content"])
     assert "UNKNOWN" not in json.dumps(manifest, ensure_ascii=False)
     assert len(manifest["relationships"]) == 1
     rel = next(iter(manifest["relationships"].values()))
@@ -1024,6 +1085,10 @@ def test_custom_kg_manifest_resolves_sources_and_dedupes_relationships(tmp_path:
     assert rel["keywords"] == "NEW"
     assert rel["source_chunk_id"] == chunk_id
     assert rel["vdb_id"] == relation_vdb_id("topic:x", "doc:a")
+    assert rel["record_type"] == "relationship"
+    assert rel["record_id"] == rel["vdb_id"]
+    assert rel["canonical_id"] == rel["chunk_key"]
+    assert rel["vector_text_hash"] == stable_hash(rel["content"])
 
 
 def test_custom_kg_manifest_matches_lightrag_sanitized_chunk_ids_and_basenames() -> None:
@@ -1191,6 +1256,60 @@ def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -
     assert diff["relationships"]["update_ids"] == [rel_key]
     assert diff["relationships"]["metadata_update_ids"] == [rel_key]
     assert diff["relationships"]["vector_update_ids"] == []
+
+
+def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
+    from custom_kg_incremental import build_custom_kg_manifest
+
+    payload = {
+        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
+        "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "a.md"}],
+        "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
+    }
+
+    base = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
+    model_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1")
+    dim_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1")
+    params_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2")
+
+    entity_hash = next(iter(base["entities"].values()))["vector_hash"]
+    relationship_hash = next(iter(base["relationships"].values()))["vector_hash"]
+    chunk_hash = next(iter(base["chunks"].values()))["vector_hash"]
+
+    assert next(iter(model_changed["entities"].values()))["vector_hash"] != entity_hash
+    assert next(iter(dim_changed["relationships"].values()))["vector_hash"] != relationship_hash
+    assert next(iter(params_changed["chunks"].values()))["vector_hash"] != chunk_hash
+
+
+def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_contract() -> None:
+    from custom_kg_incremental import build_custom_kg_manifest
+
+    chunks = [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}]
+    old_manifest = build_custom_kg_manifest(
+        {
+            "chunks": chunks,
+            "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
+            "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
+        },
+        lightrag_version="1.5.0",
+        embedding_model="embed-a",
+        embedding_dim=3,
+        embedding_params_version="v1",
+    )
+    new_manifest = build_custom_kg_manifest(
+        {
+            "chunks": chunks,
+            "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "new.md"}],
+            "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "new.md"}],
+        },
+        lightrag_version="1.5.0",
+        embedding_model="embed-a",
+        embedding_dim=3,
+        embedding_params_version="v1",
+    )
+
+    assert next(iter(old_manifest["entities"].values()))["vector_hash"] == next(iter(new_manifest["entities"].values()))["vector_hash"]
+    assert next(iter(old_manifest["relationships"].values()))["vector_hash"] == next(iter(new_manifest["relationships"].values()))["vector_hash"]
 
 
 def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> None:
@@ -1717,6 +1836,110 @@ def test_batch_lightrag_refresh_uses_incremental_apply_when_plan_allows(tmp_path
     assert "--prepared-report" in calls[finalize_idx]
 
 
+def test_batch_lightrag_refresh_uses_full_materialization_for_scheduled_full_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    artifact_log = state / "refresh_logs" / "artifact.log"
+    import_log = state / "refresh_logs" / "import.log"
+    artifact_commands = [["artifact", str(idx)] for idx in range(7)]
+    cold_full_commands = [
+        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
+        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
+        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
+        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
+        ["python-internal", "health", "http://127.0.0.1:9621/health"],
+    ]
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_commands", lambda *_args: artifact_commands + cold_full_commands)
+    monkeypatch.setattr(
+        batch_lightrag_refresh,
+        "plan_incremental_import_mode",
+        lambda *_args, **_kwargs: {
+            "selected_mode": "full_rebuild",
+            "reasons": ["incremental_interval_reached"],
+            "diff": {},
+        },
+    )
+    monkeypatch.setattr(batch_lightrag_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
+    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
+    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
+
+    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+
+    assert result["import_mode"]["selected_mode"] == "full_rebuild"
+    assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
+    assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
+    prepare_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "materialize-full" in command)
+    stop_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "stop"])
+    finalize_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "finalize-prepared-swap" in command)
+    start_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "start"])
+    assert prepare_idx < stop_idx < finalize_idx < start_idx
+    prepare = calls[prepare_idx]
+    assert "--no-swap" in prepare
+    assert "--prepare-swap" in prepare
+    assert "--seed-from-storage" in prepare
+    assert "--vector-cache" in prepare
+    assert "--prepared-report" in calls[finalize_idx]
+
+
+def test_batch_lightrag_refresh_keeps_cold_full_import_for_unsafe_full_rebuild_reasons(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    cold_full_commands = [
+        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
+        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
+        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
+        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
+        ["python-internal", "health", "http://127.0.0.1:9621/health"],
+    ]
+
+    for reasons in (["missing_manifest"], ["current_storage_audit_failed"], ["embedding_model_changed"], ["embedding_dim_changed"]):
+        commands = batch_lightrag_refresh.select_import_commands(
+            root,
+            state,
+            workdir,
+            cold_full_commands,
+            {"selected_mode": "full_rebuild", "reasons": reasons},
+        )
+        assert commands == cold_full_commands
+
+
+def test_batch_lightrag_refresh_falls_back_to_cold_full_when_materialization_prepare_fails_before_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    artifact_log = state / "refresh_logs" / "artifact.log"
+    import_log = state / "refresh_logs" / "import.log"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        batch_lightrag_refresh,
+        "plan_incremental_import_mode",
+        lambda *_args, **_kwargs: {"selected_mode": "full_rebuild", "reasons": ["incremental_interval_reached"], "diff": {}},
+    )
+    monkeypatch.setattr(batch_lightrag_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
+    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
+    monkeypatch.setattr(batch_lightrag_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
+
+    def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
+        calls.append(command)
+        if "materialize-full" in command:
+            raise RuntimeError("cache miss before stop")
+
+    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+
+    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+
+    assert result["import_mode"]["full_materialization_fallback"] == "cold_full_import"
+    materialize_idx = next(idx for idx, command in enumerate(calls) if "materialize-full" in command)
+    reset_idx = next(idx for idx, command in enumerate(calls) if command[:2] == ["python-internal", "reset-rag-storage"])
+    import_idx = next(idx for idx, command in enumerate(calls) if "import_custom_kg.py" in " ".join(command))
+    assert materialize_idx < reset_idx < import_idx
+
+
 def test_batch_lightrag_refresh_skips_import_when_incremental_plan_has_empty_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "lightrag" / "state"
@@ -1807,6 +2030,131 @@ def test_build_section_similarity_edges_keeps_sparse_mutual_edges_and_excludes_s
     assert all(not {edge["src_id"], edge["tgt_id"]} == {"raw_section:a:future", "raw_section:a:limitations"} for edge in edges)
     assert all(edge["type"] == "SEMANTIC_SECTION_NEIGHBOR" for edge in edges)
     assert all(edge["mutual_knn"] for edge in edges)
+
+
+def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path) -> None:
+    from wiki_lightrag_lib import build_section_similarity_edges_from_index, section_similarity_index_summary
+
+    sections = [
+        {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
+        {"section_id": "raw_section:b:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "alpha peer"},
+        {"section_id": "raw_section:c:future", "source_id": "raw_clip:c", "source_path": "raw/clip/c.md", "paper_title": "C", "section_kind": "future", "section_title": "Future", "content": "other peer"},
+        {"section_id": "raw_section:d:questions", "source_id": "raw_clip:d", "source_path": "raw/clip/d.md", "paper_title": "D", "section_kind": "questions", "section_title": "Questions", "content": "question peer"},
+        {"section_id": "raw_section:e:questions", "source_id": "raw_clip:e", "source_path": "raw/clip/e.md", "paper_title": "E", "section_kind": "questions", "section_title": "Questions", "content": "question peer 2"},
+    ]
+    embeddings = {
+        "raw_section:a:future": [1.0, 0.0, 0.0],
+        "raw_section:b:future": [0.96, 0.28, 0.0],
+        "raw_section:c:future": [0.7, 0.714142842854285, 0.0],
+        "raw_section:d:questions": [1.0, 0.0, 0.0],
+        "raw_section:e:questions": [0.96, 0.28, 0.0],
+    }
+    index_path = tmp_path / "section_similarity_index.sqlite"
+
+    full_edges = build_section_similarity_edges(
+        sections,
+        embeddings,
+        same_kind_k=2,
+        cross_kind_k=1,
+        same_kind_min_cosine=0.7,
+        cross_kind_min_cosine=0.9,
+        cross_kind_pairs=[("future", "questions")],
+        mutual=True,
+        embedding_model="test-embedding",
+        embedding_dim=3,
+        index_path=index_path,
+    )
+    indexed_edges = build_section_similarity_edges_from_index(
+        index_path,
+        sections,
+        embeddings,
+        cross_kind_pairs=[("future", "questions")],
+        mutual=True,
+        embedding_model="test-embedding",
+        embedding_dim=3,
+    )
+
+    def comparable(edge: dict[str, object]) -> tuple[object, ...]:
+        return (
+            edge["edge_id"],
+            edge["src_id"],
+            edge["tgt_id"],
+            edge["pair_kind"],
+            edge["cosine"],
+            edge["source_rank"],
+            edge["target_rank"],
+        )
+
+    assert [comparable(edge) for edge in indexed_edges] == [comparable(edge) for edge in full_edges]
+    summary = section_similarity_index_summary(index_path)
+    assert summary["directed_rows"] >= len(full_edges)
+    assert summary["family_count"] >= 2
+
+
+def test_build_section_similarity_graph_writes_section_similarity_index_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import build_section_similarity_graph
+    from wiki_lightrag_lib import jsonl_read, section_similarity_index_summary
+
+    root = tmp_path / "wiki"
+    state = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    state.mkdir(parents=True)
+    workdir.mkdir(parents=True)
+    rows = [
+        {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
+        {"section_id": "raw_section:b:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "alpha peer"},
+    ]
+    write(state / "raw_sections.jsonl", "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+
+    monkeypatch.setattr(
+        build_section_similarity_graph,
+        "embedding_config",
+        lambda _workdir: {"model": "test-embedding", "embedding_dim": 3, "env": {}, "batch_size": 10},
+    )
+    monkeypatch.setattr(
+        build_section_similarity_graph,
+        "build_embedding_rows",
+        lambda rows_arg, config, cache_path, reuse_cache=True: (
+            [
+                {**rows_arg[0], "text_hash": "h-a", "embedding_model": config["model"], "embedding_dim": 3, "embedding": [1.0, 0.0, 0.0]},
+                {**rows_arg[1], "text_hash": "h-b", "embedding_model": config["model"], "embedding_dim": 3, "embedding": [1.0, 0.0, 0.0]},
+            ],
+            {"cache_hits": 0, "embedded": 2, "total": 2, "cache_path": cache_path.as_posix()},
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_section_similarity_graph.py",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--same-kind-k",
+            "1",
+            "--same-kind-min-cosine",
+            "0.9",
+            "--cross-kind-pairs",
+            "",
+            "--min-content-chars",
+            "1",
+            "--sample-edges",
+            "1",
+        ],
+    )
+
+    assert build_section_similarity_graph.main() == 0
+    index_path = state / "section_similarity_index.sqlite"
+    summary = section_similarity_index_summary(index_path)
+    assert summary["directed_rows"] == 2
+    reports = sorted((state / "section_similarity_reports").glob("*_section_similarity_report.json"))
+    assert reports
+    report = json.loads(reports[-1].read_text(encoding="utf-8"))
+    assert report["section_similarity_index"]["directed_rows"] == 2
+    assert len(jsonl_read(state / "section_similarity_edges.candidates.jsonl")) == 1
 
 
 def test_section_rank_lists_fast_matches_scalar_reference_on_boundary_fixture() -> None:
