@@ -27,6 +27,7 @@ def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.put_vector("native-test", "entity", "doc:b", "doc:b:vector", [0.0, 1.0])
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.8, {"kind": "related"})
+    db.mark_audited("native-test", {"chunks": 0, "entities": 2, "relationships": 0, "sections": 0}, require_vectors=True)
     engine = NativeQueryEngine(db)
 
     result = engine.query("native-test", "alpha query", [1.0, 0.0], mode="mix", top_k=1, record_types=("entity",), neighbor_limit=1)
@@ -39,12 +40,31 @@ def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None
     assert result["trace"]["vector_hit_count"] == 1
 
 
+def test_data_only_query_engine_rejects_building_workspace(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.put_record(_record("native-test", "entity", "doc:a", "Alpha"))
+    db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
+    engine = NativeQueryEngine(db)
+
+    with pytest.raises(ValueError, match="audited or active"):
+        engine.query("native-test", "alpha query", [1.0, 0.0], mode="mix", record_types=("entity",))
+
+
 def test_data_only_query_engine_rejects_unknown_mode(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     engine = NativeQueryEngine(db)
 
     with pytest.raises(ValueError, match="mode"):
         engine.query("native-test", "alpha query", [1.0], mode="unsupported")
+
+
+def test_data_only_query_engine_rejects_unimplemented_supported_mode(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    engine = NativeQueryEngine(db)
+
+    with pytest.raises(NotImplementedError, match="not implemented"):
+        engine.query("native-test", "alpha query", [1.0], mode="local")
 
 
 def test_data_only_query_engine_rejects_unknown_record_type(tmp_path) -> None:

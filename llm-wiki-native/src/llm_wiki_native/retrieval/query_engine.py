@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_wiki_native.contracts import RECORD_TYPES, SUPPORTED_QUERY_MODES
+from llm_wiki_native.contracts import IMPLEMENTED_QUERY_MODES, RECORD_TYPES, SUPPORTED_QUERY_MODES
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 
 
@@ -30,9 +30,14 @@ class NativeQueryEngine:
     ) -> dict[str, Any]:
         if mode not in SUPPORTED_QUERY_MODES:
             raise ValueError(f"unsupported mode: {mode}")
+        if mode not in IMPLEMENTED_QUERY_MODES:
+            raise NotImplementedError(f"native query mode is not implemented yet: {mode}")
         unknown_record_types = [record_type for record_type in record_types if record_type not in RECORD_TYPES]
         if unknown_record_types:
             raise ValueError(f"unsupported record_type: {unknown_record_types[0]}")
+        status = self.db.get_workspace_status(workspace_id)
+        if status not in {"audited", "active"}:
+            raise ValueError(f"workspace must be audited or active before query: {workspace_id} status={status}")
         vector_hits: list[dict[str, Any]] = []
         for record_type in record_types:
             vector_hits.extend(self.db.nearest_vectors(workspace_id, record_type, query_vector, top_k))

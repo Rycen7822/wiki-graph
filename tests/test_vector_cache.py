@@ -210,6 +210,39 @@ def test_seed_vector_cache_uses_bulk_cache_write(tmp_path, monkeypatch) -> None:
     assert resolved["summary"]["total"] == {"total": 10, "hits": 10, "misses": 0}
 
 
+def test_seed_vector_cache_skips_storage_vectors_when_previous_vector_hash_differs(tmp_path) -> None:
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    (storage_dir / "vdb_chunks.json").write_text(json.dumps({"embedding_dim": 2, "data": [{"__id__": "chunk-a", "vector": [1.0, 2.0]}], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_entities.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_relationships.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
+    previous_manifest = {
+        "chunks": {
+            "chunk-a": {
+                "record_type": "chunk",
+                "record_id": "chunk-a",
+                "canonical_id": "chunk-a",
+                "vector_hash": "old-vector-hash",
+                "embedding_model": "embed-a",
+                "embedding_dim": 2,
+                "embedding_params_version": "v1",
+            }
+        },
+        "entities": {},
+        "relationships": {},
+    }
+    desired_manifest = json.loads(json.dumps(previous_manifest))
+    desired_manifest["chunks"]["chunk-a"]["vector_hash"] = "new-vector-hash"
+    cache = VectorCache(tmp_path / "cache.sqlite")
+
+    seed = seed_vector_cache_from_storage(desired_manifest, storage_dir, cache, previous_manifest=previous_manifest)
+    resolved = resolve_manifest_vectors(desired_manifest, cache)
+
+    assert seed["summary"]["total"] == {"total": 1, "seeded": 0, "missing": 1}
+    assert seed["skipped_vector_hash_mismatch"]["chunks"] == ["chunk-a"]
+    assert resolved["summary"]["total"] == {"total": 1, "hits": 0, "misses": 1}
+
+
 def test_seed_vector_cache_decodes_nanovectordb_compressed_float16_vectors(tmp_path) -> None:
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir()

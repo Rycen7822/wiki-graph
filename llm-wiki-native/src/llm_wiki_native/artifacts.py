@@ -40,3 +40,7 @@ def load_section_similarity_edges(state_dir: Path) -> list[dict[str, Any]]:
 
 def load_raw_sections(state_dir: Path) -> list[dict[str, Any]]:
     return _read_jsonl(Path(state_dir) / "raw_sections.jsonl")
+
+
+def load_section_embeddings(state_dir: Path) -> list[dict[str, Any]]:
+    return _read_jsonl(Path(state_dir) / "section_embeddings.jsonl")

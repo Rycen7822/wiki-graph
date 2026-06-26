@@ -23,10 +23,9 @@ from custom_kg_incremental import (
     _chunk_storage_record,
     _entity_graph_data,
     _entity_vdb_data,
-    _relationship_graph_data,
+    _relationship_graph_edge_upserts,
     _relationship_vdb_data,
     _tracking_from_manifest,
-    split_relation_chunk_key,
 )
 
 
@@ -99,14 +98,16 @@ def materialize_file_storage_from_manifest(
 
     relationship_vdb: list[dict[str, Any]] = []
     relationship_vectors: list[list[float]] = []
+    relationship_graph_records: list[dict[str, Any]] = []
     for rel_key, record in manifest.get("relationships", {}).items():
-        src, tgt = split_relation_chunk_key(rel_key)
-        graph.add_edge(src, tgt, **_relationship_graph_data(record))
         stored = {"__id__": record["vdb_id"], **_relationship_vdb_data(record)}
         vector = _resolved_vector(resolved_vectors, "relationships", rel_key)
         stored["vector"] = vector
         relationship_vectors.append(vector)
         relationship_vdb.append(stored)
+        relationship_graph_records.append(record)
+    for src, tgt, data in _relationship_graph_edge_upserts(relationship_graph_records):
+        graph.add_edge(src, tgt, **data)
 
     entity_tracking, relation_tracking = _tracking_from_manifest(manifest)
     _write_json(storage_dir / "vdb_chunks.json", _vdb_payload(chunk_vdb, embedding_dim, chunk_vectors))
