@@ -16,6 +16,9 @@ def test_native_contract_constants_are_minimal_and_shadow_safe() -> None:
     assert NATIVE_SCHEMA_VERSION == 1
     assert DEFAULT_NATIVE_PORT == 9622
     assert SUPPORTED_QUERY_MODES == {"local", "global", "hybrid", "naive", "mix", "bypass"}
+    from llm_wiki_native.contracts import IMPLEMENTED_QUERY_MODES
+
+    assert IMPLEMENTED_QUERY_MODES == {"mix"}
     assert RECORD_TYPES == {"chunk", "entity", "relationship", "section"}
 
 

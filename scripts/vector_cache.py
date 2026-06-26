@@ -338,26 +338,52 @@ def _decode_encoded_storage_vector(value: str, embedding_dim: int) -> list[float
     return None
 
 
-def seed_vector_cache_from_storage(manifest: dict[str, Any], storage_dir: Path, cache: VectorCache) -> dict[str, Any]:
-    """Seed ``cache`` from explicit vector fields in LightRAG file-backend VDB JSON."""
+def seed_vector_cache_from_storage(
+    manifest: dict[str, Any],
+    storage_dir: Path,
+    cache: VectorCache,
+    *,
+    previous_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Seed ``cache`` from explicit vector fields in LightRAG file-backend VDB JSON.
+
+    When ``previous_manifest`` is provided, a storage vector may only satisfy a
+    desired record whose vector hash matches the previous successful manifest.
+    This prevents record-id-stable vector updates from being mislabeled as fresh
+    desired vectors.
+    """
 
     storage_dir = Path(storage_dir)
     summary: dict[str, dict[str, int]] = {}
     missing: dict[str, list[str]] = {}
+    skipped_vector_hash_mismatch: dict[str, list[str]] = {}
     cache_records: list[dict[str, Any]] = []
     for collection, filename in _STORAGE_VDB_FILES.items():
         records = manifest.get(collection, {})
         if not isinstance(records, dict):
             records = {}
         storage_records = _load_storage_vdb_records(storage_dir / filename)
+        previous_records = previous_manifest.get(collection, {}) if isinstance(previous_manifest, dict) else {}
+        if not isinstance(previous_records, dict):
+            previous_records = {}
         collection_summary = {"total": 0, "seeded": 0, "missing": 0}
         collection_missing: list[str] = []
+        collection_skipped_hash_mismatch: list[str] = []
         for key in sorted(records):
             record = records[key]
             collection_summary["total"] += 1
             if not isinstance(record, dict):
                 collection_summary["missing"] += 1
                 collection_missing.append(str(key))
+                continue
+            previous_record = previous_records.get(key) if previous_manifest is not None else None
+            if previous_manifest is not None and (
+                not isinstance(previous_record, dict)
+                or str(previous_record.get("vector_hash")) != str(record.get("vector_hash"))
+            ):
+                collection_summary["missing"] += 1
+                collection_missing.append(str(key))
+                collection_skipped_hash_mismatch.append(str(key))
                 continue
             embedding_dim = record.get("embedding_dim")
             vector = _vector_from_storage_record(
@@ -390,10 +416,16 @@ def seed_vector_cache_from_storage(manifest: dict[str, Any], storage_dir: Path, 
             collection_summary["seeded"] += 1
         summary[collection] = collection_summary
         missing[collection] = collection_missing
+        skipped_vector_hash_mismatch[collection] = collection_skipped_hash_mismatch
     cache.put_many(cache_records)
     summary["total"] = {
         "total": sum(item["total"] for key, item in summary.items() if key != "total"),
         "seeded": sum(item["seeded"] for key, item in summary.items() if key != "total"),
         "missing": sum(item["missing"] for key, item in summary.items() if key != "total"),
     }
-    return {"storage_dir": str(storage_dir), "summary": summary, "missing": missing}
+    return {
+        "storage_dir": str(storage_dir),
+        "summary": summary,
+        "missing": missing,
+        "skipped_vector_hash_mismatch": skipped_vector_hash_mismatch,
+    }

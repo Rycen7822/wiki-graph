@@ -1046,7 +1046,7 @@ def test_custom_kg_payload_includes_raw_section_chunks_and_relationships(tmp_pat
     assert any(rel["keywords"] == "RAW_SECTION_OF" and rel["tgt_id"] == "raw_clip:26010101_Foo-Paper" for rel in payload["relationships"])
 
 
-def test_custom_kg_manifest_resolves_sources_and_dedupes_relationships(tmp_path: Path) -> None:
+def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(tmp_path: Path) -> None:
     from custom_kg_incremental import build_custom_kg_manifest, relation_vdb_id, stable_hash
 
     payload = {
@@ -1079,16 +1079,24 @@ def test_custom_kg_manifest_resolves_sources_and_dedupes_relationships(tmp_path:
     assert topic["canonical_id"] == "topic:x"
     assert topic["vector_text_hash"] == stable_hash(topic["content"])
     assert "UNKNOWN" not in json.dumps(manifest, ensure_ascii=False)
-    assert len(manifest["relationships"]) == 1
-    rel = next(iter(manifest["relationships"].values()))
-    assert rel["description"] == "new"
-    assert rel["keywords"] == "NEW"
-    assert rel["source_chunk_id"] == chunk_id
-    assert rel["vdb_id"] == relation_vdb_id("topic:x", "doc:a")
-    assert rel["record_type"] == "relationship"
-    assert rel["record_id"] == rel["vdb_id"]
-    assert rel["canonical_id"] == rel["chunk_key"]
-    assert rel["vector_text_hash"] == stable_hash(rel["content"])
+    assert len(manifest["relationships"]) == 2
+    rels_by_keyword = {record["keywords"]: record for record in manifest["relationships"].values()}
+    assert set(rels_by_keyword) == {"OLD", "NEW"}
+    old_rel = rels_by_keyword["OLD"]
+    new_rel = rels_by_keyword["NEW"]
+    assert old_rel["description"] == "old"
+    assert old_rel["src_id"] == "topic:x"
+    assert old_rel["tgt_id"] == "doc:a"
+    assert old_rel["vdb_id"] == relation_vdb_id("topic:x", "doc:a", "OLD")
+    assert new_rel["description"] == "new"
+    assert new_rel["src_id"] == "doc:a"
+    assert new_rel["tgt_id"] == "topic:x"
+    assert new_rel["source_chunk_id"] == chunk_id
+    assert new_rel["vdb_id"] == relation_vdb_id("doc:a", "topic:x", "NEW")
+    assert new_rel["record_type"] == "relationship"
+    assert new_rel["record_id"] == new_rel["vdb_id"]
+    assert new_rel["canonical_id"] == new_rel["chunk_key"]
+    assert new_rel["vector_text_hash"] == stable_hash(new_rel["content"])
 
 
 def test_custom_kg_manifest_matches_lightrag_sanitized_chunk_ids_and_basenames() -> None:
@@ -1227,7 +1235,7 @@ def test_tracking_diff_identifies_entity_and_relationship_tracking_deltas() -> N
 
 
 def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relation_chunk_key
+    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relationship_record_key
 
     chunks = [
         {"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
@@ -1248,7 +1256,7 @@ def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -
         build_custom_kg_manifest(old_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
         build_custom_kg_manifest(new_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
     )
-    rel_key = relation_chunk_key("doc:a", "topic:x")
+    rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
 
     assert diff["entities"]["update_ids"] == ["topic:x"]
     assert diff["entities"]["metadata_update_ids"] == ["topic:x"]
@@ -1313,7 +1321,7 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
 
 
 def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relation_chunk_key
+    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relationship_record_key
 
     chunks = [
         {"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
@@ -1339,7 +1347,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
         embedding_model="test",
         embedding_dim=3,
     )
-    rel_key = relation_chunk_key("doc:a", "topic:x")
+    rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
     for collection in ("entities", "relationships"):
         for record in old_manifest[collection].values():
             record.pop("vector_hash", None)
@@ -1475,6 +1483,121 @@ def test_incremental_apply_patches_metadata_only_relationship_without_reembeddin
     assert rel_record["vector"] == "PRESERVED_VECTOR"
     assert rel_record["source_id"] == desired_rel["source_chunk_id"]
     assert rel_record["file_path"] == "new.md"
+
+
+def test_incremental_apply_rebuilds_graph_pair_when_one_typed_relationship_is_deleted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import asyncio
+    import custom_kg_incremental
+    import import_custom_kg
+
+    class FakeVDB:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+            self.upserted: list[dict[str, dict[str, object]]] = []
+
+        async def delete(self, ids: list[str]) -> None:
+            self.deleted.extend(ids)
+
+        async def upsert(self, data: dict[str, dict[str, object]]) -> None:
+            self.upserted.append(data)
+
+    class FakeKV:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+            self.upserted: list[dict[str, object]] = []
+            self.dropped = False
+
+        async def delete(self, ids: list[str]) -> None:
+            self.deleted.extend(ids)
+
+        async def upsert(self, records: dict[str, object]) -> None:
+            self.upserted.append(records)
+
+        async def drop(self) -> None:
+            self.dropped = True
+
+    class FakeGraph:
+        def __init__(self) -> None:
+            self.removed_edges: list[tuple[str, str]] = []
+            self.upserted_edges: list[tuple[str, str, dict[str, object]]] = []
+
+        async def remove_edges(self, edges: list[tuple[str, str]]) -> None:
+            self.removed_edges.extend(edges)
+
+        async def remove_nodes(self, _nodes: list[str]) -> None:
+            pass
+
+        async def upsert_nodes_batch(self, _nodes: list[tuple[str, dict[str, object]]]) -> None:
+            pass
+
+        async def upsert_edges_batch(self, edges: list[tuple[str, str, dict[str, object]]]) -> None:
+            self.upserted_edges.extend(edges)
+
+    chunks = [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}]
+    entities = [
+        {"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
+        {"entity_name": "topic:x", "entity_type": "TOPIC", "description": "Topic X", "source_id": "doc:a", "file_path": "a.md"},
+    ]
+    old_manifest = custom_kg_incremental.build_custom_kg_manifest(
+        {
+            "chunks": chunks,
+            "entities": entities,
+            "relationships": [
+                {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "file_path": "a.md"},
+                {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic sourced by doc", "keywords": "SOURCED_BY", "source_id": "doc:a", "file_path": "a.md"},
+            ],
+        },
+        lightrag_version="1.5.0",
+        embedding_model="test",
+        embedding_dim=3,
+    )
+    desired_manifest = custom_kg_incremental.build_custom_kg_manifest(
+        {
+            "chunks": chunks,
+            "entities": entities,
+            "relationships": [
+                {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "file_path": "a.md"},
+            ],
+        },
+        lightrag_version="1.5.0",
+        embedding_model="test",
+        embedding_dim=3,
+    )
+    removed_key = next(key for key, record in old_manifest["relationships"].items() if record["keywords"] == "SOURCED_BY")
+    removed_rel = old_manifest["relationships"][removed_key]
+    remaining_rel = next(iter(desired_manifest["relationships"].values()))
+
+    fake_rag = types.SimpleNamespace(
+        chunk_entity_relation_graph=FakeGraph(),
+        relationships_vdb=FakeVDB(),
+        entities_vdb=FakeVDB(),
+        chunks_vdb=FakeVDB(),
+        text_chunks=FakeKV(),
+        entity_chunks=FakeKV(),
+        relation_chunks=FakeKV(),
+    )
+
+    async def initialize_storages() -> None:
+        pass
+
+    async def insert_done() -> None:
+        pass
+
+    async def finalize_storages() -> None:
+        pass
+
+    fake_rag.initialize_storages = initialize_storages
+    fake_rag._insert_done = insert_done
+    fake_rag.finalize_storages = finalize_storages
+    monkeypatch.setattr(import_custom_kg, "build_rag", lambda *_args, **_kwargs: fake_rag)
+
+    diff = asyncio.run(custom_kg_incremental.apply_patch_to_storage(tmp_path, old_manifest, desired_manifest, workdir=tmp_path, tracking_update_mode="delta"))
+
+    assert diff["relationships"]["delete_ids"] == [removed_key]
+    assert removed_rel["vdb_id"] in fake_rag.relationships_vdb.deleted
+    assert fake_rag.chunk_entity_relation_graph.removed_edges == [("topic:x", "doc:a")]
+    assert fake_rag.chunk_entity_relation_graph.upserted_edges[-1][0:2] == (remaining_rel["src_id"], remaining_rel["tgt_id"])
+    assert fake_rag.chunk_entity_relation_graph.upserted_edges[-1][2]["keywords"] == remaining_rel["keywords"]
 
 
 def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incrementals() -> None:

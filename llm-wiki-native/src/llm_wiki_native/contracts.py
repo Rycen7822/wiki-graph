@@ -5,4 +5,5 @@ from __future__ import annotations
 NATIVE_SCHEMA_VERSION = 1
 DEFAULT_NATIVE_PORT = 9622
 SUPPORTED_QUERY_MODES = {"local", "global", "hybrid", "naive", "mix", "bypass"}
+IMPLEMENTED_QUERY_MODES = {"mix"}
 RECORD_TYPES = {"chunk", "entity", "relationship", "section"}

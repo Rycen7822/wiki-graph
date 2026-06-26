@@ -29,12 +29,31 @@ def test_graph_index_filters_edge_types_and_limits_results(tmp_path) -> None:
     assert [(item["neighbor_id"], item["edge_type"]) for item in results] == [("tag:x", "relationship")]
 
 
-def test_graph_index_deduplicates_reverse_undirected_edges(tmp_path) -> None:
+def test_graph_index_preserves_reverse_directed_edges(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.7, {"source": "forward"})
     db.put_edge("native-test", "relationship", "tag:x", "doc:a", 0.8, {"source": "reverse"})
 
+    assert db.count_edges("native-test") == 2
     results = db.neighbors("native-test", "doc:a")
 
-    assert [(item["neighbor_id"], item["weight"], item["payload"]["source"]) for item in results] == [("tag:x", 0.8, "reverse")]
+    assert [
+        (item["src_id"], item["tgt_id"], item["neighbor_id"], item["weight"], item["payload"]["source"])
+        for item in results
+    ] == [
+        ("tag:x", "doc:a", "tag:x", 0.8, "reverse"),
+        ("doc:a", "tag:x", "tag:x", 0.7, "forward"),
+    ]
+
+
+def test_sqlite_workspace_enables_pragmas_and_neighbor_indexes(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+
+    with db._connect() as conn:
+        assert int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) == 1
+        assert int(conn.execute("PRAGMA busy_timeout").fetchone()[0]) >= 5000
+        assert str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+        indexes = {str(row["name"]) for row in conn.execute("PRAGMA index_list('edge')").fetchall()}
+
+    assert {"idx_edge_workspace_src", "idx_edge_workspace_tgt"}.issubset(indexes)

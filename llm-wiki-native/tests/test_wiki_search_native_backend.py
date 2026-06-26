@@ -31,6 +31,7 @@ def test_wiki_search_native_backend_is_explicit_and_default_off(tmp_path) -> Non
         )
     )
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
+    db.mark_audited("native-test", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
     args = SimpleNamespace(
         backend="native",
         native_db=db_path,

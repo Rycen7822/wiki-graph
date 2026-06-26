@@ -75,12 +75,30 @@ def entity_vdb_id(entity_name: str) -> str:
     return compute_mdhash_id(entity_name, prefix="ent-")
 
 
-def relation_vdb_id(src_id: str, tgt_id: str) -> str:
-    normalized_src, normalized_tgt = sorted((src_id, tgt_id))
-    return compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")
+def _relation_key_part(value: Any, *, field: str) -> str:
+    text = str(value)
+    if GRAPH_FIELD_SEP in text:
+        raise ValueError(f"relationship {field} contains reserved separator {GRAPH_FIELD_SEP!r}: {text}")
+    return text
 
 
-def relation_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
+def relation_vdb_id(src_id: str, tgt_id: str, keywords: str | None = None) -> str:
+    if keywords is None:
+        normalized_src, normalized_tgt = sorted((src_id, tgt_id))
+        return compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")
+    return compute_mdhash_id(
+        GRAPH_FIELD_SEP.join(
+            [
+                _relation_key_part(src_id, field="src_id"),
+                _relation_key_part(tgt_id, field="tgt_id"),
+                _relation_key_part(keywords, field="keywords"),
+            ]
+        ),
+        prefix="rel-",
+    )
+
+
+def legacy_relation_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
     normalized_src, normalized_tgt = sorted((src_id, tgt_id))
     ids = [compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")]
     reverse = compute_mdhash_id(normalized_tgt + normalized_src, prefix="rel-")
@@ -89,13 +107,42 @@ def relation_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
     return ids
 
 
+def relation_vdb_ids(src_id: str, tgt_id: str, keywords: str | None = None) -> list[str]:
+    ids: list[str] = []
+    if keywords is not None:
+        ids.append(relation_vdb_id(src_id, tgt_id, keywords))
+    for legacy_id in legacy_relation_vdb_ids(src_id, tgt_id):
+        if legacy_id not in ids:
+            ids.append(legacy_id)
+    return ids
+
+
 def relation_chunk_key(src_id: str, tgt_id: str) -> str:
+    """Compatibility graph/storage pair key for LightRAG's one-edge-per-pair graph."""
+
     return GRAPH_FIELD_SEP.join(sorted((src_id, tgt_id)))
+
+
+def relationship_record_key(src_id: str, tgt_id: str, keywords: str) -> str:
+    """Manifest key for a typed, directed relationship record.
+
+    LightRAG's GraphML edge layer is still one undirected edge per endpoint pair,
+    but VDB records and relation chunk tracking must preserve distinct relation
+    semantics so typed edges do not silent-last-win collapse.
+    """
+
+    return GRAPH_FIELD_SEP.join(
+        [
+            _relation_key_part(src_id, field="src_id"),
+            _relation_key_part(tgt_id, field="tgt_id"),
+            _relation_key_part(keywords, field="keywords"),
+        ]
+    )
 
 
 def split_relation_chunk_key(key: str) -> tuple[str, str]:
     parts = key.split(GRAPH_FIELD_SEP)
-    if len(parts) != 2:
+    if len(parts) < 2:
         raise ValueError(f"Invalid relation key: {key}")
     return parts[0], parts[1]
 
@@ -394,7 +441,8 @@ def build_custom_kg_manifest(
     for relationship_data in payload.get("relationships", []):
         src_id = str(relationship_data["src_id"])
         tgt_id = str(relationship_data["tgt_id"])
-        key = relation_chunk_key(src_id, tgt_id)
+        keywords = str(relationship_data["keywords"])
+        key = relationship_record_key(src_id, tgt_id, keywords)
         deduped_relationships.pop(key, None)
         deduped_relationships[key] = relationship_data
 
@@ -407,7 +455,7 @@ def build_custom_kg_manifest(
         keywords = str(relationship_data["keywords"])
         file_path = lightrag_normalize_file_path(relationship_data.get("file_path", "custom_kg"))
         weight = relationship_data.get("weight", 1.0)
-        vdb_id = relation_vdb_id(src_id, tgt_id)
+        vdb_id = relation_vdb_id(src_id, tgt_id, keywords)
         record = {
             "record_type": "relationship",
             "rel_key": [src_id, tgt_id],
@@ -493,6 +541,30 @@ def diff_custom_kg_manifests(old_manifest: dict[str, Any], new_manifest: dict[st
         "entities": _diff_collection(old_manifest.get("entities", {}), new_manifest.get("entities", {})),
         "relationships": _diff_collection(old_manifest.get("relationships", {}), new_manifest.get("relationships", {})),
     }
+
+
+def full_materialization_cache_only_blockers(previous_manifest: dict[str, Any] | None, desired_manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return diff counts that make cache-only full materialization unsafe.
+
+    The current materialize-full path only assembles storage from already-resolved
+    vectors; it has no embedding-fill phase. If desired adds vector records or
+    changes vector text/contract, the caller must choose cold import or a future
+    explicit embedding-fill path instead of relying on cache-only assembly.
+    """
+
+    if previous_manifest is None:
+        return {"blocked": False, "total": 0, "collections": {}, "diff": None}
+    diff = diff_custom_kg_manifests(previous_manifest, desired_manifest)
+    collections: dict[str, dict[str, int]] = {}
+    total = 0
+    for collection in ("chunks", "entities", "relationships"):
+        item = diff[collection]
+        add = int(item.get("add", 0) or 0)
+        vector_update = int(item.get("vector_update", 0) or 0)
+        if add or vector_update:
+            collections[collection] = {"add": add, "vector_update": vector_update}
+            total += add + vector_update
+    return {"blocked": total > 0, "total": total, "collections": collections, "diff": diff}
 
 
 def choose_refresh_mode(
@@ -678,6 +750,11 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
         )
 
     rel_pairs_to_ids: dict[str, list[str]] = {}
+    manifest_relationship_vdb_ids = {
+        str(record.get("vdb_id"))
+        for record in (manifest or {}).get("relationships", {}).values()
+        if isinstance(record, dict) and record.get("vdb_id")
+    }
     for record_id, record in vdb_relationships.items():
         src = record.get("src_id")
         tgt = record.get("tgt_id")
@@ -686,13 +763,11 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
             continue
         pair = relation_chunk_key(str(src), str(tgt))
         rel_pairs_to_ids.setdefault(pair, []).append(record_id)
-        canonical_id = relation_vdb_id(str(src), str(tgt))
-        if record_id != canonical_id:
-            _append_issue(issues, "legacy_or_noncanonical_relationship_id", record_id=record_id, canonical_id=canonical_id, pair=pair)
+        keywords = str(record.get("keywords")) if record.get("keywords") not in (None, "") else None
+        accepted_ids = set(relation_vdb_ids(str(src), str(tgt), keywords)) | manifest_relationship_vdb_ids
+        if record_id not in accepted_ids:
+            _append_issue(issues, "legacy_or_noncanonical_relationship_id", record_id=record_id, accepted=sorted(accepted_ids)[:max_samples], pair=pair)
     rel_pairs = set(rel_pairs_to_ids)
-    for pair, ids in rel_pairs_to_ids.items():
-        if len(ids) > 1:
-            _append_issue(issues, "duplicate_relationship_pair", pair=pair, ids=ids[:max_samples])
     if graph_pairs != rel_pairs:
         _append_issue(
             issues,
@@ -738,12 +813,19 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
             extra=sorted(set(actual_entity_tracking) - set(expected_entity_tracking))[:max_samples],
         )
 
-    expected_relation_tracking: dict[str, dict[str, Any]] = {}
-    for src, tgt, data in graph.edges(data=True):
-        chunk_list = split_source_ids(data.get("source_id"))
-        if chunk_list:
-            key = relation_chunk_key(str(src), str(tgt))
-            expected_relation_tracking[key] = {"chunk_ids": chunk_list, "count": len(chunk_list)}
+    if manifest is not None:
+        expected_relation_tracking = {
+            key: {"chunk_ids": [record["source_chunk_id"]], "count": 1}
+            for key, record in manifest.get("relationships", {}).items()
+            if record.get("source_chunk_id") not in (None, "", "UNKNOWN")
+        }
+    else:
+        expected_relation_tracking = {}
+        for src, tgt, data in graph.edges(data=True):
+            chunk_list = split_source_ids(data.get("source_id"))
+            if chunk_list:
+                key = relation_chunk_key(str(src), str(tgt))
+                expected_relation_tracking[key] = {"chunk_ids": chunk_list, "count": len(chunk_list)}
     actual_relation_tracking = {key: _normal_tracking(value) for key, value in relation_chunks.items()}
     if expected_relation_tracking != actual_relation_tracking:
         _append_issue(
@@ -758,7 +840,7 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
     if manifest is not None:
         desired_chunks = set(manifest.get("chunks", {}))
         desired_entities = set(manifest.get("entities", {}))
-        desired_relationships = set(manifest.get("relationships", {}))
+        desired_relationships = manifest.get("relationships", {})
         if desired_chunks != chunk_ids or desired_chunks != text_chunk_ids:
             _append_issue(
                 issues,
@@ -779,15 +861,43 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
                 missing=sorted(desired_entities - graph_nodes)[:max_samples],
                 extra=sorted(graph_nodes - desired_entities)[:max_samples],
             )
-        if desired_relationships != graph_pairs or desired_relationships != rel_pairs:
+        desired_relationship_keys = set(desired_relationships)
+        desired_relationship_pairs = {
+            relation_chunk_key(str(record["src_id"]), str(record["tgt_id"]))
+            for record in desired_relationships.values()
+        }
+        desired_relationship_vdb_ids = {str(record["vdb_id"]) for record in desired_relationships.values()}
+        actual_relation_chunk_keys = set(relation_chunks)
+        actual_relationship_vdb_ids = set(vdb_relationships)
+        if desired_relationship_pairs != graph_pairs or desired_relationship_pairs != rel_pairs:
             _append_issue(
                 issues,
-                "desired_relationship_mismatch",
-                desired=len(desired_relationships),
+                "desired_relationship_pair_mismatch",
+                desired=len(desired_relationship_pairs),
                 graph=len(graph_pairs),
-                vdb=len(rel_pairs),
-                missing=sorted(desired_relationships - graph_pairs)[:max_samples],
-                extra=sorted(graph_pairs - desired_relationships)[:max_samples],
+                vdb_pairs=len(rel_pairs),
+                missing_graph=sorted(desired_relationship_pairs - graph_pairs)[:max_samples],
+                extra_graph=sorted(graph_pairs - desired_relationship_pairs)[:max_samples],
+                missing_vdb_pairs=sorted(desired_relationship_pairs - rel_pairs)[:max_samples],
+                extra_vdb_pairs=sorted(rel_pairs - desired_relationship_pairs)[:max_samples],
+            )
+        if desired_relationship_keys != actual_relation_chunk_keys:
+            _append_issue(
+                issues,
+                "desired_relationship_chunk_mismatch",
+                desired=len(desired_relationship_keys),
+                relation_chunks=len(actual_relation_chunk_keys),
+                missing=sorted(desired_relationship_keys - actual_relation_chunk_keys)[:max_samples],
+                extra=sorted(actual_relation_chunk_keys - desired_relationship_keys)[:max_samples],
+            )
+        if desired_relationship_vdb_ids != actual_relationship_vdb_ids:
+            _append_issue(
+                issues,
+                "desired_relationship_vdb_mismatch",
+                desired=len(desired_relationship_vdb_ids),
+                vdb=len(actual_relationship_vdb_ids),
+                missing=sorted(desired_relationship_vdb_ids - actual_relationship_vdb_ids)[:max_samples],
+                extra=sorted(actual_relationship_vdb_ids - desired_relationship_vdb_ids)[:max_samples],
             )
         for name, entity in manifest.get("entities", {}).items():
             source_chunk = entity.get("source_chunk_id")
@@ -811,7 +921,7 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
         "vdb_chunks": len(chunk_ids),
         "text_chunks": len(text_chunk_ids),
         "vdb_entities": len(entity_names),
-        "vdb_relationships": len(rel_pairs),
+        "vdb_relationships": len(vdb_relationships),
         "entity_chunks": len(entity_chunks),
         "relation_chunks": len(relation_chunks),
         "isolates": len(list(nx.isolates(graph))),
@@ -867,6 +977,41 @@ def _relationship_graph_data(record: dict[str, Any]) -> dict[str, Any]:
         "file_path": record.get("file_path", "custom_kg"),
         "created_at": int(time.time()),
     }
+
+
+def _relationship_pair(record: dict[str, Any]) -> str:
+    return relation_chunk_key(str(record["src_id"]), str(record["tgt_id"]))
+
+
+def _aggregate_relationship_graph_data(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        raise ValueError("cannot aggregate empty relationship record list")
+    if len(records) == 1:
+        return _relationship_graph_data(records[0])
+    ordered = sorted(records, key=lambda record: str(record.get("chunk_key") or relationship_record_key(record["src_id"], record["tgt_id"], record["keywords"])))
+    source_ids = sorted({str(record.get("source_chunk_id")) for record in ordered if record.get("source_chunk_id") not in (None, "", "UNKNOWN")})
+    keywords = sorted({str(record.get("keywords", "")) for record in ordered if record.get("keywords")})
+    file_paths = sorted({str(record.get("file_path", "custom_kg")) for record in ordered if record.get("file_path")})
+    return {
+        "weight": max(float(record.get("weight", 1.0)) for record in ordered),
+        "description": "\n".join(str(record["description"]) for record in ordered),
+        "keywords": GRAPH_FIELD_SEP.join(keywords),
+        "source_id": GRAPH_FIELD_SEP.join(source_ids) if source_ids else "UNKNOWN",
+        "file_path": GRAPH_FIELD_SEP.join(file_paths) if file_paths else "custom_kg",
+        "created_at": int(time.time()),
+    }
+
+
+def _relationship_graph_edge_upserts(records: list[dict[str, Any]]) -> list[tuple[str, str, dict[str, Any]]]:
+    by_pair: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_pair.setdefault(_relationship_pair(record), []).append(record)
+    upserts: list[tuple[str, str, dict[str, Any]]] = []
+    for pair in sorted(by_pair):
+        records_for_pair = by_pair[pair]
+        anchor = sorted(records_for_pair, key=lambda record: str(record.get("chunk_key") or relationship_record_key(record["src_id"], record["tgt_id"], record["keywords"])))[0]
+        upserts.append((str(anchor["src_id"]), str(anchor["tgt_id"]), _aggregate_relationship_graph_data(records_for_pair)))
+    return upserts
 
 
 def _relationship_vdb_data(record: dict[str, Any]) -> dict[str, Any]:
@@ -983,9 +1128,21 @@ async def apply_patch_to_storage(
         rel_vector_update_ids = set(diff["relationships"].get("vector_update_ids", diff["relationships"]["update_ids"]))
         rel_metadata_update_ids = set(diff["relationships"].get("metadata_update_ids", [])) - rel_vector_update_ids
         rels_to_remove = sorted(set(diff["relationships"]["delete_ids"]) | rel_vector_update_ids)
+        affected_relationship_pairs: set[str] = set()
+        for key in rels_to_remove:
+            if key in old_rels:
+                affected_relationship_pairs.add(_relationship_pair(old_rels[key]))
         if rels_to_remove:
             await rag.chunk_entity_relation_graph.remove_edges([tuple(old_rels[key]["rel_key"]) for key in rels_to_remove if key in old_rels])
-            delete_rel_vdb_ids = sorted({rel_id for key in rels_to_remove if key in old_rels for rel_id in relation_vdb_ids(old_rels[key]["src_id"], old_rels[key]["tgt_id"])})
+            delete_rel_vdb_ids = sorted(
+                {
+                    rel_id
+                    for key in rels_to_remove
+                    if key in old_rels
+                    for rel_id in [str(old_rels[key].get("vdb_id") or ""), *relation_vdb_ids(old_rels[key]["src_id"], old_rels[key]["tgt_id"], str(old_rels[key].get("keywords", "")))]
+                    if rel_id
+                }
+            )
             if delete_rel_vdb_ids:
                 await rag.relationships_vdb.delete(delete_rel_vdb_ids)
             await rag.relation_chunks.delete([key for key in rels_to_remove if key in old_rels])
@@ -1025,14 +1182,17 @@ async def apply_patch_to_storage(
             )
 
         rel_graph_upsert_ids = sorted(set(diff["relationships"]["add_ids"]) | set(diff["relationships"]["update_ids"]))
-        if rel_graph_upsert_ids:
-            relationships = [new_rels[key] for key in rel_graph_upsert_ids]
-            await rag.chunk_entity_relation_graph.upsert_edges_batch([(record["src_id"], record["tgt_id"], _relationship_graph_data(record)) for record in relationships])
+        for key in rel_graph_upsert_ids:
+            if key in new_rels:
+                affected_relationship_pairs.add(_relationship_pair(new_rels[key]))
+        rel_graph_records = [record for record in new_rels.values() if _relationship_pair(record) in affected_relationship_pairs]
+        if rel_graph_records:
+            await rag.chunk_entity_relation_graph.upsert_edges_batch(_relationship_graph_edge_upserts(rel_graph_records))
         rel_vdb_upsert_ids = sorted(set(diff["relationships"]["add_ids"]) | rel_vector_update_ids)
         if rel_vdb_upsert_ids:
             relationships = [new_rels[key] for key in rel_vdb_upsert_ids]
             await rag.relationships_vdb.upsert({record["vdb_id"]: _relationship_vdb_data(record) for record in relationships})
-            legacy_ids = sorted({rel_id for record in relationships for rel_id in relation_vdb_ids(record["src_id"], record["tgt_id"])[1:]})
+            legacy_ids = sorted({rel_id for record in relationships for rel_id in legacy_relation_vdb_ids(record["src_id"], record["tgt_id"])})
             if legacy_ids:
                 await rag.relationships_vdb.delete(legacy_ids)
         rel_metadata_records = [new_rels[key] for key in sorted(rel_metadata_update_ids)]
@@ -1328,13 +1488,23 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     )
     _record_timing(timings, "build_desired_manifest_s", phase_started)
 
+    cache_only_blockers = full_materialization_cache_only_blockers(previous_manifest, desired_manifest)
+    if cache_only_blockers.get("blocked"):
+        raise RuntimeError(
+            "cache-only full materialization is unsafe without an embedding-fill phase; "
+            f"new_or_vector_updated_records={cache_only_blockers['total']} "
+            f"collections={json.dumps(cache_only_blockers['collections'], ensure_ascii=False, sort_keys=True)}"
+        )
+
     phase_started = time.perf_counter()
     cache_path = _arg_path(args, "vector_cache", state_dir / "vector_cache.sqlite").resolve()
     cache = VectorCache(cache_path)
     vector_seed_report = None
     if getattr(args, "seed_from_storage", False):
+        if previous_manifest is None:
+            raise RuntimeError("--seed-from-storage requires a previous custom_kg manifest so storage vectors can be matched to their original vector_hash")
         seed_storage_dir = _arg_path(args, "seed_storage_dir", workdir / "rag_storage").resolve()
-        vector_seed_report = seed_vector_cache_from_storage(desired_manifest, seed_storage_dir, cache)
+        vector_seed_report = seed_vector_cache_from_storage(desired_manifest, seed_storage_dir, cache, previous_manifest=previous_manifest)
     _record_timing(timings, "seed_vector_cache_s", phase_started)
 
     phase_started = time.perf_counter()

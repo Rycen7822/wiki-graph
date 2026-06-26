@@ -60,8 +60,12 @@ class SQLiteWorkspace:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_schema(self) -> None:
@@ -121,6 +125,8 @@ class SQLiteWorkspace:
                 )
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_src ON edge(workspace_id, src_id, edge_type, weight)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_tgt ON edge(workspace_id, tgt_id, edge_type, weight)")
 
     def create_workspace(self, workspace_id: str, source_manifest_hash: str) -> None:
         with self._connect() as conn:
@@ -246,14 +252,13 @@ class SQLiteWorkspace:
         self.get_workspace_status(workspace_id)
         if not edge_type or not src_id or not tgt_id:
             raise ValueError("edge_type, src_id, and tgt_id are required")
-        stored_src, stored_tgt = sorted((src_id, tgt_id))
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO edge(workspace_id, edge_type, src_id, tgt_id, weight, payload_json)
                 VALUES(?, ?, ?, ?, ?, ?)
                 """,
-                (workspace_id, edge_type, stored_src, stored_tgt, float(weight), json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                (workspace_id, edge_type, src_id, tgt_id, float(weight), json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             )
 
     def neighbors(
@@ -311,10 +316,45 @@ class SQLiteWorkspace:
         ]
         return {"ok": not issues, "counts": counts, "expected": {**_ZERO_COUNTS, **expected}, "issues": issues}
 
-    def mark_audited(self, workspace_id: str, expected: dict[str, int]) -> None:
+    def audit_vector_coverage(self, workspace_id: str) -> dict[str, Any]:
+        self.get_workspace_status(workspace_id)
+        counts = {record_type: {"records": 0, "vectors": 0, "missing": 0} for record_type in sorted(RECORD_TYPES)}
+        missing = {record_type: [] for record_type in sorted(RECORD_TYPES)}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.record_type, r.record_id, v.record_id AS vector_record_id
+                FROM record AS r
+                LEFT JOIN vector AS v
+                  ON v.workspace_id = r.workspace_id
+                 AND v.record_type = r.record_type
+                 AND v.record_id = r.record_id
+                WHERE r.workspace_id = ?
+                ORDER BY r.record_type, r.record_id
+                """,
+                (workspace_id,),
+            ).fetchall()
+        for row in rows:
+            record_type = str(row["record_type"])
+            counts.setdefault(record_type, {"records": 0, "vectors": 0, "missing": 0})
+            missing.setdefault(record_type, [])
+            counts[record_type]["records"] += 1
+            if row["vector_record_id"] is None:
+                counts[record_type]["missing"] += 1
+                missing[record_type].append(str(row["record_id"]))
+            else:
+                counts[record_type]["vectors"] += 1
+        missing = {record_type: ids for record_type, ids in missing.items() if ids}
+        return {"ok": not missing, "counts": counts, "missing": missing}
+
+    def mark_audited(self, workspace_id: str, expected: dict[str, int], *, require_vectors: bool = False) -> None:
         audit = self.audit_counts(workspace_id, expected)
         if not audit["ok"]:
             raise ValueError(f"workspace audit failed: {audit['issues']}")
+        if require_vectors:
+            vector_audit = self.audit_vector_coverage(workspace_id)
+            if not vector_audit["ok"]:
+                raise ValueError(f"workspace vector coverage failed: {vector_audit['missing']}")
         with self._connect() as conn:
             conn.execute("UPDATE workspace SET status = 'audited' WHERE workspace_id = ?", (workspace_id,))
 

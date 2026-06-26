@@ -29,6 +29,44 @@ def _payload() -> dict:
     }
 
 
+def test_manifest_and_materialization_preserve_same_endpoint_typed_relationships(tmp_path) -> None:
+    payload = _payload()
+    payload["relationships"] = [
+        {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links to topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
+        {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic cites doc", "keywords": "SOURCED_BY", "source_id": "doc:a", "weight": 0.8, "file_path": "a.md"},
+    ]
+    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+
+    assert len(manifest["relationships"]) == 2
+    assert {record["keywords"] for record in manifest["relationships"].values()} == {"WIKILINKS_TO", "SOURCED_BY"}
+    assert len({record["vdb_id"] for record in manifest["relationships"].values()}) == 2
+
+    cache = VectorCache(tmp_path / "vector_cache.sqlite")
+    ordinal = 1
+    for collection in ("chunks", "entities", "relationships"):
+        for record in manifest[collection].values():
+            cache.put(
+                record["vector_hash"],
+                record_type=record["record_type"],
+                record_id=record["record_id"],
+                embedding_model=record["embedding_model"],
+                embedding_dim=record["embedding_dim"],
+                embedding_params_version=record["embedding_params_version"],
+                vector=[float(ordinal), float(ordinal + 1)],
+            )
+            ordinal += 1
+    storage_dir = tmp_path / "shadow_storage"
+
+    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
+
+    audit = audit_custom_kg_storage(storage_dir, manifest)
+    assert audit["ok"] is True
+    vdb_relationships = json.loads((storage_dir / "vdb_relationships.json").read_text(encoding="utf-8"))
+    assert len(vdb_relationships["data"]) == 2
+    relation_chunks = json.loads((storage_dir / "kv_store_relation_chunks.json").read_text(encoding="utf-8"))
+    assert set(relation_chunks) == set(manifest["relationships"])
+
+
 def test_materialize_file_storage_from_all_hit_vector_cache_passes_audit(tmp_path) -> None:
     manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
@@ -123,6 +161,52 @@ def test_materialize_file_storage_fails_closed_when_vectors_are_missing(tmp_path
         assert "missing resolved vectors" in str(exc)
     else:  # pragma: no cover - assertion branch
         raise AssertionError("materializer should fail closed when vectors are missing")
+
+
+def test_run_full_materialization_no_swap_blocks_cache_only_when_diff_needs_new_vectors(monkeypatch, tmp_path) -> None:
+    previous = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired_payload = _payload()
+    desired_payload["entities"].append({"entity_name": "topic:new", "entity_type": "TOPIC", "description": "New topic", "source_id": "doc:a", "file_path": "a.md"})
+    desired = build_custom_kg_manifest(desired_payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    root = tmp_path / "wiki"
+    shadow = tmp_path / "shadow_full"
+    state_dir.mkdir()
+    workdir.mkdir()
+    root.mkdir()
+    custom_kg_incremental.write_manifest(state_dir, previous)
+    cache = VectorCache(state_dir / "vector_cache.sqlite")
+    ordinal = 1
+    for collection in ("chunks", "entities", "relationships"):
+        for record in desired[collection].values():
+            cache.put(
+                record["vector_hash"],
+                record_type=record["record_type"],
+                record_id=record["record_id"],
+                embedding_model=record["embedding_model"],
+                embedding_dim=record["embedding_dim"],
+                embedding_params_version=record["embedding_params_version"],
+                vector=[float(ordinal), float(ordinal + 1)],
+            )
+            ordinal += 1
+    monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (desired, {"chunks": 1, "entities": 3, "relationships": 1}))
+    args = types.SimpleNamespace(
+        root=root,
+        state_dir=state_dir,
+        workdir=workdir,
+        vector_cache=state_dir / "vector_cache.sqlite",
+        storage_dir=shadow,
+        delete_shadow_on_no_swap=False,
+        limit_docs=None,
+        limit_edges=None,
+        seed_from_storage=False,
+        seed_storage_dir=None,
+    )
+
+    with pytest.raises(RuntimeError, match="cache-only full materialization is unsafe"):
+        custom_kg_incremental.run_full_materialization_no_swap(args)
+    assert not shadow.exists()
 
 
 def test_run_full_materialization_no_swap_builds_audited_shadow(monkeypatch, tmp_path) -> None:
@@ -453,6 +537,7 @@ def test_run_full_materialization_no_swap_can_seed_cache_from_explicit_storage(m
     state_dir.mkdir()
     workdir.mkdir()
     root.mkdir()
+    custom_kg_incremental.write_manifest(state_dir, manifest)
     monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}))
     args = types.SimpleNamespace(
         root=root,
