@@ -35,6 +35,7 @@ from custom_kg_incremental import DEFAULT_FULL_REBUILD_INTERVAL, plan_incrementa
 
 LIGHTRAG_PYTHON = Path("/home/xu/.local/share/uv/tools/lightrag-hku/bin/python")
 SERVICE_NAME = "lightrag-server.service"
+MATERIALIZABLE_FULL_REBUILD_REASONS = {"incremental_interval_reached"}
 
 
 def script_path(workdir: Path, name: str) -> str:
@@ -129,6 +130,53 @@ def build_incremental_import_commands(root: Path, state_dir: Path, workdir: Path
     ]
 
 
+def build_full_materialization_import_commands(root: Path, state_dir: Path, workdir: Path) -> list[list[str]]:
+    prepared_report = prepared_swap_report_path(state_dir)
+    return [
+        [
+            str(LIGHTRAG_PYTHON),
+            script_path(workdir, "custom_kg_incremental.py"),
+            "materialize-full",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state_dir),
+            "--workdir",
+            str(workdir),
+            "--vector-cache",
+            str(state_dir / "vector_cache.sqlite"),
+            "--seed-from-storage",
+            "--seed-storage-dir",
+            str(workdir / "rag_storage"),
+            "--no-swap",
+            "--prepare-swap",
+        ],
+        ["systemctl", "--user", "stop", SERVICE_NAME],
+        [
+            str(LIGHTRAG_PYTHON),
+            script_path(workdir, "custom_kg_incremental.py"),
+            "finalize-prepared-swap",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state_dir),
+            "--workdir",
+            str(workdir),
+            "--prepared-report",
+            str(prepared_report),
+        ],
+        ["systemctl", "--user", "start", SERVICE_NAME],
+        ["python-internal", "health", "http://127.0.0.1:9621/health"],
+    ]
+
+
+def should_use_full_materialization(import_mode: dict[str, Any]) -> bool:
+    if import_mode.get("selected_mode") != "full_rebuild":
+        return False
+    reasons = {str(reason) for reason in (import_mode.get("reasons") or [])}
+    return bool(reasons) and reasons <= MATERIALIZABLE_FULL_REBUILD_REASONS
+
+
 def plan_incremental_import_mode(root: Path, state_dir: Path, workdir: Path) -> dict[str, Any]:
     return plan_incremental_import(root, state_dir, workdir, full_rebuild_interval=DEFAULT_FULL_REBUILD_INTERVAL)
 
@@ -162,6 +210,8 @@ def select_import_commands(root: Path, state_dir: Path, workdir: Path, full_impo
         return []
     if import_mode.get("selected_mode") == "incremental":
         return build_incremental_import_commands(root, state_dir, workdir)
+    if should_use_full_materialization(import_mode):
+        return build_full_materialization_import_commands(root, state_dir, workdir)
     return full_import_commands
 
 
@@ -225,37 +275,54 @@ def run_real_refresh(root: Path, state_dir: Path, workdir: Path, reason: str, ar
         append_log(import_log, f"[batch-refresh] import skipped {now_stamp()} reason=incremental_empty_diff\n")
         clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
         return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": None, "clear": clear, "import_mode": import_mode, "import_skipped": True, "import_skip_reason": "incremental_empty_diff"}
-    service_stopped = False
-    service_started = False
-    try:
-        for command in import_commands:
-            if command[:2] == ["python-internal", "reset-rag-storage"]:
-                reset_rag_storage(workdir, import_log)
-            elif command[:2] == ["python-internal", "health"]:
-                health = wait_health(command[2], import_log)
-            else:
-                env = os.environ.copy()
-                if command and command[0] == str(LIGHTRAG_PYTHON):
-                    env.update({"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"})
-                run_subprocess(command, import_log, env=env, timeout=None)
-                if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == SERVICE_NAME:
-                    service_stopped = True
-                if command[:3] == ["systemctl", "--user", "start"] and command[-1] == SERVICE_NAME:
+    def _run_import_commands(commands: list[list[str]]) -> tuple[dict[str, Any] | None, bool, bool]:
+        service_stopped = False
+        service_started = False
+        health: dict[str, Any] | None = None
+        try:
+            for command in commands:
+                if command[:2] == ["python-internal", "reset-rag-storage"]:
+                    reset_rag_storage(workdir, import_log)
+                elif command[:2] == ["python-internal", "health"]:
+                    health = wait_health(command[2], import_log)
+                else:
+                    env = os.environ.copy()
+                    if command and command[0] == str(LIGHTRAG_PYTHON):
+                        env.update({"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"})
+                    run_subprocess(command, import_log, env=env, timeout=None)
+                    if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == SERVICE_NAME:
+                        service_stopped = True
+                    if command[:3] == ["systemctl", "--user", "start"] and command[-1] == SERVICE_NAME:
+                        service_started = True
+        except Exception as exc:
+            setattr(exc, "_lightrag_service_stopped", service_stopped)
+            if service_stopped and not service_started:
+                start_command = ["systemctl", "--user", "start", SERVICE_NAME]
+                append_log(import_log, f"[batch-refresh] recovery start after failure: {type(exc).__name__}: {exc}\n")
+                try:
+                    run_subprocess(start_command, import_log, timeout=180)
                     service_started = True
+                except Exception as recovery_exc:  # pragma: no cover - defensive recovery path
+                    append_log(import_log, f"[batch-refresh] recovery start failed: {type(recovery_exc).__name__}: {recovery_exc}\n")
+                    raise RuntimeError(f"{exc}; additionally failed to restart {SERVICE_NAME}: {recovery_exc}") from exc
+            raise
+        return health, service_stopped, service_started
+
+    try:
+        health, _service_stopped, _service_started = _run_import_commands(import_commands)
     except Exception as exc:
-        if service_stopped and not service_started:
-            start_command = ["systemctl", "--user", "start", SERVICE_NAME]
-            append_log(import_log, f"[batch-refresh] recovery start after failure: {type(exc).__name__}: {exc}\n")
-            try:
-                run_subprocess(start_command, import_log, timeout=180)
-                service_started = True
-            except Exception as recovery_exc:  # pragma: no cover - defensive recovery path
-                append_log(import_log, f"[batch-refresh] recovery start failed: {type(recovery_exc).__name__}: {recovery_exc}\n")
-                raise RuntimeError(f"{exc}; additionally failed to restart {SERVICE_NAME}: {recovery_exc}") from exc
-        raise
+        if should_use_full_materialization(import_mode) and not bool(getattr(exc, "_lightrag_service_stopped", False)):
+            append_log(import_log, f"[batch-refresh] full materialization failed before service stop; falling back to cold full import: {type(exc).__name__}: {exc}\n")
+            fallback_mode = dict(import_mode)
+            fallback_mode["full_materialization_fallback"] = "cold_full_import"
+            fallback_mode["fallback_reason"] = f"{type(exc).__name__}: {exc}"
+            import_mode = fallback_mode
+            health, _service_stopped, _service_started = _run_import_commands(full_import_commands)
+        else:
+            raise
     append_log(import_log, f"[batch-refresh] import done {now_stamp()} mode={import_mode.get('selected_mode')}\n")
     clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
-    return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": locals().get("health"), "clear": clear, "import_mode": import_mode}
+    return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": health, "clear": clear, "import_mode": import_mode}
 
 
 def add_common_paths(parser: argparse.ArgumentParser) -> None:

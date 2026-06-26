@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 from pathlib import Path
+import sys
 
 from wiki_lightrag_lib import (
     add_query_event,
@@ -17,10 +18,53 @@ from wiki_lightrag_lib import (
 )
 
 
+def _load_native_backend():
+    native_src = Path(__file__).resolve().parents[1] / "llm-wiki-native" / "src"
+    if str(native_src) not in sys.path:
+        sys.path.insert(0, str(native_src))
+    from llm_wiki_native.retrieval.context import assemble_context
+    from llm_wiki_native.retrieval.query_engine import NativeQueryEngine
+    from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+
+    return assemble_context, NativeQueryEngine, SQLiteWorkspace
+
+
+def run_native_query(args, query: str) -> dict:
+    if not args.data_only:
+        raise ValueError("--backend native requires --data-only")
+    if not args.native_db:
+        raise ValueError("--backend native requires --native-db")
+    if not args.native_workspace:
+        raise ValueError("--backend native requires --native-workspace")
+    if not args.query_vector:
+        raise ValueError("--backend native requires --query-vector JSON")
+    assemble_context, NativeQueryEngine, SQLiteWorkspace = _load_native_backend()
+    db = SQLiteWorkspace(args.native_db)
+    engine = NativeQueryEngine(db)
+    result = engine.query(
+        args.native_workspace,
+        query,
+        json.loads(args.query_vector),
+        mode=args.mode,
+        top_k=args.top_k,
+        record_types=("entity", "relationship", "chunk"),
+        neighbor_limit=args.neighbor_k,
+    )
+    response = assemble_context(result)
+    add_query_event(args.state_dir, query, args.mode, None)
+    return {"query": query, "mode": args.mode, "section_kind": None, "evidence_pack": None, "backend": "native", "response": response}
+
+
 def run_query(args, query: str) -> dict:
-    api_key = load_lightrag_api_key(args.workdir)
     section_kind = (args.section_kind or "").strip().lower()
     effective_query = raw_section_query_for_kind(section_kind, query) if section_kind else query
+    if getattr(args, "backend", "lightrag") == "native":
+        if section_kind:
+            raise ValueError("--backend native does not support --section-kind yet")
+        if args.save_evidence_pack or args.expand_section_neighbors:
+            raise ValueError("--backend native does not support evidence-pack or section-neighbor expansion yet")
+        return run_native_query(args, effective_query)
+    api_key = load_lightrag_api_key(args.workdir)
     top_k = max(args.top_k, 40) if section_kind else args.top_k
     chunk_top_k = max(args.chunk_top_k, 40) if section_kind else args.chunk_top_k
     query_func = query_lightrag_data if args.data_only else query_lightrag
@@ -53,6 +97,10 @@ def main() -> int:
     parser.add_argument("--driver", default="hermes-current")
     parser.add_argument("--save-evidence-pack", action="store_true")
     parser.add_argument("--data-only", action="store_true", help="Use /query/data retrieval without LLM answer generation")
+    parser.add_argument("--backend", choices=["lightrag", "native"], default="lightrag", help="Retrieval backend; native is default-off and requires explicit native args")
+    parser.add_argument("--native-db", type=Path, help="SQLite workspace DB for --backend native")
+    parser.add_argument("--native-workspace", help="Workspace id for --backend native")
+    parser.add_argument("--query-vector", help="JSON array query vector for --backend native")
     parser.add_argument("--expand-section-neighbors", action="store_true", help="With --data-only, append reviewed semantic section-neighbor expansions from state/section_similarity_edges.jsonl")
     parser.add_argument("--neighbor-k", type=int, default=5, help="Max semantic section-neighbor expansions per direct raw-section hit")
     parser.add_argument("--benchmark", type=Path)

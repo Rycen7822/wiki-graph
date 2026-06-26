@@ -27,6 +27,7 @@ from wiki_lightrag_lib import (
     print_json,
     release_process_memory,
     section_similarity_embedding_text,
+    section_similarity_index_summary,
     section_similarity_report_summary,
     sha256_text,
 )
@@ -186,6 +187,8 @@ def main() -> int:
     parser.add_argument("--min-content-chars", type=int, default=20)
     parser.add_argument("--limit-sections", type=int, default=None)
     parser.add_argument("--no-reuse-cache", action="store_true")
+    parser.add_argument("--section-similarity-index", type=Path, default=None, help="SQLite directed-rank index path; defaults to state/section_similarity_index.sqlite")
+    parser.add_argument("--no-section-similarity-index", action="store_true", help="Do not write the persisted exact section-similarity rank index")
     parser.add_argument("--sample-edges", type=int, default=50)
     args = parser.parse_args()
 
@@ -198,6 +201,7 @@ def main() -> int:
         rows = rows[: args.limit_sections]
     if not rows:
         raise RuntimeError(f"No raw sections found in {raw_sections_path}; run extract_raw_sections.py first")
+    index_path = None if args.no_section_similarity_index else (args.section_similarity_index or args.state_dir / "section_similarity_index.sqlite")
 
     config = embedding_config(args.workdir)
     embedding_path = args.state_dir / "section_embeddings.jsonl"
@@ -217,7 +221,9 @@ def main() -> int:
         mutual=not args.no_mutual,
         embedding_model=str(config.get("model") or "unknown"),
         embedding_dim=config.get("embedding_dim"),
+        index_path=index_path,
     )
+    index_summary = section_similarity_index_summary(index_path) if index_path is not None else None
     candidates_path = args.state_dir / "section_similarity_edges.candidates.jsonl"
     jsonl_write(candidates_path, edges)
     report = {
@@ -240,6 +246,7 @@ def main() -> int:
         },
         "embedding_env": config["env"],
         "embedding_stats": embedding_stats,
+        "section_similarity_index": index_summary,
         "summary": section_similarity_report_summary(rows, edges),
         "sample_edges": edges[: args.sample_edges],
     }
@@ -254,6 +261,7 @@ def main() -> int:
         "embedding_stats": embedding_stats,
         "embedding_path": embedding_path.as_posix(),
         "candidate_edges_path": candidates_path.as_posix(),
+        "section_similarity_index": index_summary,
         "report_path": report_path.as_posix(),
     })
     return 0

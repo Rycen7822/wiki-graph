@@ -149,20 +149,32 @@ def stable_hash(value: Any) -> str:
 
 
 _RECORD_HASH_FIELDS = {"record_hash", "vector_hash", "metadata_hash"}
+_VECTOR_HASH_FIELDS = ("record_type", "content", "embedding_model", "embedding_dim", "embedding_params_version")
 
 
 def _record_without_hash_fields(record: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in record.items() if key not in _RECORD_HASH_FIELDS}
 
 
+def _vector_hash_payload(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: record[key] for key in _VECTOR_HASH_FIELDS if key in record}
+
+
 def _stamp_vector_metadata_hashes(record: dict[str, Any]) -> None:
     """Attach full, vector-content, and metadata/provenance hashes to a manifest record."""
 
-    record["vector_hash"] = stable_hash({"content": record["content"]})
+    record["vector_hash"] = stable_hash(_vector_hash_payload(record))
     record["metadata_hash"] = stable_hash(
         {key: value for key, value in record.items() if key not in _RECORD_HASH_FIELDS and key != "content"}
     )
     record["record_hash"] = stable_hash(_record_without_hash_fields(record))
+
+
+def _stamp_identity_and_hashes(record: dict[str, Any], *, record_id: str, canonical_id: str) -> None:
+    record["record_id"] = str(record_id)
+    record["canonical_id"] = str(canonical_id)
+    record["vector_text_hash"] = stable_hash(record.get("content", ""))
+    _stamp_vector_metadata_hashes(record)
 
 
 def _record_vector_hash(record: dict[str, Any]) -> str | None:
@@ -170,7 +182,7 @@ def _record_vector_hash(record: dict[str, Any]) -> str | None:
         return str(record["vector_hash"])
     if "content" not in record:
         return None
-    return stable_hash({"content": record["content"]})
+    return stable_hash(_vector_hash_payload(record))
 
 
 def _record_metadata_hash(record: dict[str, Any]) -> str | None:
@@ -268,6 +280,7 @@ def metadata_from_environment(
     lightrag_version: str | None = None,
     embedding_model: str | None = None,
     embedding_dim: int | None = None,
+    embedding_params_version: str | None = None,
     custom_kg_builder_hash: str | None = None,
     section_similarity_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -276,6 +289,7 @@ def metadata_from_environment(
         "lightrag_version": lightrag_version or current_lightrag_version(),
         "embedding_model": embedding_model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
         "embedding_dim": embedding_dim if embedding_dim is not None else env_int("EMBEDDING_DIM", 1536),
+        "embedding_params_version": embedding_params_version or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"),
         "custom_kg_builder_hash": custom_kg_builder_hash or "wiki_lightrag_lib.build_custom_kg_payload:v1",
         "canonical_id_algorithm": "llm-wiki-canonical-id:v1+lightrag-custom-kg:v1.5",
         "section_similarity_params": section_similarity_params or {},
@@ -290,6 +304,7 @@ def build_custom_kg_manifest(
     lightrag_version: str | None = None,
     embedding_model: str | None = None,
     embedding_dim: int | None = None,
+    embedding_params_version: str | None = None,
     custom_kg_builder_hash: str | None = None,
     section_similarity_params: dict[str, Any] | None = None,
     incremental_count_since_full: int = 0,
@@ -307,10 +322,16 @@ def build_custom_kg_manifest(
         lightrag_version=lightrag_version,
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
+        embedding_params_version=embedding_params_version,
         custom_kg_builder_hash=custom_kg_builder_hash,
         section_similarity_params=section_similarity_params,
     )
     metadata["incremental_count_since_full"] = incremental_count_since_full
+    embedding_contract = {
+        "embedding_model": metadata["embedding_model"],
+        "embedding_dim": metadata["embedding_dim"],
+        "embedding_params_version": metadata["embedding_params_version"],
+    }
 
     chunks: dict[str, dict[str, Any]] = {}
     source_to_chunk: dict[str, str] = {}
@@ -323,6 +344,7 @@ def build_custom_kg_manifest(
         file_path = lightrag_normalize_file_path(chunk_data.get("file_path") or "custom_kg")
         chunk_order_index = int(chunk_data.get("chunk_order_index", index))
         record = {
+            "record_type": "chunk",
             "chunk_id": chunk_id,
             "content": content,
             "content_hash": compute_mdhash_id(content),
@@ -330,8 +352,9 @@ def build_custom_kg_manifest(
             "full_doc_id": full_doc_id,
             "file_path": file_path,
             "chunk_order_index": chunk_order_index,
+            **embedding_contract,
         }
-        record["record_hash"] = stable_hash(record)
+        _stamp_identity_and_hashes(record, record_id=chunk_id, canonical_id=chunk_id)
         chunks[chunk_id] = record
         source_to_chunk[logical_source_id] = chunk_id
         chunk_sources.setdefault(chunk_id, [])
@@ -353,6 +376,7 @@ def build_custom_kg_manifest(
         file_path = lightrag_normalize_file_path(entity_data.get("file_path", "custom_kg"))
         vdb_id = entity_vdb_id(entity_name)
         record = {
+            "record_type": "entity",
             "entity_name": entity_name,
             "vdb_id": vdb_id,
             "entity_type": entity_type,
@@ -361,8 +385,9 @@ def build_custom_kg_manifest(
             "source_chunk_id": source_chunk_id,
             "file_path": file_path,
             "content": entity_name + "\n" + description,
+            **embedding_contract,
         }
-        _stamp_vector_metadata_hashes(record)
+        _stamp_identity_and_hashes(record, record_id=vdb_id, canonical_id=entity_name)
         entities[entity_name] = record
 
     deduped_relationships: dict[str, dict[str, Any]] = {}
@@ -384,6 +409,7 @@ def build_custom_kg_manifest(
         weight = relationship_data.get("weight", 1.0)
         vdb_id = relation_vdb_id(src_id, tgt_id)
         record = {
+            "record_type": "relationship",
             "rel_key": [src_id, tgt_id],
             "chunk_key": key,
             "vdb_id": vdb_id,
@@ -396,8 +422,9 @@ def build_custom_kg_manifest(
             "source_chunk_id": source_chunk_id,
             "file_path": file_path,
             "content": f"{keywords}\t{src_id}\n{tgt_id}\n{description}",
+            **embedding_contract,
         }
-        _stamp_vector_metadata_hashes(record)
+        _stamp_identity_and_hashes(record, record_id=vdb_id, canonical_id=key)
         relationships[key] = record
 
     return {
@@ -530,7 +557,7 @@ def successful_manifest(
     previous_count = 0
     if previous_manifest is not None:
         previous_count = int(previous_manifest.get("metadata", {}).get("incremental_count_since_full", 0) or 0)
-    manifest.setdefault("metadata", {})["incremental_count_since_full"] = 0 if import_mode == "full_rebuild" else previous_count + 1
+    manifest.setdefault("metadata", {})["incremental_count_since_full"] = 0 if import_mode in {"full_rebuild", "full_materialization"} else previous_count + 1
     manifest["metadata"]["last_successful_import_mode"] = import_mode
     manifest["metadata"]["last_successful_import_at"] = now_stamp()
     return manifest
@@ -1079,8 +1106,61 @@ def _safe_remove(path: Path) -> None:
             path.unlink()
 
 
+def _arg_path(args: argparse.Namespace, name: str, default: Path) -> Path:
+    value = getattr(args, name, None)
+    return Path(value) if value is not None else default
+
+
 def _record_timing(timings: dict[str, float], key: str, started: float) -> None:
     timings[key] = round(time.perf_counter() - started, 6)
+
+
+def _count_query_data_items(response: Any) -> dict[str, int]:
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        data = response if isinstance(response, dict) else {}
+    counts: dict[str, int] = {}
+    for key in ("entities", "relationships", "chunks"):
+        value = data.get(key) if isinstance(data, dict) else None
+        counts[key] = len(value) if isinstance(value, list) else 0
+    return counts
+
+
+def run_shadow_query_data_smokes(
+    *,
+    workdir: Path,
+    storage_dir: Path,
+    queries: list[str],
+    mode: str = "mix",
+    top_k: int = 5,
+    chunk_top_k: int = 5,
+) -> dict[str, Any]:
+    """Run direct LightRAG ``aquery_data`` smokes against an explicit shadow storage dir."""
+
+    from import_custom_kg import build_rag
+    from lightrag import QueryParam  # type: ignore[import-not-found]
+
+    workdir = Path(workdir).resolve()
+    storage_dir = Path(storage_dir).resolve()
+    load_env_file(workdir / ".env")
+
+    async def _run() -> dict[str, Any]:
+        rag = build_rag(workdir, storage_dir=storage_dir)
+        await rag.initialize_storages()
+        results: list[dict[str, Any]] = []
+        try:
+            for query in queries:
+                response = await rag.aquery_data(
+                    query,
+                    param=QueryParam(mode=mode, top_k=top_k, chunk_top_k=chunk_top_k, max_total_tokens=8000),
+                )
+                counts = _count_query_data_items(response)
+                results.append({"query": query, "ok": any(counts.values()), "counts": counts})
+        finally:
+            await rag.finalize_storages()
+        return {"ok": bool(results) and all(item["ok"] for item in results), "queries": results}
+
+    return asyncio.run(_run())
 
 
 async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
@@ -1215,6 +1295,147 @@ async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
+def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]:
+    """Build and audit a full materialized shadow storage directory without swapping live state."""
+
+    from custom_kg_materialize import materialize_file_storage_from_manifest
+    from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage
+
+    total_started = time.perf_counter()
+    timings: dict[str, float] = {}
+    root = args.root.resolve()
+    state_dir = args.state_dir.resolve()
+    workdir = args.workdir.resolve()
+
+    phase_started = time.perf_counter()
+    ensure_state_dirs(state_dir)
+    load_env_file(workdir / ".env")
+    prepare_swap = bool(getattr(args, "prepare_swap", False))
+    if prepare_swap and getattr(args, "delete_shadow_on_no_swap", False):
+        raise RuntimeError("--prepare-swap cannot be combined with --delete-shadow-on-no-swap; prepared shadow must remain for finalize")
+    _record_timing(timings, "load_env_s", phase_started)
+
+    phase_started = time.perf_counter()
+    previous_manifest = load_manifest(state_dir)
+    _record_timing(timings, "load_previous_manifest_s", phase_started)
+
+    phase_started = time.perf_counter()
+    desired_manifest, payload_summary = build_desired_manifest(
+        root,
+        state_dir,
+        limit_docs=getattr(args, "limit_docs", None),
+        limit_edges=getattr(args, "limit_edges", None),
+    )
+    _record_timing(timings, "build_desired_manifest_s", phase_started)
+
+    phase_started = time.perf_counter()
+    cache_path = _arg_path(args, "vector_cache", state_dir / "vector_cache.sqlite").resolve()
+    cache = VectorCache(cache_path)
+    vector_seed_report = None
+    if getattr(args, "seed_from_storage", False):
+        seed_storage_dir = _arg_path(args, "seed_storage_dir", workdir / "rag_storage").resolve()
+        vector_seed_report = seed_vector_cache_from_storage(desired_manifest, seed_storage_dir, cache)
+    _record_timing(timings, "seed_vector_cache_s", phase_started)
+
+    phase_started = time.perf_counter()
+    vector_report = resolve_manifest_vectors(desired_manifest, cache)
+    _record_timing(timings, "resolve_vector_cache_s", phase_started)
+    misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
+    if misses:
+        raise RuntimeError(f"full materialization requires all vectors resolved from cache; misses={misses}")
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    shadow_storage = _arg_path(args, "storage_dir", workdir / f"rag_storage.full_materialize.{stamp}").resolve()
+    started_at = now_stamp()
+
+    phase_started = time.perf_counter()
+    materialize_report = materialize_file_storage_from_manifest(desired_manifest, vector_report["resolved"], shadow_storage)
+    _record_timing(timings, "materialize_shadow_storage_s", phase_started)
+
+    phase_started = time.perf_counter()
+    shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
+    _record_timing(timings, "audit_shadow_storage_s", phase_started)
+    if not shadow_audit.get("ok"):
+        raise RuntimeError(f"full materialized shadow audit failed: {json.dumps(shadow_audit.get('issues', [])[:10], ensure_ascii=False)}")
+
+    phase_started = time.perf_counter()
+    pre_audit = None
+    if prepare_swap:
+        if previous_manifest is None:
+            raise RuntimeError("full materialization prepare-swap requires a current custom_kg manifest")
+        live_storage = workdir / "rag_storage"
+        if not live_storage.exists():
+            raise RuntimeError(f"missing live rag_storage before prepared full materialization: {live_storage}")
+        pre_audit = audit_custom_kg_storage(live_storage, previous_manifest)
+        if not pre_audit.get("ok"):
+            raise RuntimeError(f"live storage audit failed before prepared full materialization: {json.dumps(pre_audit.get('issues', [])[:10], ensure_ascii=False)}")
+    _record_timing(timings, "audit_live_storage_s", phase_started)
+
+    phase_started = time.perf_counter()
+    query_smoke = None
+    smoke_queries = list(getattr(args, "smoke_query", None) or [])
+    if smoke_queries:
+        query_smoke = run_shadow_query_data_smokes(
+            workdir=workdir,
+            storage_dir=shadow_storage,
+            queries=smoke_queries,
+            mode=str(getattr(args, "smoke_mode", "mix") or "mix"),
+            top_k=int(getattr(args, "smoke_top_k", 5) or 5),
+            chunk_top_k=int(getattr(args, "smoke_chunk_top_k", 5) or 5),
+        )
+        if not query_smoke.get("ok"):
+            raise RuntimeError(f"shadow query smoke failed: {json.dumps(query_smoke, ensure_ascii=False)[:1000]}")
+    _record_timing(timings, "query_shadow_storage_s", phase_started)
+
+    phase_started = time.perf_counter()
+    shadow_deleted = False
+    if getattr(args, "delete_shadow_on_no_swap", False) and not prepare_swap:
+        shutil.rmtree(shadow_storage, ignore_errors=True)
+        shadow_deleted = True
+    _record_timing(timings, "cleanup_shadow_s", phase_started)
+    timings["total_s"] = round(time.perf_counter() - total_started, 6)
+
+    report = {
+        "started_at": started_at,
+        "finished_at": now_stamp(),
+        "wiki_root": str(root),
+        "workdir": str(workdir),
+        "state_dir": str(state_dir),
+        "dry_run": False,
+        "import_mode": "full_materialization",
+        "payload": payload_summary,
+        "manifest": desired_manifest.get("summary", {}),
+        "manifest_path": None,
+        "materialize": materialize_report,
+        "vector_cache_path": str(cache_path),
+        "vector_cache_seed": vector_seed_report,
+        "vector_cache": vector_report,
+        "pre_audit": pre_audit,
+        "shadow_audit": shadow_audit,
+        "query_smoke": query_smoke,
+        "shadow_storage": str(shadow_storage),
+        "shadow_deleted": shadow_deleted,
+        "backup_dir": str(state_dir / "backups" / f"rag_storage_full_materialization_{stamp}") if prepare_swap else None,
+        "swapped": False,
+        "prepared_for_swap": prepare_swap,
+        "previous_manifest_hash": stable_hash(previous_manifest) if previous_manifest is not None else None,
+        "desired_manifest_hash": stable_hash(desired_manifest),
+        "timings": timings,
+    }
+    if prepare_swap:
+        report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
+        report["report_path"] = str(report_path)
+        report["desired_manifest_path"] = str(desired_manifest_path)
+        report["finalize_command"] = [
+            "custom_kg_incremental.py",
+            "finalize-prepared-swap",
+            "--prepared-report",
+            str(report_path),
+        ]
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return report
+
+
 def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
     """Swap an already audited prepared shadow into production after live state re-checks."""
 
@@ -1285,7 +1506,8 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
     _record_timing(timings, "swap_shadow_to_live_s", phase_started)
 
     phase_started = time.perf_counter()
-    final_manifest = successful_manifest(desired_manifest, import_mode="incremental", previous_manifest=current_manifest)
+    prepared_import_mode = str(prepared_report.get("import_mode") or "incremental")
+    final_manifest = successful_manifest(desired_manifest, import_mode=prepared_import_mode, previous_manifest=current_manifest)
     manifest_written = str(write_manifest(state_dir, final_manifest))
     _record_timing(timings, "write_manifest_s", phase_started)
     timings["total_s"] = round(time.perf_counter() - total_started, 6)
@@ -1297,7 +1519,7 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
         "workdir": str(workdir),
         "state_dir": str(state_dir),
         "dry_run": False,
-        "import_mode": "incremental",
+        "import_mode": prepared_import_mode,
         "full_rebuild_interval": prepared_report.get("full_rebuild_interval"),
         "payload": prepared_report.get("payload", {}),
         "manifest": final_manifest.get("summary", {}),
@@ -1372,6 +1594,22 @@ def main() -> int:
     finalize_parser.add_argument("--server-port", type=int, default=9621)
     finalize_parser.add_argument("--allow-server-running", action="store_true")
 
+    materialize_parser = sub.add_parser("materialize-full", help="Materialize and audit a full shadow storage directory without swapping live rag_storage")
+    add_common_paths(materialize_parser)
+    materialize_parser.add_argument("--limit-docs", type=int, default=None)
+    materialize_parser.add_argument("--limit-edges", type=int, default=None)
+    materialize_parser.add_argument("--vector-cache", type=Path, default=None)
+    materialize_parser.add_argument("--storage-dir", type=Path, default=None)
+    materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Seed the vector cache from an explicit file-backend storage directory before resolving vectors")
+    materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Storage directory used with --seed-from-storage; defaults to <workdir>/rag_storage")
+    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Run a direct LightRAG aquery_data smoke against the materialized shadow before optional cleanup; repeat for multiple queries")
+    materialize_parser.add_argument("--smoke-mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
+    materialize_parser.add_argument("--smoke-top-k", type=int, default=5)
+    materialize_parser.add_argument("--smoke-chunk-top-k", type=int, default=5)
+    materialize_parser.add_argument("--no-swap", action="store_true", required=True, help="Required guard: this command only materializes shadow storage; use --prepare-swap to persist a finalizeable bundle")
+    materialize_parser.add_argument("--prepare-swap", action="store_true", help="Persist an audited full-materialization prepared swap bundle; does not swap live rag_storage")
+    materialize_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
+
     args = parser.parse_args()
     try:
         if args.command == "plan":
@@ -1390,6 +1628,9 @@ def main() -> int:
             return 0
         if args.command == "finalize-prepared-swap":
             print_json(run_finalize_prepared_swap(args))
+            return 0
+        if args.command == "materialize-full":
+            print_json(run_full_materialization_no_swap(args))
             return 0
     except Exception as exc:
         print_json({"error": type(exc).__name__, "message": str(exc)})
