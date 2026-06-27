@@ -607,10 +607,11 @@ def diff_custom_kg_manifests(old_manifest: dict[str, Any], new_manifest: dict[st
 def full_materialization_cache_only_blockers(previous_manifest: dict[str, Any] | None, desired_manifest: dict[str, Any]) -> dict[str, Any]:
     """Return diff counts that make cache-only full materialization unsafe.
 
-    The current materialize-full path only assembles storage from already-resolved
-    vectors; it has no embedding-fill phase. If desired adds vector records or
-    changes vector text/contract, the caller must choose cold import or a future
-    explicit embedding-fill path instead of relying on cache-only assembly.
+    The materializer normally assembles storage from already-resolved vectors. If
+    desired adds vector records or changes vector text/contract, cache-only mode
+    must fail closed; callers that explicitly enable the internal embedding-fill
+    phase may continue to seed/resolve/fill and then rely on the final unresolved
+    miss guard.
     """
 
     if previous_manifest is None:
@@ -1665,12 +1666,18 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     )
     _record_timing(timings, "build_desired_manifest_s", phase_started)
 
+    fill_missing_vectors_enabled = bool(getattr(args, "fill_missing_vectors", False))
     cache_only_blockers = full_materialization_cache_only_blockers(previous_manifest, desired_manifest)
-    if cache_only_blockers.get("blocked"):
+    cache_only_blocker_summary = {
+        "blocked": bool(cache_only_blockers.get("blocked")),
+        "total": int(cache_only_blockers.get("total", 0) or 0),
+        "collections": cache_only_blockers.get("collections", {}),
+    }
+    if cache_only_blocker_summary["blocked"] and not fill_missing_vectors_enabled:
         raise RuntimeError(
-            "cache-only full materialization is unsafe without an embedding-fill phase; "
-            f"new_or_vector_updated_records={cache_only_blockers['total']} "
-            f"collections={json.dumps(cache_only_blockers['collections'], ensure_ascii=False, sort_keys=True)}"
+            "cache-only full materialization is unsafe without --fill-missing-vectors; "
+            f"new_or_vector_updated_records={cache_only_blocker_summary['total']} "
+            f"collections={json.dumps(cache_only_blocker_summary['collections'], ensure_ascii=False, sort_keys=True)}"
         )
 
     phase_started = time.perf_counter()
@@ -1689,7 +1696,7 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     _record_timing(timings, "resolve_vector_cache_s", phase_started)
     misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
     vector_fill_report = None
-    if misses and getattr(args, "fill_missing_vectors", False):
+    if misses and fill_missing_vectors_enabled:
         phase_started = time.perf_counter()
         vector_fill_report = fill_missing_manifest_vectors(
             desired_manifest,
@@ -1769,6 +1776,8 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "manifest_path": None,
         "materialize": materialize_report,
         "vector_cache_path": str(cache_path),
+        "cache_only_blockers": cache_only_blocker_summary,
+        "fill_missing_vectors": fill_missing_vectors_enabled,
         "vector_cache_seed": vector_seed_report,
         "vector_cache_fill": vector_fill_report,
         "vector_cache": vector_report,
