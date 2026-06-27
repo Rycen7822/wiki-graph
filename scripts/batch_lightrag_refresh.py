@@ -148,6 +148,8 @@ def build_full_materialization_import_commands(root: Path, state_dir: Path, work
             "--seed-from-storage",
             "--seed-storage-dir",
             str(workdir / "rag_storage"),
+            "--fill-missing-vectors",
+            "--allow-current-storage-audit-failure",
             "--no-swap",
             "--prepare-swap",
         ],
@@ -164,17 +166,60 @@ def build_full_materialization_import_commands(root: Path, state_dir: Path, work
             str(workdir),
             "--prepared-report",
             str(prepared_report),
+            "--allow-current-storage-audit-failure",
         ],
         ["systemctl", "--user", "start", SERVICE_NAME],
         ["python-internal", "health", "http://127.0.0.1:9621/health"],
     ]
 
 
+def forced_full_rebuild_reuses_vector_cache(import_mode: dict[str, Any]) -> bool:
+    return bool(import_mode.get("force_full_rebuild") and import_mode.get("reuse_vector_cache"))
+
+
 def should_use_full_materialization(import_mode: dict[str, Any]) -> bool:
     if import_mode.get("selected_mode") != "full_rebuild":
         return False
+    if forced_full_rebuild_reuses_vector_cache(import_mode):
+        return True
     reasons = {str(reason) for reason in (import_mode.get("reasons") or [])}
     return bool(reasons) and reasons <= MATERIALIZABLE_FULL_REBUILD_REASONS
+
+
+def threshold_defaults_to_forced_full_rebuild(reason: str) -> bool:
+    return reason == "threshold"
+
+
+def apply_refresh_mode_policy(
+    import_mode: dict[str, Any],
+    *,
+    reason: str,
+    force_full_rebuild: bool = False,
+    reuse_vector_cache: bool = False,
+) -> dict[str, Any]:
+    """Apply user/policy-selected refresh mode overrides to a planner result."""
+
+    threshold_default = threshold_defaults_to_forced_full_rebuild(reason)
+    effective_force_full_rebuild = bool(force_full_rebuild or threshold_default)
+    effective_reuse_vector_cache = bool(reuse_vector_cache or threshold_default)
+    if not effective_force_full_rebuild:
+        return import_mode
+
+    forced_mode = dict(import_mode)
+    forced_mode["planner_selected_mode"] = import_mode.get("selected_mode")
+    forced_mode["planner_reasons"] = list(import_mode.get("reasons") or [])
+    forced_mode["selected_mode"] = "full_rebuild"
+    force_reason = "threshold_default" if threshold_default and not force_full_rebuild else "explicit_force_full_rebuild"
+    forced_mode["force_full_rebuild"] = True
+    forced_mode["reuse_vector_cache"] = effective_reuse_vector_cache
+    forced_mode["force_reason"] = force_reason
+    reasons = [str(item) for item in (import_mode.get("reasons") or [])]
+    marker = f"force_full_rebuild:{force_reason}"
+    if marker not in reasons:
+        reasons.append(marker)
+    forced_mode["reasons"] = reasons
+    forced_mode["next_incremental_count_since_full"] = 0
+    return forced_mode
 
 
 def plan_incremental_import_mode(root: Path, state_dir: Path, workdir: Path) -> dict[str, Any]:
@@ -257,7 +302,17 @@ def wait_health(url: str, log_path: Path, attempts: int = 12, delay_s: float = 5
     raise RuntimeError(f"LightRAG health check did not become healthy: {last_error}")
 
 
-def run_real_refresh(root: Path, state_dir: Path, workdir: Path, reason: str, artifact_log: Path, import_log: Path) -> dict[str, Any]:
+def run_real_refresh(
+    root: Path,
+    state_dir: Path,
+    workdir: Path,
+    reason: str,
+    artifact_log: Path,
+    import_log: Path,
+    *,
+    force_full_rebuild: bool = False,
+    reuse_vector_cache: bool = False,
+) -> dict[str, Any]:
     ensure_state_dirs(state_dir)
     refresh_groups = build_refresh_command_groups(root, state_dir, workdir)
     artifact_commands = refresh_groups["artifact"]
@@ -267,7 +322,12 @@ def run_real_refresh(root: Path, state_dir: Path, workdir: Path, reason: str, ar
         run_subprocess(command, artifact_log, timeout=600)
     append_log(artifact_log, f"[batch-refresh] artifacts complete {now_stamp()}\n")
 
-    import_mode = plan_incremental_import_mode(root, state_dir, workdir)
+    import_mode = apply_refresh_mode_policy(
+        plan_incremental_import_mode(root, state_dir, workdir),
+        reason=reason,
+        force_full_rebuild=force_full_rebuild,
+        reuse_vector_cache=reuse_vector_cache,
+    )
     release_process_memory()
     import_commands = select_import_commands(root, state_dir, workdir, full_import_commands, import_mode)
     append_log(import_log, f"[batch-refresh] import start {now_stamp()} reason={reason} mode={import_mode.get('selected_mode')} reasons={import_mode.get('reasons')}\n")
@@ -312,6 +372,12 @@ def run_real_refresh(root: Path, state_dir: Path, workdir: Path, reason: str, ar
         health, _service_stopped, _service_started = _run_import_commands(import_commands)
     except Exception as exc:
         if should_use_full_materialization(import_mode) and not bool(getattr(exc, "_lightrag_service_stopped", False)):
+            if forced_full_rebuild_reuses_vector_cache(import_mode):
+                append_log(
+                    import_log,
+                    f"[batch-refresh] full materialization failed before service stop; refusing cold full import because force_full_rebuild+reuse_vector_cache is fail-closed: {type(exc).__name__}: {exc}\n",
+                )
+                raise
             append_log(import_log, f"[batch-refresh] full materialization failed before service stop; falling back to cold full import: {type(exc).__name__}: {exc}\n")
             fallback_mode = dict(import_mode)
             fallback_mode["full_materialization_fallback"] = "cold_full_import"
@@ -361,6 +427,8 @@ def main() -> int:
     refresh_parser.add_argument("--threshold", type=int, default=None, help="Override ledger threshold for this run/dry-run decision")
     refresh_parser.add_argument("--dry-run", action="store_true")
     refresh_parser.add_argument("--force", action="store_true")
+    refresh_parser.add_argument("--force-full-rebuild", action="store_true", help="Force the import phase to use a full rebuild mode instead of the planner-selected incremental mode")
+    refresh_parser.add_argument("--reuse-vector-cache", action="store_true", help="With --force-full-rebuild, use cache-only full materialization seeded from live storage instead of cold re-embedding")
 
     clear_parser = sub.add_parser("clear-success", help="Clear pending ledger after an externally completed successful refresh")
     add_common_paths(clear_parser)
@@ -414,10 +482,21 @@ def main() -> int:
         import_mode = None
         if should_run:
             try:
-                import_mode = plan_incremental_import_mode(root, state_dir, workdir)
+                import_mode = apply_refresh_mode_policy(
+                    plan_incremental_import_mode(root, state_dir, workdir),
+                    reason=args.reason,
+                    force_full_rebuild=args.force_full_rebuild,
+                    reuse_vector_cache=args.reuse_vector_cache,
+                )
                 commands = command_groups["artifact"] + select_import_commands(root, state_dir, workdir, command_groups["full_import"], import_mode)
             except Exception as exc:
                 import_mode = {"selected_mode": "full_rebuild", "reasons": ["incremental_plan_failed"], "error": type(exc).__name__, "message": str(exc)}
+                import_mode = apply_refresh_mode_policy(
+                    import_mode,
+                    reason=args.reason,
+                    force_full_rebuild=args.force_full_rebuild,
+                    reuse_vector_cache=args.reuse_vector_cache,
+                )
         if args.dry_run:
             print_json({"dry_run": True, "would_run": should_run, "force_blocked_by_pending_wiki_integration": force_blocked, "status": status, "import_mode": import_mode, "commands": commands, "artifact_log": str(artifact_log), "import_log": str(import_log)})
             return 0
@@ -425,7 +504,16 @@ def main() -> int:
             print_json({"dry_run": False, "would_run": False, "force_blocked_by_pending_wiki_integration": force_blocked, "skipped": True, "status": status})
             return 0
         try:
-            result = run_real_refresh(root, state_dir, workdir, args.reason, artifact_log, import_log)
+            result = run_real_refresh(
+                root,
+                state_dir,
+                workdir,
+                args.reason,
+                artifact_log,
+                import_log,
+                force_full_rebuild=args.force_full_rebuild,
+                reuse_vector_cache=args.reuse_vector_cache,
+            )
         except Exception as exc:
             failure = record_lightrag_refresh_failure(state_dir, reason=args.reason, log_path=str(import_log), message=str(exc))
             print_json({"error": type(exc).__name__, "message": str(exc), "failure": failure, "artifact_log": str(artifact_log), "import_log": str(import_log)})

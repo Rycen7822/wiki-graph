@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import sqlite3
 import struct
@@ -12,6 +13,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage  # noqa: E402
+
+
+def _legacy_rel_id(src_id: str, tgt_id: str) -> str:
+    normalized_src, normalized_tgt = sorted((src_id, tgt_id))
+    return "rel-" + hashlib.md5((normalized_src + normalized_tgt).encode("utf-8")).hexdigest()
 
 
 def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
@@ -240,6 +246,132 @@ def test_seed_vector_cache_skips_storage_vectors_when_previous_vector_hash_diffe
 
     assert seed["summary"]["total"] == {"total": 1, "seeded": 0, "missing": 1}
     assert seed["skipped_vector_hash_mismatch"]["chunks"] == ["chunk-a"]
+    assert resolved["summary"]["total"] == {"total": 1, "hits": 0, "misses": 1}
+
+
+def test_seed_vector_cache_reuses_legacy_relationship_storage_when_content_matches_desired(tmp_path) -> None:
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    src_id = "raw_section:z"
+    tgt_id = "raw_clip:a"
+    legacy_id = _legacy_rel_id(src_id, tgt_id)
+    desired_content = "RAW_SECTION_OF\traw_clip:a\nraw_section:z\nraw_section:z RAW_SECTION_OF raw_clip:a"
+    (storage_dir / "vdb_chunks.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_entities.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_relationships.json").write_text(
+        json.dumps(
+            {
+                "embedding_dim": 2,
+                "data": [
+                    {
+                        "__id__": legacy_id,
+                        "src_id": "raw_clip:a",
+                        "tgt_id": "raw_section:z",
+                        "keywords": "RAW_SECTION_OF",
+                        "content": desired_content,
+                        "vector": [1.0, 2.0],
+                    }
+                ],
+                "matrix": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    key = "raw_section:z<SEP>raw_clip:a<SEP>RAW_SECTION_OF"
+    previous_manifest = {
+        "metadata": {"embedding_model": "embed-a", "embedding_dim": 2, "embedding_params_version": "v1"},
+        "chunks": {},
+        "entities": {},
+        "relationships": {
+            key: {
+                "record_type": "relationship",
+                "record_id": "rel-typed",
+                "canonical_id": key,
+                "src_id": src_id,
+                "tgt_id": tgt_id,
+                "keywords": "RAW_SECTION_OF",
+                "content": "RAW_SECTION_OF\traw_section:z\nraw_clip:a\nraw_section:z RAW_SECTION_OF raw_clip:a",
+                "vector_hash": "old-directed-hash",
+                "embedding_model": "embed-a",
+                "embedding_dim": 2,
+                "embedding_params_version": "v1",
+            }
+        },
+    }
+    desired_manifest = json.loads(json.dumps(previous_manifest))
+    desired_manifest["relationships"][key]["content"] = desired_content
+    desired_manifest["relationships"][key]["vector_hash"] = "new-sorted-hash"
+    cache = VectorCache(tmp_path / "cache.sqlite")
+
+    seed = seed_vector_cache_from_storage(desired_manifest, storage_dir, cache, previous_manifest=previous_manifest)
+    resolved = resolve_manifest_vectors(desired_manifest, cache)
+
+    assert seed["summary"]["total"] == {"total": 1, "seeded": 1, "missing": 0}
+    assert seed["skipped_vector_hash_mismatch"]["relationships"] == []
+    assert resolved["summary"]["total"] == {"total": 1, "hits": 1, "misses": 0}
+    assert resolved["resolved"]["relationships"][key]["vector"] == pytest.approx([1.0, 2.0])
+
+
+def test_seed_vector_cache_rejects_legacy_relationship_reuse_when_embedding_contract_changes(tmp_path) -> None:
+    storage_dir = tmp_path / "storage"
+    storage_dir.mkdir()
+    src_id = "raw_section:z"
+    tgt_id = "raw_clip:a"
+    legacy_id = _legacy_rel_id(src_id, tgt_id)
+    desired_content = "RAW_SECTION_OF\traw_clip:a\nraw_section:z\nraw_section:z RAW_SECTION_OF raw_clip:a"
+    (storage_dir / "vdb_chunks.json").write_text(json.dumps({"embedding_dim": 3, "data": [], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_entities.json").write_text(json.dumps({"embedding_dim": 3, "data": [], "matrix": ""}), encoding="utf-8")
+    (storage_dir / "vdb_relationships.json").write_text(
+        json.dumps(
+            {
+                "embedding_dim": 3,
+                "data": [
+                    {
+                        "__id__": legacy_id,
+                        "src_id": "raw_clip:a",
+                        "tgt_id": "raw_section:z",
+                        "keywords": "RAW_SECTION_OF",
+                        "content": desired_content,
+                        "vector": [1.0, 2.0, 3.0],
+                    }
+                ],
+                "matrix": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    key = "raw_section:z<SEP>raw_clip:a<SEP>RAW_SECTION_OF"
+    previous_manifest = {
+        "metadata": {"embedding_model": "embed-old", "embedding_dim": 3, "embedding_params_version": "v1"},
+        "chunks": {},
+        "entities": {},
+        "relationships": {
+            key: {
+                "record_type": "relationship",
+                "record_id": "rel-typed",
+                "canonical_id": key,
+                "src_id": src_id,
+                "tgt_id": tgt_id,
+                "keywords": "RAW_SECTION_OF",
+                "content": desired_content,
+                "vector_hash": "old-contract-hash",
+                "embedding_model": "embed-old",
+                "embedding_dim": 3,
+                "embedding_params_version": "v1",
+            }
+        },
+    }
+    desired_manifest = json.loads(json.dumps(previous_manifest))
+    desired_manifest["metadata"]["embedding_model"] = "embed-new"
+    desired_manifest["relationships"][key]["embedding_model"] = "embed-new"
+    desired_manifest["relationships"][key]["vector_hash"] = "new-contract-hash"
+    cache = VectorCache(tmp_path / "cache.sqlite")
+
+    seed = seed_vector_cache_from_storage(desired_manifest, storage_dir, cache, previous_manifest=previous_manifest)
+    resolved = resolve_manifest_vectors(desired_manifest, cache)
+
+    assert seed["summary"]["total"] == {"total": 1, "seeded": 0, "missing": 1}
+    assert seed["skipped_vector_hash_mismatch"]["relationships"] == [key]
     assert resolved["summary"]["total"] == {"total": 1, "hits": 0, "misses": 1}
 
 

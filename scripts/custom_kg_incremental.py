@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from wiki_lightrag_lib import (
 
 GRAPH_FIELD_SEP = "<SEP>"
 MANIFEST_SCHEMA_VERSION = 1
+RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "lightrag-pair-sorted-endpoints:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
 REPORT_FILENAME = "custom_kg_import_report.json"
 PREPARED_SWAP_DIRNAME = "prepared_swaps"
@@ -121,6 +123,19 @@ def relation_chunk_key(src_id: str, tgt_id: str) -> str:
     """Compatibility graph/storage pair key for LightRAG's one-edge-per-pair graph."""
 
     return GRAPH_FIELD_SEP.join(sorted((src_id, tgt_id)))
+
+
+def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, description: str) -> str:
+    """Embedding text for a typed relationship using LightRAG's pair-stable endpoint order.
+
+    The record identity remains typed/directed, but the vector text follows the
+    sorted endpoint order used by LightRAG's legacy relationship VDB records so
+    existing vectors remain reusable when the relationship semantics are exact.
+    Directional semantics must live in ``keywords`` and ``description``.
+    """
+
+    normalized_src, normalized_tgt = sorted((str(src_id), str(tgt_id)))
+    return f"{keywords}\t{normalized_src}\n{normalized_tgt}\n{description}"
 
 
 def relationship_record_key(src_id: str, tgt_id: str, keywords: str) -> str:
@@ -339,6 +354,7 @@ def metadata_from_environment(
         "embedding_params_version": embedding_params_version or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"),
         "custom_kg_builder_hash": custom_kg_builder_hash or "wiki_lightrag_lib.build_custom_kg_payload:v1",
         "canonical_id_algorithm": "llm-wiki-canonical-id:v1+lightrag-custom-kg:v1.5",
+        "relationship_vector_content_algorithm": RELATIONSHIP_VECTOR_CONTENT_ALGORITHM,
         "section_similarity_params": section_similarity_params or {},
         "incremental_count_since_full": 0,
         "created_at": now_stamp(),
@@ -358,10 +374,12 @@ def build_custom_kg_manifest(
 ) -> dict[str, Any]:
     """Canonicalize a complete custom_kg payload into a desired storage manifest.
 
-    The canonicalization mirrors LightRAG v1.5.0 custom_kg semantics:
-    chunks are content-hashed, entities keep the last declaration by name,
-    relationships keep the last declaration by unordered endpoint pair, and
-    logical ``source_id`` fields are resolved through the complete payload's
+    The canonicalization mirrors LightRAG v1.5.0 custom_kg storage where safe:
+    chunks are content-hashed, entities keep the last declaration by name, and
+    relationship vector text uses LightRAG's pair-stable endpoint order. Unlike
+    upstream cold import, relationship identity remains typed/directed so same
+    endpoint pairs with distinct semantics do not silent-last-win collapse.
+    Logical ``source_id`` fields are resolved through the complete payload's
     source-to-chunk map before any diff is attempted.
     """
 
@@ -469,7 +487,7 @@ def build_custom_kg_manifest(
             "source_logical_id": logical_source_id,
             "source_chunk_id": source_chunk_id,
             "file_path": file_path,
-            "content": f"{keywords}\t{src_id}\n{tgt_id}\n{description}",
+            "content": relationship_vector_content(src_id, tgt_id, keywords, description),
             **embedding_contract,
         }
         _stamp_identity_and_hashes(record, record_id=vdb_id, canonical_id=key)
@@ -493,7 +511,47 @@ def build_custom_kg_manifest(
     }
 
 
-def _diff_collection(old_items: dict[str, Any], new_items: dict[str, Any]) -> dict[str, Any]:
+def _embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
+    dim = record.get("embedding_dim")
+    try:
+        normalized_dim = int(dim) if dim is not None else None
+    except (TypeError, ValueError):
+        normalized_dim = None
+    return (
+        str(record.get("embedding_model") or ""),
+        normalized_dim,
+        str(record.get("embedding_params_version") or ""),
+    )
+
+
+def _legacy_directed_relationship_content(record: dict[str, Any]) -> str | None:
+    required = [record.get("keywords"), record.get("src_id"), record.get("tgt_id"), record.get("description")]
+    if any(value is None for value in required):
+        return None
+    return f"{record['keywords']}\t{record['src_id']}\n{record['tgt_id']}\n{record['description']}"
+
+
+def _relationship_endpoint_order_only_vector_change(old_record: dict[str, Any], new_record: dict[str, Any]) -> bool:
+    if old_record.get("record_type") != "relationship" or new_record.get("record_type") != "relationship":
+        return False
+    for field in ("src_id", "tgt_id", "keywords", "description"):
+        if str(old_record.get(field)) != str(new_record.get(field)):
+            return False
+    if _embedding_contract(old_record) != _embedding_contract(new_record):
+        return False
+    expected_new_content = relationship_vector_content(
+        str(new_record["src_id"]),
+        str(new_record["tgt_id"]),
+        str(new_record["keywords"]),
+        str(new_record["description"]),
+    )
+    if str(new_record.get("content")) != expected_new_content:
+        return False
+    old_content = str(old_record.get("content"))
+    return old_content == expected_new_content or old_content == _legacy_directed_relationship_content(old_record)
+
+
+def _diff_collection(collection: str, old_items: dict[str, Any], new_items: dict[str, Any]) -> dict[str, Any]:
     old_keys = set(old_items)
     new_keys = set(new_items)
     add_ids = sorted(new_keys - old_keys)
@@ -512,7 +570,10 @@ def _diff_collection(old_items: dict[str, Any], new_items: dict[str, Any]) -> di
         if not old_vector_hash or not new_vector_hash:
             vector_update_ids.append(key)
         elif old_vector_hash != new_vector_hash:
-            vector_update_ids.append(key)
+            if collection == "relationships" and _relationship_endpoint_order_only_vector_change(old_record, new_record):
+                metadata_update_ids.append(key)
+            else:
+                vector_update_ids.append(key)
         elif old_metadata_hash != new_metadata_hash:
             metadata_update_ids.append(key)
         else:
@@ -537,9 +598,9 @@ def _diff_collection(old_items: dict[str, Any], new_items: dict[str, Any]) -> di
 
 def diff_custom_kg_manifests(old_manifest: dict[str, Any], new_manifest: dict[str, Any]) -> dict[str, Any]:
     return {
-        "chunks": _diff_collection(old_manifest.get("chunks", {}), new_manifest.get("chunks", {})),
-        "entities": _diff_collection(old_manifest.get("entities", {}), new_manifest.get("entities", {})),
-        "relationships": _diff_collection(old_manifest.get("relationships", {}), new_manifest.get("relationships", {})),
+        "chunks": _diff_collection("chunks", old_manifest.get("chunks", {}), new_manifest.get("chunks", {})),
+        "entities": _diff_collection("entities", old_manifest.get("entities", {}), new_manifest.get("entities", {})),
+        "relationships": _diff_collection("relationships", old_manifest.get("relationships", {}), new_manifest.get("relationships", {})),
     }
 
 
@@ -567,6 +628,120 @@ def full_materialization_cache_only_blockers(previous_manifest: dict[str, Any] |
     return {"blocked": total > 0, "total": total, "collections": collections, "diff": diff}
 
 
+def embed_texts_openai_compatible(
+    texts: list[str],
+    *,
+    workdir: Path,
+    embedding_model: str,
+    embedding_dim: int,
+    timeout: int | None = None,
+) -> list[list[float]]:
+    """Embed texts through the configured OpenAI-compatible embedding endpoint."""
+
+    host = (os.environ.get("EMBEDDING_BINDING_HOST") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+    api_key = os.environ.get("EMBEDDING_BINDING_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    if not host:
+        raise RuntimeError("EMBEDDING_BINDING_HOST or OPENAI_BASE_URL is required to fill missing vectors")
+    if not api_key:
+        raise RuntimeError("EMBEDDING_BINDING_API_KEY or OPENAI_API_KEY is required to fill missing vectors")
+    url = f"{host}/embeddings"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"model": embedding_model, "input": texts}, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout or env_int("EMBEDDING_TIMEOUT", 120)) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    data = sorted(payload.get("data") or [], key=lambda row: row.get("index", 0))
+    vectors = [row.get("embedding") for row in data]
+    if len(vectors) != len(texts) or not all(isinstance(vector, list) for vector in vectors):
+        raise RuntimeError(f"embedding response count mismatch: expected {len(texts)}, got {len(vectors)}")
+    for index, vector in enumerate(vectors):
+        if len(vector) != embedding_dim:
+            raise RuntimeError(f"embedding response dimension mismatch at {index}: expected {embedding_dim}, got {len(vector)}")
+    return vectors  # type: ignore[return-value]
+
+
+def _missing_manifest_records(manifest: dict[str, Any], vector_report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    records: list[tuple[str, str, dict[str, Any]]] = []
+    missing = vector_report.get("missing", {}) if isinstance(vector_report, dict) else {}
+    for collection in ("chunks", "entities", "relationships"):
+        collection_records = manifest.get(collection, {})
+        if not isinstance(collection_records, dict):
+            continue
+        for key in missing.get(collection, []) if isinstance(missing, dict) else []:
+            record = collection_records.get(key)
+            if isinstance(record, dict):
+                records.append((collection, str(key), record))
+    return records
+
+
+def fill_missing_manifest_vectors(
+    manifest: dict[str, Any],
+    vector_report: dict[str, Any],
+    cache: Any,
+    *,
+    workdir: Path,
+    embed_texts_func: Any | None = None,
+) -> dict[str, Any]:
+    """Embed only manifest records that are unresolved after cache/storage seeding."""
+
+    missing_records = _missing_manifest_records(manifest, vector_report)
+    if not missing_records:
+        return {"summary": {"total": 0, "embedded": 0}, "by_collection": {}}
+    metadata = manifest.get("metadata", {}) if isinstance(manifest.get("metadata"), dict) else {}
+    embedding_model = str(metadata.get("embedding_model") or os.environ.get("EMBEDDING_MODEL") or "text-embedding-3-small")
+    embedding_dim = int(metadata.get("embedding_dim") or env_int("EMBEDDING_DIM", 1536))
+    embedding_params_version = str(metadata.get("embedding_params_version") or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"))
+    embedder = embed_texts_func or embed_texts_openai_compatible
+    batch_size = max(1, env_int("EMBEDDING_BATCH_NUM", 10))
+    cache_records: list[dict[str, Any]] = []
+    by_collection: dict[str, int] = {"chunks": 0, "entities": 0, "relationships": 0}
+    for offset in range(0, len(missing_records), batch_size):
+        batch = missing_records[offset : offset + batch_size]
+        texts = [str(record.get("content") or "") for _collection, _key, record in batch]
+        if any(text == "" for text in texts):
+            empty_key = batch[texts.index("")][1]
+            raise RuntimeError(f"cannot fill missing vector for empty content record: {empty_key}")
+        vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
+        if len(vectors) != len(batch):
+            raise RuntimeError(f"embedding fill response count mismatch: expected {len(batch)}, got {len(vectors)}")
+        for (collection, key, record), vector in zip(batch, vectors):
+            if len(vector) != embedding_dim:
+                raise RuntimeError(f"embedding fill dimension mismatch for {collection}:{key}: expected {embedding_dim}, got {len(vector)}")
+            required = [
+                record.get("vector_hash"),
+                record.get("record_type"),
+                record.get("record_id"),
+                record.get("embedding_model") or embedding_model,
+                record.get("embedding_dim") or embedding_dim,
+                record.get("embedding_params_version") or embedding_params_version,
+            ]
+            if any(value in (None, "") for value in required):
+                raise RuntimeError(f"cannot fill missing vector with incomplete manifest contract: {collection}:{key}")
+            cache_records.append(
+                {
+                    "vector_hash": str(record["vector_hash"]),
+                    "record_type": str(record["record_type"]),
+                    "record_id": str(record["record_id"]),
+                    "embedding_model": str(record.get("embedding_model") or embedding_model),
+                    "embedding_dim": int(record.get("embedding_dim") or embedding_dim),
+                    "embedding_params_version": str(record.get("embedding_params_version") or embedding_params_version),
+                    "vector": [float(value) for value in vector],
+                }
+            )
+            by_collection[collection] = by_collection.get(collection, 0) + 1
+    cache.put_many(cache_records)
+    return {
+        "summary": {"total": len(cache_records), "embedded": len(cache_records)},
+        "by_collection": {key: value for key, value in by_collection.items() if value},
+        "embedding_model": embedding_model,
+        "embedding_dim": embedding_dim,
+        "embedding_params_version": embedding_params_version,
+    }
+
+
 def choose_refresh_mode(
     previous_manifest: dict[str, Any] | None,
     desired_manifest: dict[str, Any],
@@ -591,6 +766,7 @@ def choose_refresh_mode(
             "embedding_dim",
             "custom_kg_builder_hash",
             "canonical_id_algorithm",
+            "relationship_vector_content_algorithm",
             "section_similarity_params",
         ]:
             if previous_meta.get(key) != desired_meta.get(key):
@@ -910,9 +1086,10 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
             source_chunk = relationship.get("source_chunk_id")
             src, tgt = split_relation_chunk_key(key)
             graph_source = graph.edges[src, tgt].get("source_id") if graph.has_edge(src, tgt) else None
+            graph_sources = split_source_ids(graph_source)
             if source_chunk == "UNKNOWN":
                 _append_issue(issues, "manifest_unknown_relationship_source", relationship=key)
-            elif graph.has_edge(src, tgt) and str(graph_source) != str(source_chunk):
+            elif graph.has_edge(src, tgt) and str(source_chunk) not in graph_sources:
                 _append_issue(issues, "desired_relationship_source_mismatch", relationship=key, desired=source_chunk, graph=graph_source)
 
     counts = {
@@ -1511,6 +1688,20 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     vector_report = resolve_manifest_vectors(desired_manifest, cache)
     _record_timing(timings, "resolve_vector_cache_s", phase_started)
     misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
+    vector_fill_report = None
+    if misses and getattr(args, "fill_missing_vectors", False):
+        phase_started = time.perf_counter()
+        vector_fill_report = fill_missing_manifest_vectors(
+            desired_manifest,
+            vector_report,
+            cache,
+            workdir=workdir,
+        )
+        _record_timing(timings, "fill_missing_vectors_s", phase_started)
+        phase_started = time.perf_counter()
+        vector_report = resolve_manifest_vectors(desired_manifest, cache)
+        _record_timing(timings, "resolve_vector_cache_after_fill_s", phase_started)
+        misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
     if misses:
         raise RuntimeError(f"full materialization requires all vectors resolved from cache; misses={misses}")
 
@@ -1537,7 +1728,7 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         if not live_storage.exists():
             raise RuntimeError(f"missing live rag_storage before prepared full materialization: {live_storage}")
         pre_audit = audit_custom_kg_storage(live_storage, previous_manifest)
-        if not pre_audit.get("ok"):
+        if not pre_audit.get("ok") and not getattr(args, "allow_current_storage_audit_failure", False):
             raise RuntimeError(f"live storage audit failed before prepared full materialization: {json.dumps(pre_audit.get('issues', [])[:10], ensure_ascii=False)}")
     _record_timing(timings, "audit_live_storage_s", phase_started)
 
@@ -1579,8 +1770,10 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "materialize": materialize_report,
         "vector_cache_path": str(cache_path),
         "vector_cache_seed": vector_seed_report,
+        "vector_cache_fill": vector_fill_report,
         "vector_cache": vector_report,
         "pre_audit": pre_audit,
+        "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
         "shadow_audit": shadow_audit,
         "query_smoke": query_smoke,
         "shadow_storage": str(shadow_storage),
@@ -1602,6 +1795,8 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
             "--prepared-report",
             str(report_path),
         ]
+        if getattr(args, "allow_current_storage_audit_failure", False):
+            report["finalize_command"].append("--allow-current-storage-audit-failure")
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return report
 
@@ -1652,7 +1847,7 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
     phase_started = time.perf_counter()
     live_audit = audit_custom_kg_storage(live_storage, current_manifest)
     _record_timing(timings, "audit_live_storage_s", phase_started)
-    if not live_audit.get("ok"):
+    if not live_audit.get("ok") and not getattr(args, "allow_current_storage_audit_failure", False):
         raise RuntimeError(f"live storage audit failed before prepared swap: {json.dumps(live_audit.get('issues', [])[:10], ensure_ascii=False)}")
 
     phase_started = time.perf_counter()
@@ -1698,6 +1893,7 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
         "plan": prepared_report.get("plan", {}),
         "pre_audit": prepared_report.get("pre_audit", {}),
         "live_audit": live_audit,
+        "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
         "shadow_audit": shadow_audit,
         "prepared_report_path": str(report_path),
         "shadow_storage": str(shadow_storage),
@@ -1763,6 +1959,11 @@ def main() -> int:
     finalize_parser.add_argument("--server-host", default="127.0.0.1")
     finalize_parser.add_argument("--server-port", type=int, default=9621)
     finalize_parser.add_argument("--allow-server-running", action="store_true")
+    finalize_parser.add_argument(
+        "--allow-current-storage-audit-failure",
+        action="store_true",
+        help="Allow replacing a live rag_storage that fails audit, but only after the prepared shadow audit passes and manifest hash checks hold",
+    )
 
     materialize_parser = sub.add_parser("materialize-full", help="Materialize and audit a full shadow storage directory without swapping live rag_storage")
     add_common_paths(materialize_parser)
@@ -1772,6 +1973,12 @@ def main() -> int:
     materialize_parser.add_argument("--storage-dir", type=Path, default=None)
     materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Seed the vector cache from an explicit file-backend storage directory before resolving vectors")
     materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Storage directory used with --seed-from-storage; defaults to <workdir>/rag_storage")
+    materialize_parser.add_argument("--fill-missing-vectors", action="store_true", help="Embed only vectors still missing after cache/storage seeding before materializing the full shadow")
+    materialize_parser.add_argument(
+        "--allow-current-storage-audit-failure",
+        action="store_true",
+        help="Allow preparing a full-materialization swap even when current live rag_storage fails audit; shadow audit and manifest hash checks still must pass",
+    )
     materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Run a direct LightRAG aquery_data smoke against the materialized shadow before optional cleanup; repeat for multiple queries")
     materialize_parser.add_argument("--smoke-mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
     materialize_parser.add_argument("--smoke-top-k", type=int, default=5)

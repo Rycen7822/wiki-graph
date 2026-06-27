@@ -638,6 +638,117 @@ def test_batch_lightrag_refresh_command_groups_preserve_order_without_positional
     assert groups["full_import"][0] == ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME]
 
 
+def test_batch_lightrag_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry_run(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    script = SCRIPTS / "batch_lightrag_refresh.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "refresh",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--reason",
+            "manual",
+            "--force",
+            "--force-full-rebuild",
+            "--reuse-vector-cache",
+            "--dry-run",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    commands = payload["commands"]
+    flattened = "\n".join(" ".join(command) for command in commands)
+
+    assert payload["would_run"] is True
+    assert payload["import_mode"]["selected_mode"] == "full_rebuild"
+    assert payload["import_mode"]["force_full_rebuild"] is True
+    assert payload["import_mode"]["reuse_vector_cache"] is True
+    assert "custom_kg_incremental.py materialize-full" in flattened
+    assert "--vector-cache" in flattened
+    assert "--seed-from-storage" in flattened
+    assert "--fill-missing-vectors" in flattened
+    assert "--allow-current-storage-audit-failure" in flattened
+    assert "--prepare-swap" in flattened
+    assert "reset-rag-storage" not in flattened
+    assert "import_custom_kg.py" not in flattened
+
+
+def test_batch_lightrag_refresh_threshold_defaults_to_full_rebuild_with_vector_cache(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    script = SCRIPTS / "batch_lightrag_refresh.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "mark-pending",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--raw-path",
+            "raw/clip/2601/26010101_Foo-Paper.md",
+            "--title",
+            "Foo Paper",
+            "--threshold",
+            "1",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "refresh",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--reason",
+            "threshold",
+            "--threshold",
+            "1",
+            "--dry-run",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    commands = payload["commands"]
+    flattened = "\n".join(" ".join(command) for command in commands)
+
+    assert payload["would_run"] is True
+    assert payload["import_mode"]["selected_mode"] == "full_rebuild"
+    assert payload["import_mode"]["force_full_rebuild"] is True
+    assert payload["import_mode"]["reuse_vector_cache"] is True
+    assert payload["import_mode"]["force_reason"] == "threshold_default"
+    assert "custom_kg_incremental.py materialize-full" in flattened
+    assert "--vector-cache" in flattened
+    assert "--seed-from-storage" in flattened
+    assert "--fill-missing-vectors" in flattened
+    assert "--allow-current-storage-audit-failure" in flattened
+    assert "reset-rag-storage" not in flattened
+    assert load_lightrag_refresh_ledger(state)["pending"]
+
+
 def test_batch_lightrag_refresh_restarts_service_after_import_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "lightrag" / "state"
@@ -664,7 +775,7 @@ def test_batch_lightrag_refresh_restarts_service_after_import_failure(tmp_path: 
     monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
 
     with pytest.raises(RuntimeError, match="import failed"):
-        batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+        batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME] in calls
     assert ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME] in calls
@@ -1945,7 +2056,7 @@ def test_batch_lightrag_refresh_uses_incremental_apply_when_plan_allows(tmp_path
 
     monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert result["import_mode"]["selected_mode"] == "incremental"
     assert release_calls
@@ -2054,13 +2165,43 @@ def test_batch_lightrag_refresh_falls_back_to_cold_full_when_materialization_pre
 
     monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert result["import_mode"]["full_materialization_fallback"] == "cold_full_import"
     materialize_idx = next(idx for idx, command in enumerate(calls) if "materialize-full" in command)
     reset_idx = next(idx for idx, command in enumerate(calls) if command[:2] == ["python-internal", "reset-rag-storage"])
     import_idx = next(idx for idx, command in enumerate(calls) if "import_custom_kg.py" in " ".join(command))
     assert materialize_idx < reset_idx < import_idx
+
+
+def test_batch_lightrag_refresh_threshold_full_reuse_fails_closed_without_cold_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    artifact_log = state / "refresh_logs" / "artifact.log"
+    import_log = state / "refresh_logs" / "import.log"
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        batch_lightrag_refresh,
+        "plan_incremental_import_mode",
+        lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": {"chunks": {"add": 1, "update": 0, "delete": 0}, "entities": {"add": 0, "update": 0, "delete": 0}, "relationships": {"add": 0, "update": 0, "delete": 0}}},
+    )
+    monkeypatch.setattr(batch_lightrag_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
+
+    def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
+        calls.append(command)
+        if "materialize-full" in command:
+            raise RuntimeError("cache miss before stop")
+
+    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+
+    with pytest.raises(RuntimeError, match="cache miss before stop"):
+        batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+
+    assert any("materialize-full" in command for command in calls)
+    assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
+    assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
 
 
 def test_batch_lightrag_refresh_skips_import_when_incremental_plan_has_empty_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2095,13 +2236,13 @@ def test_batch_lightrag_refresh_skips_import_when_incremental_plan_has_empty_dif
     monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", fake_clear)
     monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert result["import_skipped"] is True
     assert result["import_skip_reason"] == "incremental_empty_diff"
     assert not any(command and command[0] == "systemctl" for command in calls)
     assert not any("custom_kg_incremental.py" in " ".join(command) and "apply" in command for command in calls)
-    assert clear_calls == [{"reason": "threshold"}]
+    assert clear_calls == [{"reason": "pre-query"}]
 
 
 def test_section_similarity_embedding_text_uses_clean_section_content_without_sidecar_boilerplate() -> None:
@@ -2525,6 +2666,54 @@ def test_expand_lightrag_data_response_with_section_neighbors_keeps_direct_hits_
     assert neighbors[0]["neighbor_section_id"] == "raw_section:b:future"
     assert neighbors[0]["cosine"] == 0.88
     assert expanded["data"]["chunks"] == response["data"]["chunks"]
+
+
+def test_import_custom_kg_run_import_fails_before_manifest_write_when_storage_audit_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import asyncio
+    import custom_kg_incremental
+    import import_custom_kg
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "work" / "lightrag"
+    state_dir = workdir / "state"
+    ensure_state_dirs(state_dir)
+
+    class FakeRag:
+        async def initialize_storages(self) -> None:
+            pass
+
+        async def ainsert_custom_kg(self, _payload: dict) -> None:
+            pass
+
+        async def finalize_storages(self) -> None:
+            pass
+
+    monkeypatch.setattr(import_custom_kg, "build_rag", lambda *_args, **_kwargs: FakeRag())
+    monkeypatch.setattr(import_custom_kg, "port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        custom_kg_incremental,
+        "audit_custom_kg_storage",
+        lambda *_args, **_kwargs: {"ok": False, "issues": [{"type": "desired_relationship_vdb_mismatch"}], "counts": {}},
+    )
+    args = types.SimpleNamespace(
+        root=root,
+        workdir=workdir,
+        state_dir=state_dir,
+        limit_docs=None,
+        limit_edges=None,
+        dry_run=False,
+        server_host="127.0.0.1",
+        server_port=9621,
+        allow_server_running=False,
+    )
+
+    with pytest.raises(RuntimeError, match="custom_kg cold import storage audit failed"):
+        asyncio.run(import_custom_kg.run_import(args))
+
+    assert not (state_dir / "custom_kg_manifest.json").exists()
+    report = json.loads((state_dir / "custom_kg_import_report.json").read_text(encoding="utf-8"))
+    assert report["storage_audit"]["ok"] is False
+    assert report["manifest_path"] is None
 
 
 def test_import_custom_kg_build_rag_honors_embedding_throttle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
