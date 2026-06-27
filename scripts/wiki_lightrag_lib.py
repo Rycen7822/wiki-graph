@@ -36,6 +36,7 @@ PENDING_LIGHTRAG_REFRESH_LEDGER = "pending_lightrag_refresh.json"
 PENDING_WIKI_INTEGRATION_LEDGER = "pending_wiki_integration.json"
 DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD = 10
 DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD = 10
+VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION = 1
 WIKI_INTEGRATION_ACTIONABLE_STATUSES = {"raw_saved"}
 WIKI_INTEGRATION_REVIEW_STATUSES = {"needs_review"}
 WIKI_INTEGRATION_TERMINAL_STATUSES = {"failed", "skipped_duplicate"}
@@ -200,6 +201,94 @@ def generated_doc_filename(identifier: str, max_slug: int = 120) -> str:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def validation_report_is_fresh(
+    report: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    required_surfaces: Iterable[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Fail-closed freshness check for reusing a validation report."""
+
+    rejections: list[str] = []
+    expected_schema = current.get("schema_version", VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION)
+    if report.get("schema_version") != expected_schema:
+        rejections.append("schema_version_mismatch")
+    if not report.get("generated_at"):
+        rejections.append("missing_generated_at")
+    if "warnings" not in report:
+        rejections.append("missing_warnings")
+    elif report.get("warnings"):
+        rejections.append("report_has_warnings")
+    if "errors" not in report:
+        rejections.append("missing_errors")
+    elif report.get("errors"):
+        rejections.append("report_has_errors")
+
+    for key in ("root", "state_dir", "workdir"):
+        current_value = current.get(key)
+        if current_value is not None and report.get(key) != current_value:
+            rejections.append(f"{key}_mismatch")
+
+    covered_surfaces = {str(surface) for surface in report.get("covered_surfaces") or []}
+    for surface in required_surfaces:
+        surface_name = str(surface)
+        if surface_name not in covered_surfaces:
+            rejections.append(f"missing_required_surface:{surface_name}")
+
+    valid_reasons = {str(item) for item in report.get("valid_for_reasons") or []}
+    if reason and reason not in valid_reasons:
+        rejections.append(f"missing_valid_reason:{reason}")
+
+    report_fingerprints = report.get("input_fingerprints")
+    if not isinstance(report_fingerprints, dict):
+        report_fingerprints = {}
+    current_fingerprints = current.get("input_fingerprints")
+    if not isinstance(current_fingerprints, dict) or not current_fingerprints:
+        rejections.append("missing_current_fingerprints")
+        current_fingerprints = {}
+    for rel_path, current_fingerprint in current_fingerprints.items():
+        if rel_path not in report_fingerprints:
+            rejections.append(f"missing_fingerprint:{rel_path}")
+        elif report_fingerprints[rel_path] != current_fingerprint:
+            rejections.append(f"fingerprint_mismatch:{rel_path}")
+    for rel_path in sorted(report_fingerprints):
+        if rel_path not in current_fingerprints:
+            rejections.append(f"stale_fingerprint:{rel_path}")
+
+    return {"fresh": not rejections, "rejections": rejections}
+
+
+def validation_input_fingerprints(root: Path) -> dict[str, dict[str, Any]]:
+    root = root.resolve()
+    paths = [root / "index.md", root / "SCHEMA.md", *indexed_markdown_pages(root), *raw_clip_files(root)]
+    fingerprints: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel in fingerprints:
+            continue
+        stat = path.stat()
+        fingerprints[rel] = {
+            "path": rel,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    return dict(sorted(fingerprints.items()))
+
+
+def validation_freshness_context(root: Path, state_dir: Path, workdir: Path | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION,
+        "root": str(root.resolve()),
+        "state_dir": str(state_dir.resolve()),
+        "workdir": str(workdir.resolve()) if workdir else None,
+        "input_fingerprints": validation_input_fingerprints(root),
+    }
 
 
 def read_text(path: Path) -> str:

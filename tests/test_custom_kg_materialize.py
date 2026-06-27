@@ -40,6 +40,146 @@ def _assert_compact_vector_cache_report(report: dict) -> None:
     assert '"vector": [' not in serialized
 
 
+def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
+    ordinal = 1
+    for collection in ("chunks", "entities", "relationships"):
+        for record in manifest[collection].values():
+            cache.put(
+                record["vector_hash"],
+                record_type=record["record_type"],
+                record_id=record["record_id"],
+                embedding_model=record["embedding_model"],
+                embedding_dim=record["embedding_dim"],
+                embedding_params_version=record["embedding_params_version"],
+                vector=[float(ordinal), float(ordinal + 1)],
+            )
+            ordinal += 1
+
+
+def _materialize_manifest_storage(manifest: dict, storage_dir: Path, cache_path: Path) -> VectorCache:
+    cache = VectorCache(cache_path)
+    _seed_manifest_vectors(manifest, cache)
+    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
+    return cache
+
+
+def _write_prepared_swap_report(
+    state_dir: Path,
+    desired_manifest: dict,
+    previous_manifest: dict,
+    shadow_storage: Path,
+    backup_dir: Path,
+    shadow_audit: dict,
+    *,
+    fingerprint: dict | None = None,
+) -> Path:
+    custom_kg_incremental.write_manifest(state_dir, previous_manifest)
+    prepared_manifest = custom_kg_incremental.prepared_swap_manifest_path(state_dir)
+    prepared_manifest.parent.mkdir(parents=True, exist_ok=True)
+    prepared_manifest.write_text(json.dumps(desired_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = {
+        "started_at": "2026-06-26 00:00",
+        "prepared_for_swap": True,
+        "import_mode": "full_materialization",
+        "previous_manifest_hash": custom_kg_incremental.stable_hash(previous_manifest),
+        "desired_manifest_hash": custom_kg_incremental.stable_hash(desired_manifest),
+        "desired_manifest_path": str(prepared_manifest),
+        "shadow_storage": str(shadow_storage),
+        "backup_dir": str(backup_dir),
+        "payload": {},
+        "manifest": desired_manifest.get("summary", {}),
+        "shadow_audit": shadow_audit,
+    }
+    if fingerprint is not None:
+        report["prepared_shadow_fingerprint"] = fingerprint
+    report_path = custom_kg_incremental.prepared_swap_report_path(state_dir)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report_path
+
+
+def _prepared_finalize_fixture(tmp_path: Path, *, backup_name: str = "prepared-backup") -> types.SimpleNamespace:
+    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    root = tmp_path / "wiki"
+    live_storage = workdir / "rag_storage"
+    shadow_storage = tmp_path / "prepared_shadow"
+    backup_dir = state_dir / "backups" / backup_name
+    state_dir.mkdir()
+    workdir.mkdir()
+    root.mkdir()
+    live_storage.mkdir()
+    (live_storage / "live.txt").write_text("live", encoding="utf-8")
+    _materialize_manifest_storage(manifest, shadow_storage, tmp_path / "cache.sqlite")
+    shadow_audit = audit_custom_kg_storage(shadow_storage, manifest)
+    fingerprint = custom_kg_incremental.prepared_shadow_fingerprint(shadow_storage, custom_kg_incremental.stable_hash(manifest), shadow_audit)
+    report_path = _write_prepared_swap_report(state_dir, manifest, manifest, shadow_storage, backup_dir, shadow_audit, fingerprint=fingerprint)
+    return types.SimpleNamespace(
+        manifest=manifest,
+        state_dir=state_dir,
+        workdir=workdir,
+        root=root,
+        live_storage=live_storage,
+        shadow_storage=shadow_storage,
+        backup_dir=backup_dir,
+        shadow_audit=shadow_audit,
+        report_path=report_path,
+    )
+
+
+def test_embedding_profile_env_defaults_and_rejects_unknown() -> None:
+    assert custom_kg_incremental.embedding_profile_env("conservative") == {
+        "EMBEDDING_FUNC_MAX_ASYNC": "1",
+        "EMBEDDING_BATCH_NUM": "10",
+        "MAX_PARALLEL_INSERT": "1",
+    }
+    assert custom_kg_incremental.embedding_profile_env("shadow-medium")["EMBEDDING_BATCH_NUM"] == "20"
+    with pytest.raises(ValueError, match="unknown embedding profile"):
+        custom_kg_incremental.embedding_profile_env("surprise-fast")
+
+
+def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_path) -> None:
+    manifest = {
+        "metadata": {"embedding_model": "embed-a", "embedding_dim": 2, "embedding_params_version": "v1"},
+        "chunks": {
+            "chunk:a": {
+                "record_type": "chunk",
+                "record_id": "chunk:a",
+                "vector_hash": "hash-a",
+                "content": "Doc A content",
+                "embedding_model": "embed-a",
+                "embedding_dim": 2,
+                "embedding_params_version": "v1",
+            }
+        },
+        "entities": {},
+        "relationships": {},
+    }
+    vector_report = {"missing": {"chunks": ["chunk:a"], "entities": [], "relationships": []}}
+    cache = VectorCache(tmp_path / "cache.sqlite")
+
+    def fake_embed(texts, **_kwargs):
+        assert texts == ["Doc A content"]
+        return [[0.1, 0.2]]
+
+    report = custom_kg_incremental.fill_missing_manifest_vectors(
+        manifest,
+        vector_report,
+        cache,
+        workdir=tmp_path,
+        embed_texts_func=fake_embed,
+        embedding_profile="shadow-medium",
+    )
+
+    assert report["embedding_profile"] == "shadow-medium"
+    assert report["batch_size"] == 20
+    assert report["concurrency"] == {"embedding_func_max_async": 2, "max_parallel_insert": 1}
+    assert report["total_batches"] == 1
+    assert report["failed_batches"] == 0
+    assert report["provider_retries"] == 0
+    assert report["elapsed_by_collection_s"]["chunks"] >= 0
+
+
 def test_manifest_and_materialization_preserve_same_endpoint_typed_relationships(tmp_path) -> None:
     payload = _payload()
     payload["relationships"] = [
@@ -729,6 +869,190 @@ def test_run_full_materialization_no_swap_can_smoke_query_shadow(monkeypatch, tm
     }
     assert report["shadow_deleted"] is True
     assert not shadow.exists()
+
+
+def test_prepared_shadow_fingerprint_verifies_and_rejects_modified_storage_file(tmp_path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    storage_dir = tmp_path / "prepared_shadow"
+    _materialize_manifest_storage(manifest, storage_dir, tmp_path / "cache.sqlite")
+    audit = audit_custom_kg_storage(storage_dir, manifest)
+    desired_hash = custom_kg_incremental.stable_hash(manifest)
+
+    fingerprint = custom_kg_incremental.prepared_shadow_fingerprint(storage_dir, desired_hash, audit)
+    prepared_report = {
+        "shadow_storage": str(storage_dir),
+        "desired_manifest_hash": desired_hash,
+        "shadow_audit": audit,
+        "prepared_shadow_fingerprint": fingerprint,
+    }
+
+    assert custom_kg_incremental.verify_prepared_shadow_fingerprint(prepared_report)["ok"] is True
+
+    vdb_chunks = storage_dir / "vdb_chunks.json"
+    vdb_chunks.write_text(vdb_chunks.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    verification = custom_kg_incremental.verify_prepared_shadow_fingerprint(prepared_report)
+    assert verification["ok"] is False
+    assert "changed_file:vdb_chunks.json" in verification["reasons"]
+
+
+def test_prepared_shadow_fingerprint_rejects_desired_manifest_hash_mismatch(tmp_path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    storage_dir = tmp_path / "prepared_shadow"
+    _materialize_manifest_storage(manifest, storage_dir, tmp_path / "cache.sqlite")
+    audit = audit_custom_kg_storage(storage_dir, manifest)
+    desired_hash = custom_kg_incremental.stable_hash(manifest)
+
+    prepared_report = {
+        "shadow_storage": str(storage_dir),
+        "desired_manifest_hash": "different-manifest-hash",
+        "shadow_audit": audit,
+        "prepared_shadow_fingerprint": custom_kg_incremental.prepared_shadow_fingerprint(storage_dir, desired_hash, audit),
+    }
+
+    verification = custom_kg_incremental.verify_prepared_shadow_fingerprint(prepared_report)
+    assert verification["ok"] is False
+    assert "desired_manifest_hash_mismatch" in verification["reasons"]
+
+    malformed_report = copy.deepcopy(prepared_report)
+    malformed_report["desired_manifest_hash"] = desired_hash
+    malformed_report["prepared_shadow_fingerprint"]["shadow_audit"]["issue_count"] = "not-an-int"
+    malformed_verification = custom_kg_incremental.verify_prepared_shadow_fingerprint(malformed_report)
+    assert malformed_verification["ok"] is False
+    assert "prepared_shadow_audit_not_clean" in malformed_verification["reasons"]
+
+
+def test_prepare_swap_report_contains_prepared_shadow_fingerprint(monkeypatch, tmp_path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    root = tmp_path / "wiki"
+    live_storage = workdir / "rag_storage"
+    state_dir.mkdir()
+    workdir.mkdir()
+    root.mkdir()
+    cache = _materialize_manifest_storage(manifest, live_storage, tmp_path / "cache.sqlite")
+    custom_kg_incremental.write_manifest(state_dir, manifest)
+    monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}))
+    args = types.SimpleNamespace(
+        root=root,
+        state_dir=state_dir,
+        workdir=workdir,
+        vector_cache=cache.path,
+        storage_dir=tmp_path / "prepared_shadow",
+        delete_shadow_on_no_swap=False,
+        limit_docs=None,
+        limit_edges=None,
+        seed_from_storage=False,
+        seed_storage_dir=None,
+        fill_missing_vectors=False,
+        prepare_swap=True,
+        allow_current_storage_audit_failure=False,
+        smoke_query=[],
+        smoke_mode="mix",
+        smoke_top_k=5,
+        smoke_chunk_top_k=5,
+    )
+
+    report = custom_kg_incremental.run_full_materialization_no_swap(args)
+    persisted = json.loads(Path(report["report_path"]).read_text(encoding="utf-8"))
+
+    assert report["prepared_shadow_fingerprint"]["desired_manifest_hash"] == report["desired_manifest_hash"]
+    assert persisted["prepared_shadow_fingerprint"] == report["prepared_shadow_fingerprint"]
+    assert custom_kg_incremental.verify_prepared_shadow_fingerprint(persisted)["ok"] is True
+
+
+def test_finalize_prepared_swap_reuses_verified_shadow_audit_but_keeps_live_audit(monkeypatch, tmp_path) -> None:
+    fixture = _prepared_finalize_fixture(tmp_path, backup_name="reuse-backup")
+    calls: list[Path] = []
+
+    def fake_audit(storage_dir, _manifest, **_kwargs):
+        calls.append(Path(storage_dir).resolve())
+        return {"ok": True, "issues": [], "counts": {}}
+
+    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
+    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=False)
+
+    report = custom_kg_incremental.run_finalize_prepared_swap(args)
+
+    assert calls == [fixture.live_storage.resolve()]
+    assert report["shadow_audit_reused"] is True
+    assert report["shadow_audit_reuse"]["reason"] == "fingerprint_verified"
+    assert report["live_audit"]["ok"] is True
+    assert report["shadow_audit"] == fixture.shadow_audit
+
+
+def test_finalize_prepared_swap_reruns_shadow_audit_when_fingerprint_changes(monkeypatch, tmp_path) -> None:
+    fixture = _prepared_finalize_fixture(tmp_path, backup_name="fallback-backup")
+    vdb_chunks = fixture.shadow_storage / "vdb_chunks.json"
+    vdb_chunks.write_text(vdb_chunks.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    calls: list[Path] = []
+
+    def fake_audit(storage_dir, _manifest, **_kwargs):
+        calls.append(Path(storage_dir).resolve())
+        return {"ok": True, "issues": [], "counts": {"path": Path(storage_dir).name}}
+
+    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
+    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=False)
+
+    report = custom_kg_incremental.run_finalize_prepared_swap(args)
+
+    assert calls == [fixture.live_storage.resolve(), fixture.shadow_storage.resolve()]
+    assert report["shadow_audit_reused"] is False
+    assert "changed_file:vdb_chunks.json" in report["shadow_audit_reuse"]["verification"]["reasons"]
+
+
+def test_finalize_prepared_swap_force_shadow_audit_uses_old_path(monkeypatch, tmp_path) -> None:
+    fixture = _prepared_finalize_fixture(tmp_path, backup_name="forced-backup")
+    calls: list[Path] = []
+
+    def fake_audit(storage_dir, _manifest, **_kwargs):
+        calls.append(Path(storage_dir).resolve())
+        return {"ok": True, "issues": [], "counts": {}}
+
+    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
+    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=True)
+
+    report = custom_kg_incremental.run_finalize_prepared_swap(args)
+
+    assert calls == [fixture.live_storage.resolve(), fixture.shadow_storage.resolve()]
+    assert report["shadow_audit_reused"] is False
+    assert report["shadow_audit_reuse"]["reason"] == "force_shadow_audit"
+
+
+def test_custom_kg_incremental_materialize_full_cli_accepts_embedding_profile(monkeypatch, tmp_path, capsys) -> None:
+    called = {}
+
+    def fake_runner(args):
+        called["embedding_profile"] = args.embedding_profile
+        return {"ok": True, "import_mode": "full_materialization", "embedding_profile": args.embedding_profile}
+
+    monkeypatch.setattr(custom_kg_incremental, "run_full_materialization_no_swap", fake_runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "custom_kg_incremental.py",
+            "materialize-full",
+            "--root",
+            str(tmp_path / "wiki"),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--no-swap",
+            "--embedding-profile",
+            "shadow-medium",
+        ],
+    )
+
+    assert custom_kg_incremental.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert called["embedding_profile"] == "shadow-medium"
+    assert out["embedding_profile"] == "shadow-medium"
 
 
 def test_custom_kg_incremental_materialize_full_cli_routes_to_no_swap_runner(monkeypatch, tmp_path, capsys) -> None:

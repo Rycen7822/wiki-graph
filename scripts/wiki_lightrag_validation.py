@@ -88,7 +88,18 @@ def validate_wiki(
         errors.append(f"raw_filename_drift={len(raw_filename_drift)}")
     if image_issues:
         errors.append(f"image_hygiene={len(image_issues)}")
+    freshness_contract: dict[str, Any] = {}
+    if write_report:
+        valid_for_reasons = ["wiki-clear-success", "final-status"]
+        if full:
+            valid_for_reasons.append("refresh-artifact")
+        freshness_contract = {
+            **lib.validation_freshness_context(root, state_dir, workdir),
+            "covered_surfaces": ["index", "compiled", "_meta", "raw"],
+            "valid_for_reasons": valid_for_reasons,
+        }
     report = {
+        **freshness_contract,
         "generated_at": lib.now_stamp(),
         "compiled_count": compiled_count,
         "index_total": index_total,

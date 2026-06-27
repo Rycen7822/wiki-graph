@@ -31,7 +31,14 @@ from wiki_lightrag_lib import (
     record_lightrag_refresh_failure,
     release_process_memory,
 )
-from custom_kg_incremental import DEFAULT_FULL_REBUILD_INTERVAL, plan_incremental_import, prepared_swap_report_path
+from custom_kg_incremental import (
+    DEFAULT_EMBEDDING_PROFILE,
+    DEFAULT_FULL_REBUILD_INTERVAL,
+    EMBEDDING_PROFILES,
+    embedding_profile_env,
+    plan_incremental_import,
+    prepared_swap_report_path,
+)
 
 LIGHTRAG_PYTHON = Path("/home/xu/.local/share/uv/tools/lightrag-hku/bin/python")
 SERVICE_NAME = "lightrag-server.service"
@@ -42,10 +49,23 @@ def script_path(workdir: Path, name: str) -> str:
     return str(workdir / "scripts" / name)
 
 
-def build_refresh_command_groups(root: Path, state_dir: Path, workdir: Path) -> dict[str, list[list[str]]]:
+def build_refresh_command_groups(root: Path, state_dir: Path, workdir: Path, reuse_validation_report: Path | None = None) -> dict[str, list[list[str]]]:
     py = sys.executable
+    validate_command = [
+        py,
+        script_path(workdir, "validate_wiki.py"),
+        "--root",
+        str(root),
+        "--state-dir",
+        str(state_dir),
+        "--workdir",
+        str(workdir),
+        "--full",
+    ]
+    if reuse_validation_report:
+        validate_command.extend(["--reuse-validation-report", str(reuse_validation_report)])
     artifact = [
-        [py, script_path(workdir, "validate_wiki.py"), "--root", str(root), "--state-dir", str(state_dir), "--workdir", str(workdir), "--full"],
+        validate_command,
         [py, script_path(workdir, "audit_raw_note_sections.py"), "--root", str(root), "--state-dir", str(state_dir), "--workdir", str(workdir), "--write-report", "--limit-issues", "200"],
         [py, script_path(workdir, "build_seed_edges.py"), "--root", str(root), "--state-dir", str(state_dir), "--workdir", str(workdir)],
         [py, script_path(workdir, "extract_method_atoms.py"), "--root", str(root), "--state-dir", str(state_dir), "--workdir", str(workdir)],
@@ -89,8 +109,8 @@ def build_refresh_command_groups(root: Path, state_dir: Path, workdir: Path) -> 
     return {"artifact": artifact, "full_import": full_import}
 
 
-def build_refresh_commands(root: Path, state_dir: Path, workdir: Path) -> list[list[str]]:
-    groups = build_refresh_command_groups(root, state_dir, workdir)
+def build_refresh_commands(root: Path, state_dir: Path, workdir: Path, reuse_validation_report: Path | None = None) -> list[list[str]]:
+    groups = build_refresh_command_groups(root, state_dir, workdir, reuse_validation_report=reuse_validation_report)
     return groups["artifact"] + groups["full_import"]
 
 
@@ -130,7 +150,9 @@ def build_incremental_import_commands(root: Path, state_dir: Path, workdir: Path
     ]
 
 
-def build_full_materialization_import_commands(root: Path, state_dir: Path, workdir: Path) -> list[list[str]]:
+def build_full_materialization_import_commands(root: Path, state_dir: Path, workdir: Path, embedding_profile: str | None = None) -> list[list[str]]:
+    embedding_profile = embedding_profile or DEFAULT_EMBEDDING_PROFILE
+    embedding_profile_env(embedding_profile)
     prepared_report = prepared_swap_report_path(state_dir)
     return [
         [
@@ -149,6 +171,8 @@ def build_full_materialization_import_commands(root: Path, state_dir: Path, work
             "--seed-storage-dir",
             str(workdir / "rag_storage"),
             "--fill-missing-vectors",
+            "--embedding-profile",
+            embedding_profile,
             "--allow-current-storage-audit-failure",
             "--no-swap",
             "--prepare-swap",
@@ -250,13 +274,13 @@ def should_skip_incremental_import(import_mode: dict[str, Any]) -> bool:
     return import_mode.get("selected_mode") == "incremental" and incremental_diff_is_empty(import_mode.get("diff"))
 
 
-def select_import_commands(root: Path, state_dir: Path, workdir: Path, full_import_commands: list[list[str]], import_mode: dict[str, Any]) -> list[list[str]]:
+def select_import_commands(root: Path, state_dir: Path, workdir: Path, full_import_commands: list[list[str]], import_mode: dict[str, Any], embedding_profile: str | None = None) -> list[list[str]]:
     if should_skip_incremental_import(import_mode):
         return []
     if import_mode.get("selected_mode") == "incremental":
         return build_incremental_import_commands(root, state_dir, workdir)
     if should_use_full_materialization(import_mode):
-        return build_full_materialization_import_commands(root, state_dir, workdir)
+        return build_full_materialization_import_commands(root, state_dir, workdir, embedding_profile=embedding_profile)
     return full_import_commands
 
 
@@ -312,29 +336,51 @@ def run_real_refresh(
     *,
     force_full_rebuild: bool = False,
     reuse_vector_cache: bool = False,
+    reuse_validation_report: Path | None = None,
+    embedding_profile: str | None = None,
 ) -> dict[str, Any]:
+    embedding_profile = embedding_profile or DEFAULT_EMBEDDING_PROFILE
+    profile_env = embedding_profile_env(embedding_profile)
     ensure_state_dirs(state_dir)
-    refresh_groups = build_refresh_command_groups(root, state_dir, workdir)
+    refresh_groups = build_refresh_command_groups(root, state_dir, workdir, reuse_validation_report=reuse_validation_report)
     artifact_commands = refresh_groups["artifact"]
     full_import_commands = refresh_groups["full_import"]
+    timings: dict[str, float] = {}
     append_log(artifact_log, f"[batch-refresh] start {now_stamp()} reason={reason}\n")
+    artifact_started = time.perf_counter()
     for command in artifact_commands:
         run_subprocess(command, artifact_log, timeout=600)
+    timings["artifact_commands_s"] = round(time.perf_counter() - artifact_started, 6)
     append_log(artifact_log, f"[batch-refresh] artifacts complete {now_stamp()}\n")
 
+    plan_started = time.perf_counter()
     import_mode = apply_refresh_mode_policy(
         plan_incremental_import_mode(root, state_dir, workdir),
         reason=reason,
         force_full_rebuild=force_full_rebuild,
         reuse_vector_cache=reuse_vector_cache,
     )
+    timings["plan_import_mode_s"] = round(time.perf_counter() - plan_started, 6)
     release_process_memory()
-    import_commands = select_import_commands(root, state_dir, workdir, full_import_commands, import_mode)
+    select_started = time.perf_counter()
+    import_commands = select_import_commands(root, state_dir, workdir, full_import_commands, import_mode, embedding_profile=embedding_profile)
+    timings["select_import_commands_s"] = round(time.perf_counter() - select_started, 6)
     append_log(import_log, f"[batch-refresh] import start {now_stamp()} reason={reason} mode={import_mode.get('selected_mode')} reasons={import_mode.get('reasons')}\n")
     if should_skip_incremental_import(import_mode):
         append_log(import_log, f"[batch-refresh] import skipped {now_stamp()} reason=incremental_empty_diff\n")
+        timings["import_commands_s"] = 0.0
         clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
-        return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": None, "clear": clear, "import_mode": import_mode, "import_skipped": True, "import_skip_reason": "incremental_empty_diff"}
+        return {
+            "artifact_log": str(artifact_log),
+            "import_log": str(import_log),
+            "health": None,
+            "clear": clear,
+            "import_mode": import_mode,
+            "embedding_profile": embedding_profile,
+            "timings": timings,
+            "import_skipped": True,
+            "import_skip_reason": "incremental_empty_diff",
+        }
     def _run_import_commands(commands: list[list[str]]) -> tuple[dict[str, Any] | None, bool, bool]:
         service_stopped = False
         service_started = False
@@ -348,7 +394,7 @@ def run_real_refresh(
                 else:
                     env = os.environ.copy()
                     if command and command[0] == str(LIGHTRAG_PYTHON):
-                        env.update({"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"})
+                        env.update(profile_env)
                     run_subprocess(command, import_log, env=env, timeout=None)
                     if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == SERVICE_NAME:
                         service_stopped = True
@@ -368,6 +414,7 @@ def run_real_refresh(
             raise
         return health, service_stopped, service_started
 
+    import_started = time.perf_counter()
     try:
         health, _service_stopped, _service_started = _run_import_commands(import_commands)
     except Exception as exc:
@@ -386,9 +433,10 @@ def run_real_refresh(
             health, _service_stopped, _service_started = _run_import_commands(full_import_commands)
         else:
             raise
+    timings["import_commands_s"] = round(time.perf_counter() - import_started, 6)
     append_log(import_log, f"[batch-refresh] import done {now_stamp()} mode={import_mode.get('selected_mode')}\n")
     clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
-    return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": health, "clear": clear, "import_mode": import_mode}
+    return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": health, "clear": clear, "import_mode": import_mode, "embedding_profile": embedding_profile, "timings": timings}
 
 
 def add_common_paths(parser: argparse.ArgumentParser) -> None:
@@ -429,6 +477,8 @@ def main() -> int:
     refresh_parser.add_argument("--force", action="store_true")
     refresh_parser.add_argument("--force-full-rebuild", action="store_true", help="Force the import phase to use a full rebuild mode instead of the planner-selected incremental mode")
     refresh_parser.add_argument("--reuse-vector-cache", action="store_true", help="With --force-full-rebuild, use cache-only full materialization seeded from live storage instead of cold re-embedding")
+    refresh_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for LightRAG Python child commands; default stays conservative")
+    refresh_parser.add_argument("--reuse-validation-report", type=Path, default=None, help="Pass an explicit reusable validation report to the artifact validation command; validate_wiki.py still performs fail-closed freshness checks")
 
     clear_parser = sub.add_parser("clear-success", help="Clear pending ledger after an externally completed successful refresh")
     add_common_paths(clear_parser)
@@ -477,10 +527,11 @@ def main() -> int:
         log_dir = state_dir / "refresh_logs"
         artifact_log = log_dir / f"{stamp}_batch_lightrag_refresh_artifacts.log"
         import_log = log_dir / f"{stamp}_batch_lightrag_refresh_import.log"
-        command_groups = build_refresh_command_groups(root, state_dir, workdir)
+        reuse_validation_report = args.reuse_validation_report.resolve() if args.reuse_validation_report else None
+        command_groups = build_refresh_command_groups(root, state_dir, workdir, reuse_validation_report=reuse_validation_report)
         commands = command_groups["artifact"] + command_groups["full_import"]
         import_mode = None
-        if should_run:
+        if args.dry_run and should_run:
             try:
                 import_mode = apply_refresh_mode_policy(
                     plan_incremental_import_mode(root, state_dir, workdir),
@@ -488,7 +539,7 @@ def main() -> int:
                     force_full_rebuild=args.force_full_rebuild,
                     reuse_vector_cache=args.reuse_vector_cache,
                 )
-                commands = command_groups["artifact"] + select_import_commands(root, state_dir, workdir, command_groups["full_import"], import_mode)
+                commands = command_groups["artifact"] + select_import_commands(root, state_dir, workdir, command_groups["full_import"], import_mode, embedding_profile=args.embedding_profile)
             except Exception as exc:
                 import_mode = {"selected_mode": "full_rebuild", "reasons": ["incremental_plan_failed"], "error": type(exc).__name__, "message": str(exc)}
                 import_mode = apply_refresh_mode_policy(
@@ -498,7 +549,7 @@ def main() -> int:
                     reuse_vector_cache=args.reuse_vector_cache,
                 )
         if args.dry_run:
-            print_json({"dry_run": True, "would_run": should_run, "force_blocked_by_pending_wiki_integration": force_blocked, "status": status, "import_mode": import_mode, "commands": commands, "artifact_log": str(artifact_log), "import_log": str(import_log)})
+            print_json({"dry_run": True, "would_run": should_run, "force_blocked_by_pending_wiki_integration": force_blocked, "status": status, "import_mode": import_mode, "embedding_profile": args.embedding_profile, "commands": commands, "artifact_log": str(artifact_log), "import_log": str(import_log)})
             return 0
         if not should_run:
             print_json({"dry_run": False, "would_run": False, "force_blocked_by_pending_wiki_integration": force_blocked, "skipped": True, "status": status})
@@ -513,6 +564,8 @@ def main() -> int:
                 import_log,
                 force_full_rebuild=args.force_full_rebuild,
                 reuse_vector_cache=args.reuse_vector_cache,
+                reuse_validation_report=reuse_validation_report,
+                embedding_profile=args.embedding_profile,
             )
         except Exception as exc:
             failure = record_lightrag_refresh_failure(state_dir, reason=args.reason, log_path=str(import_log), message=str(exc))
