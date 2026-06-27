@@ -294,11 +294,75 @@ def test_run_full_materialization_no_swap_blocks_cache_only_when_diff_needs_new_
         limit_edges=None,
         seed_from_storage=False,
         seed_storage_dir=None,
+        fill_missing_vectors=False,
     )
 
     with pytest.raises(RuntimeError, match="cache-only full materialization is unsafe"):
         custom_kg_incremental.run_full_materialization_no_swap(args)
     assert not shadow.exists()
+
+
+def test_run_full_materialization_no_swap_fills_true_adds_after_cache_only_blocker(monkeypatch, tmp_path) -> None:
+    previous = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired_payload = _payload()
+    desired_payload["entities"].append({"entity_name": "topic:new", "entity_type": "TOPIC", "description": "New topic", "source_id": "doc:a", "file_path": "a.md"})
+    desired = build_custom_kg_manifest(desired_payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    root = tmp_path / "wiki"
+    shadow = tmp_path / "shadow_full"
+    state_dir.mkdir()
+    workdir.mkdir()
+    root.mkdir()
+    custom_kg_incremental.write_manifest(state_dir, previous)
+    cache = VectorCache(state_dir / "vector_cache.sqlite")
+    ordinal = 1
+    for collection in ("chunks", "entities", "relationships"):
+        for record in previous[collection].values():
+            cache.put(
+                record["vector_hash"],
+                record_type=record["record_type"],
+                record_id=record["record_id"],
+                embedding_model=record["embedding_model"],
+                embedding_dim=record["embedding_dim"],
+                embedding_params_version=record["embedding_params_version"],
+                vector=[float(ordinal), float(ordinal + 1)],
+            )
+            ordinal += 1
+    new_entity = desired["entities"]["topic:new"]
+    embedded_texts = []
+
+    def fake_embed_texts(texts, **_kwargs):
+        embedded_texts.extend(texts)
+        return [[9.0, 10.0] for _text in texts]
+
+    monkeypatch.setattr(custom_kg_incremental, "embed_texts_openai_compatible", fake_embed_texts, raising=False)
+    monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (desired, {"chunks": 1, "entities": 3, "relationships": 1}))
+    args = types.SimpleNamespace(
+        root=root,
+        state_dir=state_dir,
+        workdir=workdir,
+        vector_cache=state_dir / "vector_cache.sqlite",
+        storage_dir=shadow,
+        delete_shadow_on_no_swap=False,
+        limit_docs=None,
+        limit_edges=None,
+        seed_from_storage=False,
+        seed_storage_dir=None,
+        fill_missing_vectors=True,
+        smoke_query=[],
+        prepare_swap=False,
+    )
+
+    report = custom_kg_incremental.run_full_materialization_no_swap(args)
+
+    assert embedded_texts == [new_entity["content"]]
+    assert report["cache_only_blockers"]["blocked"] is True
+    assert report["cache_only_blockers"]["collections"] == {"entities": {"add": 1, "vector_update": 0}}
+    assert report["vector_cache_fill"]["summary"] == {"total": 1, "embedded": 1}
+    assert report["vector_cache"]["summary"]["total"]["misses"] == 0
+    assert report["shadow_audit"]["ok"] is True
+    assert Path(report["shadow_storage"]).exists()
 
 
 def test_run_full_materialization_no_swap_fills_missing_vectors_when_enabled(monkeypatch, tmp_path) -> None:
