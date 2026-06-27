@@ -14,6 +14,77 @@ from typing import Any
 import zlib
 
 
+GRAPH_FIELD_SEP = "<SEP>"
+
+
+def _compute_mdhash_id(content: str, prefix: str = "") -> str:
+    try:
+        digest = hashlib.md5(str(content).encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        digest = hashlib.md5(str(content).encode("utf-8", errors="replace")).hexdigest()
+    return prefix + digest
+
+
+def _legacy_relationship_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
+    normalized_src, normalized_tgt = sorted((str(src_id), str(tgt_id)))
+    ids = [_compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")]
+    reverse = _compute_mdhash_id(normalized_tgt + normalized_src, prefix="rel-")
+    if reverse not in ids:
+        ids.append(reverse)
+    return ids
+
+
+def _record_embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
+    dim = record.get("embedding_dim")
+    try:
+        normalized_dim = int(dim) if dim is not None else None
+    except (TypeError, ValueError):
+        normalized_dim = None
+    return (
+        str(record.get("embedding_model") or ""),
+        normalized_dim,
+        str(record.get("embedding_params_version") or ""),
+    )
+
+
+def _storage_record_ids_for_manifest_record(collection: str, key: str, record: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    record_id = record.get("record_id") or key
+    if record_id not in (None, ""):
+        ids.append(str(record_id))
+    if collection == "relationships" and record.get("src_id") and record.get("tgt_id"):
+        for legacy_id in _legacy_relationship_vdb_ids(str(record["src_id"]), str(record["tgt_id"])):
+            if legacy_id not in ids:
+                ids.append(legacy_id)
+    return ids
+
+
+def _first_storage_record(storage_records: dict[str, dict[str, Any]], ids: list[str]) -> dict[str, Any] | None:
+    for record_id in ids:
+        record = storage_records.get(record_id)
+        if isinstance(record, dict):
+            return record
+    return None
+
+
+def _can_seed_after_previous_hash_mismatch(
+    collection: str,
+    previous_record: Any,
+    desired_record: dict[str, Any],
+    storage_record: dict[str, Any] | None,
+) -> bool:
+    if collection != "relationships":
+        return False
+    if not isinstance(previous_record, dict) or not isinstance(storage_record, dict):
+        return False
+    if _record_embedding_contract(previous_record) != _record_embedding_contract(desired_record):
+        return False
+    for field in ("src_id", "tgt_id", "keywords", "description"):
+        if str(previous_record.get(field)) != str(desired_record.get(field)):
+            return False
+    return str(storage_record.get("content")) == str(desired_record.get("content"))
+
+
 class VectorCache:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -377,17 +448,27 @@ def seed_vector_cache_from_storage(
                 collection_missing.append(str(key))
                 continue
             previous_record = previous_records.get(key) if previous_manifest is not None else None
-            if previous_manifest is not None and (
+            embedding_dim = record.get("embedding_dim")
+            storage_record = _first_storage_record(
+                storage_records,
+                _storage_record_ids_for_manifest_record(collection, str(key), record),
+            )
+            previous_hash_mismatch = previous_manifest is not None and (
                 not isinstance(previous_record, dict)
                 or str(previous_record.get("vector_hash")) != str(record.get("vector_hash"))
+            )
+            if previous_hash_mismatch and not _can_seed_after_previous_hash_mismatch(
+                collection,
+                previous_record,
+                record,
+                storage_record,
             ):
                 collection_summary["missing"] += 1
                 collection_missing.append(str(key))
                 collection_skipped_hash_mismatch.append(str(key))
                 continue
-            embedding_dim = record.get("embedding_dim")
             vector = _vector_from_storage_record(
-                storage_records.get(str(record.get("record_id") or key)),
+                storage_record,
                 int(embedding_dim or 0),
             )
             required = [

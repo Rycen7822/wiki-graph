@@ -160,7 +160,19 @@ async def run_import(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         await rag.finalize_storages()
     summary["finished_at"] = now_stamp()
-    from custom_kg_incremental import load_manifest, write_successful_manifest
+    from custom_kg_incremental import audit_custom_kg_storage, load_manifest, write_successful_manifest
+
+    storage_audit = audit_custom_kg_storage(workdir / "rag_storage", desired_manifest)
+    summary["storage_audit"] = storage_audit
+    summary["manifest_path"] = None
+    if not storage_audit.get("ok"):
+        report = state_dir / "custom_kg_import_report.json"
+        report.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["report_path"] = str(report)
+        raise RuntimeError(
+            "custom_kg cold import storage audit failed; refusing to write successful manifest: "
+            + json.dumps(storage_audit.get("issues", [])[:10], ensure_ascii=False)
+        )
 
     manifest_written = write_successful_manifest(
         state_dir,
