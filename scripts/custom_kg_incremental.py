@@ -53,6 +53,23 @@ PREPARED_SWAP_DIRNAME = "prepared_swaps"
 PREPARED_SWAP_REPORT_FILENAME = "custom_kg_prepared_swap.json"
 PREPARED_SWAP_MANIFEST_FILENAME = "custom_kg_prepared_manifest.json"
 DEFAULT_FULL_REBUILD_INTERVAL = 5
+PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION = 1
+STORAGE_AUDIT_CONTRACT_VERSION = "audit_custom_kg_storage:v1"
+CUSTOM_KG_STORAGE_AUDIT_FILES = {
+    "graph": "graph_chunk_entity_relation.graphml",
+    "vdb_chunks": "vdb_chunks.json",
+    "vdb_entities": "vdb_entities.json",
+    "vdb_relationships": "vdb_relationships.json",
+    "text_chunks": "kv_store_text_chunks.json",
+    "entity_chunks": "kv_store_entity_chunks.json",
+    "relation_chunks": "kv_store_relation_chunks.json",
+}
+EMBEDDING_PROFILES = {
+    "conservative": {"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"},
+    "shadow-medium": {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"},
+    "operator-fast": {"EMBEDDING_FUNC_MAX_ASYNC": "4", "EMBEDDING_BATCH_NUM": "32", "MAX_PARALLEL_INSERT": "2"},
+}
+DEFAULT_EMBEDDING_PROFILE = "conservative"
 DEFAULT_LIGHTRAG_PYTHON = Path(os.environ.get("LIGHTRAG_PYTHON", "/home/xu/.local/share/uv/tools/lightrag-hku/bin/python"))
 _CONTROL_CHAR_PATTERN_ALL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
@@ -71,6 +88,28 @@ def compute_mdhash_id(content: str, prefix: str = "") -> str:
     except UnicodeEncodeError:
         digest = hashlib.md5(str(content).encode("utf-8", errors="replace")).hexdigest()
     return prefix + digest
+
+
+def embedding_profile_env(profile: str | None = None) -> dict[str, str]:
+    name = profile or DEFAULT_EMBEDDING_PROFILE
+    if name not in EMBEDDING_PROFILES:
+        known = ", ".join(sorted(EMBEDDING_PROFILES))
+        raise ValueError(f"unknown embedding profile {name!r}; expected one of: {known}")
+    return dict(EMBEDDING_PROFILES[name])
+
+
+def embedding_profile_report(profile: str | None = None) -> dict[str, Any]:
+    name = profile or DEFAULT_EMBEDDING_PROFILE
+    env = embedding_profile_env(name)
+    return {
+        "name": name,
+        "env": env,
+        "batch_size": int(env["EMBEDDING_BATCH_NUM"]),
+        "concurrency": {
+            "embedding_func_max_async": int(env["EMBEDDING_FUNC_MAX_ASYNC"]),
+            "max_parallel_insert": int(env["MAX_PARALLEL_INSERT"]),
+        },
+    }
 
 
 def entity_vdb_id(entity_name: str) -> str:
@@ -327,6 +366,123 @@ def write_prepared_swap_bundle(state_dir: Path, desired_manifest: dict[str, Any]
     report = {**report, "desired_manifest_path": str(manifest_out), "report_path": str(report_out)}
     report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return report_out, manifest_out
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def storage_file_fingerprint(path: Path, *, relative_path: str | None = None) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "relative_path": relative_path or path.name,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": _sha256_file(path),
+    }
+
+
+def _storage_audit_contract_hash() -> str:
+    return stable_hash(
+        {
+            "version": STORAGE_AUDIT_CONTRACT_VERSION,
+            "required_files": CUSTOM_KG_STORAGE_AUDIT_FILES,
+        }
+    )
+
+
+def _shadow_audit_issue_count(shadow_audit: dict[str, Any]) -> int:
+    issues = shadow_audit.get("issues", [])
+    return len(issues) if isinstance(issues, list) else 1
+
+
+def _coerce_issue_count(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def prepared_shadow_fingerprint(storage_dir: Path, desired_manifest_hash: str, shadow_audit: dict[str, Any]) -> dict[str, Any]:
+    storage_dir = storage_dir.resolve()
+    files = {
+        relative_path: storage_file_fingerprint(storage_dir / relative_path, relative_path=relative_path)
+        for relative_path in CUSTOM_KG_STORAGE_AUDIT_FILES.values()
+    }
+    return {
+        "schema_version": PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION,
+        "storage_dir": str(storage_dir),
+        "desired_manifest_hash": desired_manifest_hash,
+        "audit_function": {
+            "name": "audit_custom_kg_storage",
+            "version": STORAGE_AUDIT_CONTRACT_VERSION,
+            "contract_hash": _storage_audit_contract_hash(),
+        },
+        "shadow_audit": {
+            "ok": bool(shadow_audit.get("ok")),
+            "issue_count": _shadow_audit_issue_count(shadow_audit),
+        },
+        "files": files,
+    }
+
+
+def verify_prepared_shadow_fingerprint(prepared_report: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    fingerprint = prepared_report.get("prepared_shadow_fingerprint")
+    if not isinstance(fingerprint, dict):
+        return {"ok": False, "reasons": ["missing_prepared_shadow_fingerprint"]}
+
+    if fingerprint.get("schema_version") != PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION:
+        reasons.append("unsupported_fingerprint_schema")
+    report_hash = str(prepared_report.get("desired_manifest_hash") or "")
+    if report_hash != str(fingerprint.get("desired_manifest_hash") or ""):
+        reasons.append("desired_manifest_hash_mismatch")
+
+    audit_summary = fingerprint.get("shadow_audit", {})
+    if not isinstance(audit_summary, dict) or not audit_summary.get("ok") or _coerce_issue_count(audit_summary.get("issue_count", 1)) != 0:
+        reasons.append("prepared_shadow_audit_not_clean")
+    report_audit = prepared_report.get("shadow_audit", {})
+    if not isinstance(report_audit, dict) or not report_audit.get("ok") or _shadow_audit_issue_count(report_audit) != 0:
+        reasons.append("report_shadow_audit_not_clean")
+
+    audit_function = fingerprint.get("audit_function", {})
+    if not isinstance(audit_function, dict) or audit_function.get("contract_hash") != _storage_audit_contract_hash():
+        reasons.append("audit_contract_mismatch")
+
+    storage_value = str(prepared_report.get("shadow_storage") or fingerprint.get("storage_dir") or "")
+    if not storage_value:
+        reasons.append("missing_shadow_storage")
+        storage_dir = None
+    else:
+        storage_dir = Path(storage_value).resolve()
+        if str(storage_dir) != str(fingerprint.get("storage_dir") or ""):
+            reasons.append("shadow_storage_path_mismatch")
+
+    files = fingerprint.get("files")
+    expected_paths = set(CUSTOM_KG_STORAGE_AUDIT_FILES.values())
+    if not isinstance(files, dict):
+        reasons.append("missing_file_fingerprints")
+    elif storage_dir is not None:
+        for relative_path in sorted(expected_paths):
+            recorded = files.get(relative_path)
+            if not isinstance(recorded, dict):
+                reasons.append(f"missing_fingerprint:{relative_path}")
+                continue
+            path = storage_dir / relative_path
+            if not path.exists():
+                reasons.append(f"missing_file:{relative_path}")
+                continue
+            current = storage_file_fingerprint(path, relative_path=relative_path)
+            if any(recorded.get(field) != current[field] for field in ("size", "mtime_ns", "sha256")):
+                reasons.append(f"changed_file:{relative_path}")
+        for relative_path in sorted(set(files) - expected_paths):
+            reasons.append(f"unexpected_fingerprint:{relative_path}")
+
+    return {"ok": not reasons, "reasons": sorted(dict.fromkeys(reasons))}
 
 
 def manifest_record_count(manifest: dict[str, Any]) -> dict[str, int]:
@@ -715,27 +871,52 @@ def fill_missing_manifest_vectors(
     *,
     workdir: Path,
     embed_texts_func: Any | None = None,
+    embedding_profile: str | None = None,
 ) -> dict[str, Any]:
     """Embed only manifest records that are unresolved after cache/storage seeding."""
 
+    profile_report = embedding_profile_report(embedding_profile)
+    batch_size = max(1, int(profile_report["batch_size"]))
     missing_records = _missing_manifest_records(manifest, vector_report)
     if not missing_records:
-        return {"summary": {"total": 0, "embedded": 0}, "by_collection": {}}
+        return {
+            "summary": {"total": 0, "embedded": 0},
+            "by_collection": {},
+            "embedding_profile": profile_report["name"],
+            "batch_size": batch_size,
+            "concurrency": profile_report["concurrency"],
+            "total_batches": 0,
+            "failed_batches": 0,
+            "provider_retries": 0,
+            "elapsed_by_collection_s": {},
+        }
     metadata = manifest.get("metadata", {}) if isinstance(manifest.get("metadata"), dict) else {}
     embedding_model = str(metadata.get("embedding_model") or os.environ.get("EMBEDDING_MODEL") or "text-embedding-3-small")
     embedding_dim = int(metadata.get("embedding_dim") or env_int("EMBEDDING_DIM", 1536))
     embedding_params_version = str(metadata.get("embedding_params_version") or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"))
     embedder = embed_texts_func or embed_texts_openai_compatible
-    batch_size = max(1, env_int("EMBEDDING_BATCH_NUM", 10))
     cache_records: list[dict[str, Any]] = []
     by_collection: dict[str, int] = {"chunks": 0, "entities": 0, "relationships": 0}
+    elapsed_by_collection: dict[str, float] = {"chunks": 0.0, "entities": 0.0, "relationships": 0.0}
+    total_batches = 0
+    failed_batches = 0
+    provider_retries = 0
     for offset in range(0, len(missing_records), batch_size):
         batch = missing_records[offset : offset + batch_size]
         texts = [str(record.get("content") or "") for _collection, _key, record in batch]
         if any(text == "" for text in texts):
             empty_key = batch[texts.index("")][1]
             raise RuntimeError(f"cannot fill missing vector for empty content record: {empty_key}")
-        vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
+        batch_started = time.perf_counter()
+        total_batches += 1
+        try:
+            vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
+        except Exception:
+            failed_batches += 1
+            raise
+        batch_elapsed = round(time.perf_counter() - batch_started, 6)
+        for collection in {collection for collection, _key, _record in batch}:
+            elapsed_by_collection[collection] = round(elapsed_by_collection.get(collection, 0.0) + batch_elapsed, 6)
         if len(vectors) != len(batch):
             raise RuntimeError(f"embedding fill response count mismatch: expected {len(batch)}, got {len(vectors)}")
         for (collection, key, record), vector in zip(batch, vectors):
@@ -770,6 +951,13 @@ def fill_missing_manifest_vectors(
         "embedding_model": embedding_model,
         "embedding_dim": embedding_dim,
         "embedding_params_version": embedding_params_version,
+        "embedding_profile": profile_report["name"],
+        "batch_size": batch_size,
+        "concurrency": profile_report["concurrency"],
+        "total_batches": total_batches,
+        "failed_batches": failed_batches,
+        "provider_retries": provider_retries,
+        "elapsed_by_collection_s": {key: value for key, value in elapsed_by_collection.items() if value or by_collection.get(key)},
     }
 
 
@@ -899,15 +1087,7 @@ def _append_issue(issues: list[dict[str, Any]], issue_type: str, **kwargs: Any) 
 def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None = None, *, max_samples: int = 10) -> dict[str, Any]:
     storage_dir = storage_dir.resolve()
     issues: list[dict[str, Any]] = []
-    required = {
-        "graph": storage_dir / "graph_chunk_entity_relation.graphml",
-        "vdb_chunks": storage_dir / "vdb_chunks.json",
-        "vdb_entities": storage_dir / "vdb_entities.json",
-        "vdb_relationships": storage_dir / "vdb_relationships.json",
-        "text_chunks": storage_dir / "kv_store_text_chunks.json",
-        "entity_chunks": storage_dir / "kv_store_entity_chunks.json",
-        "relation_chunks": storage_dir / "kv_store_relation_chunks.json",
-    }
+    required = {name: storage_dir / relative_path for name, relative_path in CUSTOM_KG_STORAGE_AUDIT_FILES.items()}
     for name, path in required.items():
         if not path.exists():
             _append_issue(issues, "missing_storage_file", name=name, path=str(path))
@@ -1628,6 +1808,8 @@ async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
     _record_timing(timings, "write_manifest_s", phase_started)
     timings["total_s"] = round(time.perf_counter() - total_started, 6)
 
+    previous_manifest_hash = stable_hash(previous_manifest)
+    desired_manifest_hash = stable_hash(desired_manifest)
     report = {
         "started_at": started_at,
         "finished_at": now_stamp(),
@@ -1648,11 +1830,12 @@ async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
         "backup_dir": str(backup_dir) if (swapped or prepare_swap) else None,
         "swapped": swapped,
         "prepared_for_swap": prepare_swap,
-        "previous_manifest_hash": stable_hash(previous_manifest),
-        "desired_manifest_hash": stable_hash(desired_manifest),
+        "previous_manifest_hash": previous_manifest_hash,
+        "desired_manifest_hash": desired_manifest_hash,
         "timings": timings,
     }
     if prepare_swap:
+        report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
         report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
         report["report_path"] = str(report_path)
         report["desired_manifest_path"] = str(desired_manifest_path)
@@ -1697,6 +1880,8 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     _record_timing(timings, "build_desired_manifest_s", phase_started)
 
     fill_missing_vectors_enabled = bool(getattr(args, "fill_missing_vectors", False))
+    embedding_profile = str(getattr(args, "embedding_profile", DEFAULT_EMBEDDING_PROFILE) or DEFAULT_EMBEDDING_PROFILE)
+    embedding_profile_env(embedding_profile)
     cache_only_blockers = full_materialization_cache_only_blockers(previous_manifest, desired_manifest)
     cache_only_blocker_summary = {
         "blocked": bool(cache_only_blockers.get("blocked")),
@@ -1733,6 +1918,7 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
             vector_report,
             cache,
             workdir=workdir,
+            embedding_profile=embedding_profile,
         )
         _record_timing(timings, "fill_missing_vectors_s", phase_started)
         phase_started = time.perf_counter()
@@ -1793,6 +1979,8 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
     _record_timing(timings, "cleanup_shadow_s", phase_started)
     timings["total_s"] = round(time.perf_counter() - total_started, 6)
 
+    previous_manifest_hash = stable_hash(previous_manifest) if previous_manifest is not None else None
+    desired_manifest_hash = stable_hash(desired_manifest)
     report = {
         "started_at": started_at,
         "finished_at": now_stamp(),
@@ -1808,6 +1996,7 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "vector_cache_path": str(cache_path),
         "cache_only_blockers": cache_only_blocker_summary,
         "fill_missing_vectors": fill_missing_vectors_enabled,
+        "embedding_profile": embedding_profile,
         "vector_cache_seed": vector_seed_report,
         "vector_cache_fill": vector_fill_report,
         "vector_cache": compact_vector_cache_report(vector_report),
@@ -1820,11 +2009,12 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "backup_dir": str(state_dir / "backups" / f"rag_storage_full_materialization_{stamp}") if prepare_swap else None,
         "swapped": False,
         "prepared_for_swap": prepare_swap,
-        "previous_manifest_hash": stable_hash(previous_manifest) if previous_manifest is not None else None,
-        "desired_manifest_hash": stable_hash(desired_manifest),
+        "previous_manifest_hash": previous_manifest_hash,
+        "desired_manifest_hash": desired_manifest_hash,
         "timings": timings,
     }
     if prepare_swap:
+        report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
         report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
         report["report_path"] = str(report_path)
         report["desired_manifest_path"] = str(desired_manifest_path)
@@ -1890,8 +2080,29 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError(f"live storage audit failed before prepared swap: {json.dumps(live_audit.get('issues', [])[:10], ensure_ascii=False)}")
 
     phase_started = time.perf_counter()
-    shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
-    _record_timing(timings, "audit_shadow_storage_s", phase_started)
+    shadow_audit_reuse: dict[str, Any] = {
+        "attempted": not bool(getattr(args, "force_shadow_audit", False)),
+        "reused": False,
+        "reason": None,
+        "verification": None,
+    }
+    if getattr(args, "force_shadow_audit", False):
+        shadow_audit_reuse["reason"] = "force_shadow_audit"
+        shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
+        _record_timing(timings, "audit_shadow_storage_s", phase_started)
+    else:
+        verification = verify_prepared_shadow_fingerprint(prepared_report)
+        shadow_audit_reuse["verification"] = verification
+        _record_timing(timings, "verify_shadow_fingerprint_s", phase_started)
+        if verification.get("ok"):
+            shadow_audit = prepared_report.get("shadow_audit", {})
+            shadow_audit_reuse["reused"] = True
+            shadow_audit_reuse["reason"] = "fingerprint_verified"
+        else:
+            shadow_audit_reuse["reason"] = "fingerprint_rejected"
+            phase_started = time.perf_counter()
+            shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
+            _record_timing(timings, "audit_shadow_storage_s", phase_started)
     if not shadow_audit.get("ok"):
         raise RuntimeError(f"prepared shadow storage audit failed: {json.dumps(shadow_audit.get('issues', [])[:10], ensure_ascii=False)}")
 
@@ -1934,6 +2145,8 @@ def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
         "live_audit": live_audit,
         "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
         "shadow_audit": shadow_audit,
+        "shadow_audit_reused": bool(shadow_audit_reuse.get("reused")),
+        "shadow_audit_reuse": shadow_audit_reuse,
         "prepared_report_path": str(report_path),
         "shadow_storage": str(shadow_storage),
         "backup_dir": str(backup_dir),
@@ -1998,6 +2211,7 @@ def main() -> int:
     finalize_parser.add_argument("--server-host", default="127.0.0.1")
     finalize_parser.add_argument("--server-port", type=int, default=9621)
     finalize_parser.add_argument("--allow-server-running", action="store_true")
+    finalize_parser.add_argument("--force-shadow-audit", action="store_true", help="Rerun the prepared shadow storage audit instead of using a verified prepared fingerprint")
     finalize_parser.add_argument(
         "--allow-current-storage-audit-failure",
         action="store_true",
@@ -2013,6 +2227,7 @@ def main() -> int:
     materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Seed the vector cache from an explicit file-backend storage directory before resolving vectors")
     materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Storage directory used with --seed-from-storage; defaults to <workdir>/rag_storage")
     materialize_parser.add_argument("--fill-missing-vectors", action="store_true", help="Embed only vectors still missing after cache/storage seeding before materializing the full shadow")
+    materialize_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for --fill-missing-vectors; default stays conservative")
     materialize_parser.add_argument(
         "--allow-current-storage-audit-failure",
         action="store_true",

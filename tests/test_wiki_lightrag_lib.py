@@ -12,6 +12,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import batch_lightrag_refresh  # noqa: E402
 import raw_fast_closeout  # noqa: E402
+import validate_wiki as validate_wiki_cli  # noqa: E402
 
 from wiki_lightrag_lib import (  # noqa: E402
     _section_rank_lists,
@@ -84,6 +85,37 @@ def sample_wiki(tmp_path: Path) -> Path:
     )
     write(root / "_meta/raw-clip-map.md", "# Raw Clip Map\n\n- raw/clip/2601/26010101_Foo-Paper.md\n")
     write(root / "_meta/topic-map.md", "# Topic Map\n")
+    return root
+
+
+def validation_reuse_wiki(tmp_path: Path) -> Path:
+    root = sample_wiki(tmp_path)
+    write(
+        root / "index.md",
+        "# LLM Wiki Index\n\n> Last updated: 2026-05-18 16:00 | Total pages: 4\n\n"
+        "## Concepts\n\n- [[foo]] - Foo page.\n\n"
+        "## Queries\n\n- [[bar]] - Bar page.\n\n"
+        "## Meta\n\n- [[raw-clip-map]] - Raw clip map.\n- [[topic-map]] - Topic map.\n",
+    )
+    write(
+        root / "raw/clip/2601/26010101_Foo-Paper.md",
+        "---\n"
+        "title: Foo Paper\n"
+        "source: https://arxiv.org/abs/2601.0101\n"
+        "domain: paper\n"
+        "updated: 2026-05-18 16:00\n"
+        "tags: [paper]\n"
+        "---\n"
+        "# Foo Paper\n\n"
+        "## 一句话总结\n\nA concise summary.\n\n"
+        "## 论文摘要\n\nA compact abstract.\n\n"
+        "## Motivation\n\nA clear motivation.\n\n"
+        "## Methodology\n\nA direct method with enough structured detail.\n\n"
+        "## 关键实验结果\n\nThe main result is stable.\n\n"
+        "## 对未来研究的启发\n\n- Future work should connect evidence retrieval with planning.\n\n"
+        "## 可能的局限\n\n- The benchmark may hide failures in long-horizon transfer.\n\n"
+        "## 可继续追问的问题\n\n- Which unresolved interface asks for the right evidence section before planning?\n",
+    )
     return root
 
 
@@ -162,6 +194,22 @@ def test_validate_wiki_default_does_not_write_report(tmp_path: Path) -> None:
     assert not list((state / "validation_reports").glob("*_validate.json"))
 
 
+def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import wiki_lightrag_lib
+
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+
+    def fail_if_called(_root: Path) -> dict[str, dict[str, object]]:
+        raise AssertionError("validation_input_fingerprints should only run for persisted validation reports")
+
+    monkeypatch.setattr(wiki_lightrag_lib, "validation_input_fingerprints", fail_if_called)
+    report = validate_wiki(root, state, tmp_path / "work" / "lightrag")
+
+    assert "input_fingerprints" not in report
+    assert "schema_version" not in report
+
+
 def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "lightrag" / "state"
@@ -173,12 +221,190 @@ def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
     assert report_path.parent == state / "validation_reports"
 
 
+def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path: Path) -> None:
+    import wiki_lightrag_lib
+
+    root = validation_reuse_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+
+    report = validate_wiki(root, state, workdir, full=True, write_report=True)
+    current = wiki_lightrag_lib.validation_freshness_context(root, state, workdir)
+    freshness = wiki_lightrag_lib.validation_report_is_fresh(
+        report,
+        current,
+        required_surfaces=["index", "compiled", "_meta", "raw"],
+        reason="refresh-artifact",
+    )
+
+    assert freshness == {"fresh": True, "rejections": []}
+    assert report["schema_version"] == wiki_lightrag_lib.VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
+    assert report["root"] == str(root.resolve())
+    assert report["state_dir"] == str(state.resolve())
+    assert report["workdir"] == str(workdir.resolve())
+    assert "refresh-artifact" in report["valid_for_reasons"]
+    assert "index.md" in report["input_fingerprints"]
+    assert "SCHEMA.md" in report["input_fingerprints"]
+    assert "raw/clip/2601/26010101_Foo-Paper.md" in report["input_fingerprints"]
+
+
+def test_validate_wiki_cli_reuses_fresh_report_without_running_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = validation_reuse_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    report = validate_wiki(root, state, workdir, full=True, write_report=True)
+    report_path = Path(report["report_path"])
+
+    def fail_validate(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("fresh validation report should skip validate_wiki()")
+
+    monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fail_validate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_wiki.py",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--full",
+            "--reuse-validation-report",
+            str(report_path),
+        ],
+    )
+
+    assert validate_wiki_cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["validation_reuse"] == {"fresh": True, "path": str(report_path.resolve())}
+    assert payload["reused_validation_report"] == str(report_path.resolve())
+    assert payload["errors"] == []
+
+
+def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = validation_reuse_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    report = validate_wiki(root, state, workdir, full=True, write_report=True)
+    report_path = Path(report["report_path"])
+    write(root / "index.md", (root / "index.md").read_text(encoding="utf-8") + "\n<!-- changed -->\n")
+    calls: list[tuple[Path, Path, Path | None, bool, bool]] = []
+
+    def fake_validate(root_arg: Path, state_arg: Path, workdir_arg: Path | None = None, *, full: bool = False, write_report: bool = False) -> dict[str, object]:
+        calls.append((root_arg, state_arg, workdir_arg, full, write_report))
+        return {"errors": [], "warnings": [], "validation_ran": True}
+
+    monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fake_validate)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_wiki.py",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--full",
+            "--reuse-validation-report",
+            str(report_path),
+        ],
+    )
+
+    assert validate_wiki_cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert calls == [(root, state, workdir, True, False)]
+    assert payload["validation_ran"] is True
+    assert payload["validation_reuse"]["fresh"] is False
+    assert payload["validation_reuse"]["path"] == str(report_path.resolve())
+    assert "fingerprint_mismatch:index.md" in payload["validation_reuse"]["rejections"]
+
+
 def test_validation_split_module_reexports_existing_public_functions() -> None:
     import wiki_lightrag_lib
     import wiki_lightrag_validation
 
     assert wiki_lightrag_lib.validate_wiki is wiki_lightrag_validation.validate_wiki
     assert wiki_lightrag_lib.secret_hits is wiki_lightrag_validation.secret_hits
+
+
+def _fresh_validation_report_inputs() -> tuple[dict[str, object], dict[str, object]]:
+    fingerprint = {"sha256": "abc123", "size": 12, "mtime_ns": 345}
+    report = {
+        "schema_version": 1,
+        "generated_at": "2026-06-28 04:00",
+        "root": "/wiki",
+        "state_dir": "/state",
+        "workdir": "/workdir",
+        "covered_surfaces": ["compiled", "_meta", "raw"],
+        "valid_for_reasons": ["refresh-artifact", "wiki-clear-success"],
+        "warnings": [],
+        "errors": [],
+        "input_fingerprints": {"index.md": fingerprint},
+    }
+    current = {
+        "schema_version": 1,
+        "root": "/wiki",
+        "state_dir": "/state",
+        "workdir": "/workdir",
+        "input_fingerprints": {"index.md": fingerprint},
+    }
+    return report, current
+
+
+def test_validation_report_freshness_accepts_matching_report() -> None:
+    import wiki_lightrag_lib
+
+    report, current = _fresh_validation_report_inputs()
+
+    result = wiki_lightrag_lib.validation_report_is_fresh(
+        report,
+        current,
+        required_surfaces=["compiled", "_meta"],
+        reason="refresh-artifact",
+    )
+
+    assert result == {"fresh": True, "rejections": []}
+
+
+@pytest.mark.parametrize(
+    ("mutator", "required_surfaces", "reason", "expected_rejection"),
+    [
+        (lambda report, current: report.update({"warnings": ["secret warning"]}), ["compiled"], "refresh-artifact", "report_has_warnings"),
+        (lambda report, current: report.update({"errors": ["broken_wikilinks=1"]}), ["compiled"], "refresh-artifact", "report_has_errors"),
+        (lambda report, current: report.update({"schema_version": 0}), ["compiled"], "refresh-artifact", "schema_version_mismatch"),
+        (lambda report, current: None, ["queries"], "refresh-artifact", "missing_required_surface:queries"),
+        (lambda report, current: None, ["compiled"], "final-status", "missing_valid_reason:final-status"),
+        (
+            lambda report, current: current["input_fingerprints"].update({"index.md": {"sha256": "changed", "size": 12, "mtime_ns": 345}}),
+            ["compiled"],
+            "refresh-artifact",
+            "fingerprint_mismatch:index.md",
+        ),
+        (lambda report, current: report.update({"input_fingerprints": {}}), ["compiled"], "refresh-artifact", "missing_fingerprint:index.md"),
+        (
+            lambda report, current: report["input_fingerprints"].update({"deleted.md": {"sha256": "gone", "size": 4, "mtime_ns": 5}}),
+            ["compiled"],
+            "refresh-artifact",
+            "stale_fingerprint:deleted.md",
+        ),
+    ],
+)
+def test_validation_report_freshness_rejects_stale_or_unsafe_reports(mutator, required_surfaces: list[str], reason: str, expected_rejection: str) -> None:
+    import wiki_lightrag_lib
+
+    report, current = _fresh_validation_report_inputs()
+    mutator(report, current)
+
+    result = wiki_lightrag_lib.validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
+
+    assert result["fresh"] is False
+    assert expected_rejection in result["rejections"]
 
 
 def test_false_changed_only_flags_are_removed_from_cli_help() -> None:
@@ -638,6 +864,129 @@ def test_batch_lightrag_refresh_command_groups_preserve_order_without_positional
     assert groups["full_import"][0] == ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME]
 
 
+def test_batch_lightrag_refresh_command_groups_pass_explicit_validation_reuse_report(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    report = state / "validation_reports" / "ok.json"
+
+    groups = batch_lightrag_refresh.build_refresh_command_groups(root, state, workdir, reuse_validation_report=report)
+    validate_commands = [command for command in groups["artifact"] if "validate_wiki.py" in " ".join(command)]
+
+    assert len(validate_commands) == 1
+    assert validate_commands[0][-2:] == ["--reuse-validation-report", str(report)]
+    assert all("--reuse-validation-report" not in command for command in groups["artifact"][1:])
+
+
+def test_batch_lightrag_refresh_dry_run_passes_explicit_validation_reuse_report(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    script = SCRIPTS / "batch_lightrag_refresh.py"
+    report = state / "validation_reports" / "ok.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "refresh",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--reason",
+            "manual",
+            "--force",
+            "--dry-run",
+            "--reuse-validation-report",
+            str(report),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    validate_commands = [command for command in payload["commands"] if "validate_wiki.py" in " ".join(command)]
+
+    assert payload["would_run"] is True
+    assert len(validate_commands) == 1
+    assert validate_commands[0][-2:] == ["--reuse-validation-report", str(report.resolve())]
+
+
+def test_batch_lightrag_refresh_dry_run_reports_embedding_profile(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    script = SCRIPTS / "batch_lightrag_refresh.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "refresh",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--reason",
+            "manual",
+            "--force",
+            "--force-full-rebuild",
+            "--reuse-vector-cache",
+            "--embedding-profile",
+            "shadow-medium",
+            "--dry-run",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    flattened = "\n".join(" ".join(command) for command in payload["commands"])
+
+    assert payload["embedding_profile"] == "shadow-medium"
+    assert "--embedding-profile shadow-medium" in flattened
+
+
+def test_batch_lightrag_refresh_run_real_refresh_applies_embedding_profile_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    artifact_log = state / "refresh_logs" / "artifact.log"
+    import_log = state / "refresh_logs" / "import.log"
+    import_command = [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "custom_kg_incremental.py"), "materialize-full"]
+    captured_env: dict[str, str] = {}
+
+    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: {"artifact": [], "full_import": []})
+    monkeypatch.setattr(batch_lightrag_refresh, "build_full_materialization_import_commands", lambda *_args, **_kwargs: [import_command])
+    monkeypatch.setattr(batch_lightrag_refresh, "plan_incremental_import_mode", lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": {}})
+
+    def fake_run_subprocess(command: list[str], _log_path: Path, env: dict[str, str] | None = None, timeout: int | None = None) -> None:
+        if command == import_command and env is not None:
+            captured_env.update({key: env[key] for key in ("EMBEDDING_FUNC_MAX_ASYNC", "EMBEDDING_BATCH_NUM", "MAX_PARALLEL_INSERT")})
+
+    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+
+    result = batch_lightrag_refresh.run_real_refresh(
+        root,
+        state,
+        workdir,
+        "manual",
+        artifact_log,
+        import_log,
+        force_full_rebuild=True,
+        reuse_vector_cache=True,
+        embedding_profile="shadow-medium",
+    )
+
+    assert result["embedding_profile"] == "shadow-medium"
+    assert captured_env == {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"}
+
+
 def test_batch_lightrag_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry_run(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "lightrag" / "state"
@@ -682,6 +1031,94 @@ def test_batch_lightrag_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry
     assert "--prepare-swap" in flattened
     assert "reset-rag-storage" not in flattened
     assert "import_custom_kg.py" not in flattened
+
+
+def test_batch_lightrag_refresh_real_cli_defers_import_planning_to_run_real_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "lightrag" / "state"
+    workdir = tmp_path / "work" / "lightrag"
+    planner_calls: list[tuple[Path, Path, Path]] = []
+    run_real_args: dict[str, object] = {}
+
+    def fake_plan(root_arg: Path, state_arg: Path, workdir_arg: Path) -> dict[str, object]:
+        planner_calls.append((root_arg, state_arg, workdir_arg))
+        return {
+            "selected_mode": "incremental",
+            "reasons": [],
+            "diff": {
+                "chunks": {"add": 1, "update": 0, "delete": 0},
+                "entities": {"add": 0, "update": 0, "delete": 0},
+                "relationships": {"add": 0, "update": 0, "delete": 0},
+            },
+        }
+
+    def fake_run_real_refresh(
+        root_arg: Path,
+        state_arg: Path,
+        workdir_arg: Path,
+        reason: str,
+        artifact_log: Path,
+        import_log: Path,
+        *,
+        force_full_rebuild: bool = False,
+        reuse_vector_cache: bool = False,
+        reuse_validation_report: Path | None = None,
+        embedding_profile: str | None = None,
+    ) -> dict[str, object]:
+        run_real_args.update(
+            {
+                "root": root_arg,
+                "state_dir": state_arg,
+                "workdir": workdir_arg,
+                "reason": reason,
+                "artifact_log": artifact_log,
+                "import_log": import_log,
+                "force_full_rebuild": force_full_rebuild,
+                "reuse_vector_cache": reuse_vector_cache,
+                "reuse_validation_report": reuse_validation_report,
+                "embedding_profile": embedding_profile,
+            }
+        )
+        return {
+            "artifact_log": str(artifact_log),
+            "import_log": str(import_log),
+            "health": None,
+            "clear": {"cleared_count": 0},
+            "import_mode": {"selected_mode": "planned-inside-run-real-refresh"},
+        }
+
+    monkeypatch.setattr(batch_lightrag_refresh, "plan_incremental_import_mode", fake_plan)
+    monkeypatch.setattr(batch_lightrag_refresh, "run_real_refresh", fake_run_real_refresh)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_lightrag_refresh.py",
+            "refresh",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--reason",
+            "manual",
+            "--force",
+        ],
+    )
+
+    assert batch_lightrag_refresh.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert planner_calls == []
+    assert run_real_args["root"] == root.resolve()
+    assert run_real_args["state_dir"] == state.resolve()
+    assert run_real_args["workdir"] == workdir.resolve()
+    assert run_real_args["reason"] == "manual"
+    assert run_real_args["reuse_validation_report"] is None
+    assert run_real_args["embedding_profile"] == "conservative"
+    assert payload["would_run"] is True
+    assert payload["import_mode"]["selected_mode"] == "planned-inside-run-real-refresh"
 
 
 def test_batch_lightrag_refresh_threshold_defaults_to_full_rebuild_with_vector_cache(tmp_path: Path) -> None:
@@ -1819,6 +2256,7 @@ def test_incremental_apply_prepare_swap_writes_audited_shadow_without_manifest_s
 
     monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (desired, {"chunks": 1, "entities": 1, "relationships": 0}))
     monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
+    monkeypatch.setattr(custom_kg_incremental, "prepared_shadow_fingerprint", lambda *_args, **_kwargs: {"schema_version": 1, "test": "fingerprint"})
     monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(custom_kg_incremental, "apply_patch_to_storage", fake_apply_patch_to_storage)
 
@@ -1853,6 +2291,7 @@ def test_incremental_apply_prepare_swap_writes_audited_shadow_without_manifest_s
     prepared_payload = json.loads(prepared_report.read_text(encoding="utf-8"))
     assert prepared_payload["previous_manifest_hash"] == custom_kg_incremental.stable_hash(previous)
     assert prepared_payload["desired_manifest_hash"] == custom_kg_incremental.stable_hash(desired)
+    assert prepared_payload["prepared_shadow_fingerprint"] == {"schema_version": 1, "test": "fingerprint"}
     assert Path(report["shadow_storage"]).exists()
     assert (Path(report["shadow_storage"]) / "shadow.txt").exists()
     assert (live_storage / "live.txt").exists()
@@ -2059,6 +2498,10 @@ def test_batch_lightrag_refresh_uses_incremental_apply_when_plan_allows(tmp_path
     result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert result["import_mode"]["selected_mode"] == "incremental"
+    assert result["timings"]["artifact_commands_s"] >= 0
+    assert result["timings"]["plan_import_mode_s"] >= 0
+    assert result["timings"]["select_import_commands_s"] >= 0
+    assert result["timings"]["import_commands_s"] >= 0
     assert release_calls
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
     prepare_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "apply" in command)
