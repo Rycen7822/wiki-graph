@@ -30,6 +30,16 @@ def _payload() -> dict:
     }
 
 
+def _assert_compact_vector_cache_report(report: dict) -> None:
+    vector_cache = report["vector_cache"]
+    assert set(vector_cache) == {"summary", "missing_counts", "missing_examples"}
+    assert vector_cache["summary"]["total"]["misses"] == 0
+    serialized = json.dumps(report, ensure_ascii=False)
+    assert '"resolved"' not in serialized
+    assert '"vector"' not in serialized
+    assert '"vector": [' not in serialized
+
+
 def test_manifest_and_materialization_preserve_same_endpoint_typed_relationships(tmp_path) -> None:
     payload = _payload()
     payload["relationships"] = [
@@ -361,6 +371,7 @@ def test_run_full_materialization_no_swap_fills_true_adds_after_cache_only_block
     assert report["cache_only_blockers"]["collections"] == {"entities": {"add": 1, "vector_update": 0}}
     assert report["vector_cache_fill"]["summary"] == {"total": 1, "embedded": 1}
     assert report["vector_cache"]["summary"]["total"]["misses"] == 0
+    _assert_compact_vector_cache_report(report)
     assert report["shadow_audit"]["ok"] is True
     assert Path(report["shadow_storage"]).exists()
 
@@ -418,6 +429,7 @@ def test_run_full_materialization_no_swap_fills_missing_vectors_when_enabled(mon
     assert embedded_texts == [missing_relationship["content"]]
     assert report["vector_cache_fill"]["summary"] == {"total": 1, "embedded": 1}
     assert report["vector_cache"]["summary"]["total"]["misses"] == 0
+    _assert_compact_vector_cache_report(report)
     assert report["shadow_audit"]["ok"] is True
     assert Path(report["shadow_storage"]).exists()
 
@@ -462,6 +474,7 @@ def test_run_full_materialization_no_swap_builds_audited_shadow(monkeypatch, tmp
     assert report["import_mode"] == "full_materialization"
     assert report["swapped"] is False
     assert report["vector_cache"]["summary"]["total"]["misses"] == 0
+    _assert_compact_vector_cache_report(report)
     assert report["shadow_audit"]["ok"] is True
     assert Path(report["shadow_storage"]).exists()
 
@@ -527,6 +540,9 @@ def test_run_full_materialization_prepare_swap_writes_bundle_without_live_swap(m
     assert persisted["previous_manifest_hash"] == custom_kg_incremental.stable_hash(manifest)
     assert persisted["desired_manifest_hash"] == custom_kg_incremental.stable_hash(manifest)
     assert persisted["desired_manifest_path"] == str(prepared_manifest)
+    _assert_compact_vector_cache_report(report)
+    _assert_compact_vector_cache_report(persisted)
+    assert prepared_report.stat().st_size < 20_000
 
 
 def test_run_full_materialization_prepare_swap_can_repair_current_storage_audit_failure(monkeypatch, tmp_path) -> None:
