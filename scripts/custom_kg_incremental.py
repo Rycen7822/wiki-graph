@@ -629,6 +629,36 @@ def full_materialization_cache_only_blockers(previous_manifest: dict[str, Any] |
     return {"blocked": total > 0, "total": total, "collections": collections, "diff": diff}
 
 
+def compact_vector_cache_report(vector_report: dict[str, Any], *, missing_example_limit: int = 10) -> dict[str, Any]:
+    """Return report-safe vector-cache diagnostics without embedding vectors.
+
+    `resolve_manifest_vectors()` keeps full resolved vectors for storage
+    materialization. Default stdout/prepared-swap reports only need compact
+    diagnostics; otherwise every full-materialization refresh log repeats tens
+    of thousands of embedding arrays.
+    """
+
+    summary = vector_report.get("summary", {}) if isinstance(vector_report, dict) else {}
+    missing = vector_report.get("missing", {}) if isinstance(vector_report, dict) else {}
+    missing_counts: dict[str, int] = {}
+    missing_examples: dict[str, list[str]] = {}
+    total_missing = 0
+    for collection in ("chunks", "entities", "relationships"):
+        values = missing.get(collection, []) if isinstance(missing, dict) else []
+        if not isinstance(values, list):
+            values = []
+        string_values = [str(item) for item in values]
+        missing_counts[collection] = len(string_values)
+        missing_examples[collection] = string_values[:missing_example_limit]
+        total_missing += len(string_values)
+    missing_counts["total"] = total_missing
+    return {
+        "summary": summary,
+        "missing_counts": missing_counts,
+        "missing_examples": missing_examples,
+    }
+
+
 def embed_texts_openai_compatible(
     texts: list[str],
     *,
@@ -1780,7 +1810,7 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "fill_missing_vectors": fill_missing_vectors_enabled,
         "vector_cache_seed": vector_seed_report,
         "vector_cache_fill": vector_fill_report,
-        "vector_cache": vector_report,
+        "vector_cache": compact_vector_cache_report(vector_report),
         "pre_audit": pre_audit,
         "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
         "shadow_audit": shadow_audit,
