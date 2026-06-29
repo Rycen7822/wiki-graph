@@ -1461,7 +1461,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
     parser.add_argument("--root", type=Path, default=Path("/mnt/d/data/Clippings/llm-wiki"))
     parser.add_argument("--workdir", type=Path, required=True)
-    parser.add_argument("--probe", action="append", default=None, choices=["github", "hf", "project", "arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests. GitHub/HF/project probes are legacy deep probes and should not be used for default llm-wiki clipping.")
+    parser.add_argument("--probe", action="append", default=None, choices=["github", "hf", "project", "arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests. GitHub/HF/project probes are retired deep probes and should not be used for default llm-wiki clipping.")
     parser.add_argument("--pdf-backend", choices=["docling", "pdftotext", "auto"], default="docling")
     parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if the requested structured PDF backend fails instead of falling back to pdftotext evidence")
     parser.add_argument("--timeout", type=int, default=60)

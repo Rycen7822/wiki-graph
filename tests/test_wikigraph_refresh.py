@@ -22,6 +22,9 @@ def test_batch_wikigraph_refresh_imports_wikigraph_pending_owner_directly() -> N
     text = (SCRIPTS / "batch_wikigraph_refresh.py").read_text(encoding="utf-8")
 
     assert "from wiki_wikigraph_refresh_pending import" in text
+    assert "LEGACY" + "_WIKIGRAPH" not in text
+    assert "WIKIGRAPH" + "_LEGACY" not in text
+    assert "legacy" + "-wikigraph-" not in text
     assert f"from wiki_{old_backend}_lib import" not in text
     assert f"mark_{old_backend}_refresh_pending" not in text
     assert f"pending_{old_backend}_refresh_status" not in text

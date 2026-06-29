@@ -27,24 +27,18 @@ from wiki_native_raw_sections import (
     raw_section_specs_for_heading,
     summary_heading_matches,
 )
-from wiki_wikigraph_compat_names import retired_graph_package_name
-
 VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION = 1
-_RETIRED_BACKEND = retired_graph_package_name()
-_RETIRED_SYNC_DB_NAME = f"{_RETIRED_BACKEND}_sync.db"
-_RETIRED_MANIFEST_NAME = f"{_RETIRED_BACKEND}_manifest.jsonl"
+RETIRED_FILE_STORAGE_DIR_NAME = "rag" "_storage"
 POLLUTION_DIRECT_NAMES = {
     ".llm-wiki",
     "wikigraph_sync.db",
     "wikigraph_manifest.jsonl",
-    _RETIRED_SYNC_DB_NAME,
-    _RETIRED_MANIFEST_NAME,
     "seed_edges.jsonl",
     "method_atoms.jsonl",
     "raw_sections.jsonl",
     "retrieval_eval_queries.jsonl",
     "connection_review_queue.jsonl",
-    "rag_storage",
+    RETIRED_FILE_STORAGE_DIR_NAME,
     "inputs",
     "edge_docs",
     "method_atom_docs",
@@ -61,8 +55,6 @@ POLLUTION_DIRECT_NAMES = {
 POLLUTION_RECURSIVE_NAMES = {
     "wikigraph_sync.db",
     "wikigraph_manifest.jsonl",
-    _RETIRED_SYNC_DB_NAME,
-    _RETIRED_MANIFEST_NAME,
     "seed_edges.jsonl",
     "method_atoms.jsonl",
     "raw_sections.jsonl",
@@ -74,6 +66,10 @@ POLLUTION_RECURSIVE_NAMES = {
     "retrieval_eval_queries.jsonl",
     "connection_review_queue.jsonl",
 }
+POLLUTION_DIRECT_PATTERNS = (
+    re.compile(r"^[A-Za-z0-9_.-]+_sync\.db$"),
+    re.compile(r"^[A-Za-z0-9_.-]+_manifest\.jsonl$"),
+)
 
 
 def now_stamp() -> str:
@@ -175,6 +171,12 @@ def wiki_root_machine_pollution(root: Path) -> list[Path]:
         p = root / name
         if p.exists():
             polluted.append(Path(name))
+    if root.exists():
+        for p in root.iterdir():
+            if p.is_file() and any(pattern.match(p.name) for pattern in POLLUTION_DIRECT_PATTERNS):
+                rel = p.relative_to(root)
+                if rel not in polluted:
+                    polluted.append(rel)
     for name in POLLUTION_RECURSIVE_NAMES:
         for p in root.rglob(name):
             rel = p.relative_to(root)
@@ -248,7 +250,7 @@ def structured_heading_warnings(path: Path, text: str) -> list[str]:
     return warnings
 
 
-def audit_raw_note_section_contracts(root: Path, include_legacy: bool = True, issue_limit: int | None = None) -> dict[str, Any]:
+def audit_raw_note_section_contracts(root: Path, include_unstructured: bool = True, issue_limit: int | None = None) -> dict[str, Any]:
     root = root.resolve()
     raw_total = 0
     structured_total = 0
@@ -266,7 +268,7 @@ def audit_raw_note_section_contracts(root: Path, include_legacy: bool = True, is
         structured = is_structured_raw_note(doc.text)
         if structured:
             structured_total += 1
-        if not structured and not include_legacy:
+        if not structured and not include_unstructured:
             continue
         titles_by_kind: dict[str, list[str]] = {kind: [] for kind in RAW_NOTE_CONTRACT_SECTION_KINDS}
         for title, body in markdown_sections(doc.body):
@@ -343,7 +345,7 @@ def audit_raw_note_section_contracts(root: Path, include_legacy: bool = True, is
         "root": root.as_posix(),
         "raw_notes": raw_total,
         "structured_raw_notes": structured_total,
-        "include_legacy": include_legacy,
+        "include_unstructured": include_unstructured,
         "contract_section_kinds": RAW_NOTE_CONTRACT_SECTION_KINDS,
         "required_structured_section_kinds": RAW_NOTE_CONTRACT_REQUIRED_KINDS,
         "heading_occurrences_by_kind": dict(sorted(heading_occurrences.items())),

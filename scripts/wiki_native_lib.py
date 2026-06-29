@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Native-safe facade for llm-wiki script helpers.
 
-This module intentionally does not re-export retired backend HTTP import/query
-helpers. During migration it delegates pure wiki/artifact helpers to the legacy
-module and routes graph-refresh pending marks to the native refresh ledger.
+This module exposes active native/wiki helpers only. It intentionally does not
+re-export retired backend HTTP import/query helpers. Refresh pending marks route
+to the native refresh ledger.
 """
 
 from __future__ import annotations

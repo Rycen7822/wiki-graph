@@ -51,13 +51,14 @@ def test_status_and_mark_pending_use_native_ledger_under_state(tmp_path, capsys)
 
 
 def test_status_default_paths_are_repo_local(capsys) -> None:
-    assert batch_native_refresh.main(["status", "--no-migrate-legacy"]) == 0
+    assert batch_native_refresh.main(["status"]) == 0
     payload = json.loads(capsys.readouterr().out)
     repo_root = Path(__file__).resolve().parents[1]
 
     assert Path(payload["root"]) == repo_root / "wiki_test"
     assert Path(payload["state_dir"]) == repo_root / "tmp" / "native_refresh" / "state"
-    assert payload["legacy_refresh_migration_allowed"] is False
+    assert "legacy_refresh_migration_allowed" not in payload
+    assert "migrated_from_legacy_refresh" not in payload
 
 
 def test_mark_pending_default_paths_are_repo_local(capsys, monkeypatch) -> None:
@@ -277,39 +278,7 @@ def test_refresh_prepare_only_reports_required_unchanged_path_audit(tmp_path, ca
     ]
 
 
-def test_status_migrates_retired_wikigraph_pending_ledger_once(tmp_path, capsys) -> None:
-    old_backend = "light" + "rag"
-    workdir = tmp_path / old_backend
-    state_dir = workdir / "state"
-    legacy_path = state_dir / f"pending_{old_backend}_refresh.json"
-    native_path = state_dir / "pending_native_refresh.json"
-    legacy_path.parent.mkdir(parents=True)
-    legacy_path.write_text(
-        json.dumps({"schema_version": 1, "pending": [{"reason": "legacy"}]}),
-        encoding="utf-8",
-    )
-
-    assert batch_native_refresh.main(["status", "--workdir", str(workdir)]) == 0
-    migrated = json.loads(capsys.readouterr().out)
-
-    assert migrated["pending_count"] == 1
-    assert migrated["migrated_from_legacy_refresh"] is True
-    assert native_path.exists()
-    assert not legacy_path.exists()
-
-    assert batch_native_refresh.main(["status", "--workdir", str(workdir)]) == 0
-    second = json.loads(capsys.readouterr().out)
-
-    assert second["pending_count"] == 1
-    assert second["migrated_from_legacy_refresh"] is False
-
-    text = (SCRIPTS / "batch_native_refresh.py").read_text(encoding="utf-8")
-    assert f"legacy_{old_backend}_ledger_path" not in text
-    assert f"migrate_legacy_{old_backend}_ledger" not in text
-    assert f"migrated_from_{old_backend}" not in text
-
-
-def test_status_no_migrate_legacy_is_read_only(tmp_path, capsys) -> None:
+def test_status_ignores_retired_wikigraph_pending_ledger_without_migration(tmp_path, capsys) -> None:
     old_backend = "light" + "rag"
     workdir = tmp_path / "wikigraph"
     state_dir = workdir / "state"
@@ -321,18 +290,24 @@ def test_status_no_migrate_legacy_is_read_only(tmp_path, capsys) -> None:
         encoding="utf-8",
     )
 
-    assert batch_native_refresh.main(["status", "--workdir", str(workdir), "--no-migrate-legacy"]) == 0
+    assert batch_native_refresh.main(["status", "--workdir", str(workdir)]) == 0
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["pending_count"] == 0
     assert payload["should_refresh"] is False
-    assert payload["migrated_from_legacy_refresh"] is False
-    assert payload["legacy_refresh_migration_allowed"] is False
+    assert "migrated_from_legacy_refresh" not in payload
+    assert "legacy_refresh_migration_allowed" not in payload
     assert legacy_path.exists()
     assert not native_path.exists()
 
+    text = (SCRIPTS / "batch_native_refresh.py").read_text(encoding="utf-8")
+    assert "retired_refresh_ledger_name" not in text
+    assert "migrate_retired_wikigraph_refresh_ledger" not in text
+    assert "migrate_legacy" not in text
+    assert "--no-migrate-legacy" not in text
 
-def test_status_external_true_wiki_root_requires_no_migrate_before_ledger_move(tmp_path) -> None:
+
+def test_status_accepts_external_true_wiki_root_without_legacy_flag(tmp_path, capsys) -> None:
     old_backend = "light" + "rag"
     workdir = tmp_path / "wikigraph"
     state_dir = workdir / "state"
@@ -344,7 +319,7 @@ def test_status_external_true_wiki_root_requires_no_migrate_before_ledger_move(t
         encoding="utf-8",
     )
 
-    try:
+    assert (
         batch_native_refresh.main(
             [
                 "status",
@@ -354,12 +329,13 @@ def test_status_external_true_wiki_root_requires_no_migrate_before_ledger_move(t
                 str(workdir),
             ]
         )
-    except ValueError as exc:
-        assert "--no-migrate-legacy" in str(exc)
-        assert "external true wiki root" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("external-root status must require --no-migrate-legacy before ledger migration")
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
 
+    assert payload["root"] == "/mnt/d/data/Clippings/llm-wiki"
+    assert payload["pending_count"] == 0
+    assert payload["should_refresh"] is False
     assert legacy_path.exists()
     assert not native_path.exists()
 

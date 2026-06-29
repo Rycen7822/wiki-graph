@@ -41,13 +41,10 @@ ACTIVE_IMPORT_MODULES = (
     "llm_wiki_native.retrieval.query_engine",
     "llm_wiki_native.runtime",
 )
-ALLOWED_REF_REASONS = {
-    "scripts/batch_native_refresh.py": "one-time old pending-refresh ledger migration",
-    "scripts/wiki_native_wiki_checks.py": "wiki-root machine-pollution diagnostics",
-}
-LEGACY_WIKIGRAPH_WRAPPER_MARKERS = (
-    ("legacy_wikigraph_refresh_module", "batch_wikigraph_refresh"),
-    ("legacy_wikigraph_refresh_script", "batch_wikigraph_refresh.py"),
+ALLOWED_REF_REASONS: dict[str, str] = {}
+RETIRED_WIKIGRAPH_WRAPPER_MARKERS = (
+    ("retired_wikigraph_refresh_module", "batch_wikigraph_refresh"),
+    ("retired_wikigraph_refresh_script", "batch_wikigraph_refresh.py"),
 )
 
 _ISOLATED_PACKAGE_ABSENCE_SMOKE_CODE = r"""
@@ -161,18 +158,18 @@ def _marker_hits(text: str, marker_specs: list[dict[str, str]]) -> list[str]:
     return [spec["label"] for spec in marker_specs if spec["value"] and spec["value"] in text]
 
 
-def audit_legacy_wikigraph_wrapper_refs(root: Path, active_paths: list[Path]) -> dict[str, Any]:
+def audit_retired_wikigraph_wrapper_refs(root: Path, active_paths: list[Path]) -> dict[str, Any]:
     repo_root = Path(root).resolve()
     offenders: list[dict[str, Any]] = []
     for path in active_paths:
         rel = path.relative_to(repo_root).as_posix()
         text = path.read_text(encoding="utf-8")
-        marker_labels = [label for label, marker in LEGACY_WIKIGRAPH_WRAPPER_MARKERS if marker in text]
+        marker_labels = [label for label, marker in RETIRED_WIKIGRAPH_WRAPPER_MARKERS if marker in text]
         if marker_labels:
             offenders.append({"path": rel, "marker_labels": marker_labels})
     return {
         "ok": not offenders,
-        "marker_labels": [label for label, _marker in LEGACY_WIKIGRAPH_WRAPPER_MARKERS],
+        "marker_labels": [label for label, _marker in RETIRED_WIKIGRAPH_WRAPPER_MARKERS],
         "offender_count": len(offenders),
         "offenders": offenders,
     }
@@ -657,7 +654,7 @@ def audit_active_production_refs(
             continue
         offenders.append({"path": rel, "marker_labels": hits})
 
-    legacy_wikigraph_wrapper_refs = audit_legacy_wikigraph_wrapper_refs(root, active_paths)
+    retired_wikigraph_wrapper_refs = audit_retired_wikigraph_wrapper_refs(root, active_paths)
     package_independence = audit_package_independent_imports(
         root,
         repo_local_active_pointer_path=repo_local_active_pointer_path,
@@ -667,7 +664,7 @@ def audit_active_production_refs(
     )
 
     return {
-        "ok": not offenders and legacy_wikigraph_wrapper_refs["ok"] and package_independence["ok"],
+        "ok": not offenders and retired_wikigraph_wrapper_refs["ok"] and package_independence["ok"],
         "repo_root": str(root),
         "checked_count": len(checked_paths),
         "checked_paths": checked_paths,
@@ -675,7 +672,7 @@ def audit_active_production_refs(
         "allowed_refs": allowed_refs,
         "offender_count": len(offenders),
         "offenders": offenders,
-        "legacy_wikigraph_wrapper_refs": legacy_wikigraph_wrapper_refs,
+        "retired_wikigraph_wrapper_refs": retired_wikigraph_wrapper_refs,
         "package_independence": package_independence,
     }
 

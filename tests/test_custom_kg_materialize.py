@@ -435,7 +435,7 @@ def test_materialized_audit_accepts_aggregated_graph_sources_for_same_pair_typed
     assert audit["ok"] is True
 
 
-def test_relationship_vector_content_uses_pair_sorted_endpoint_order() -> None:
+def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> None:
     payload = _payload()
     payload["relationships"] = [
         {
@@ -454,10 +454,10 @@ def test_relationship_vector_content_uses_pair_sorted_endpoint_order() -> None:
 
     assert relationship["src_id"] == "topic:z"
     assert relationship["tgt_id"] == "doc:a"
-    assert relationship["content"] == "SOURCED_BY\tdoc:a\ntopic:z\ntopic:z SOURCED_BY doc:a"
+    assert relationship["content"] == "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
 
 
-def test_full_materialization_blocker_ignores_legacy_relationship_endpoint_order_only_change() -> None:
+def test_full_materialization_blocker_treats_endpoint_order_content_change_as_vector_update() -> None:
     payload = _payload()
     payload["relationships"] = [
         {
@@ -473,7 +473,7 @@ def test_full_materialization_blocker_ignores_legacy_relationship_endpoint_order
     desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     previous = copy.deepcopy(desired)
     key, previous_relationship = next(iter(previous["relationships"].items()))
-    previous_relationship["content"] = "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
+    previous_relationship["content"] = "SOURCED_BY\tdoc:a\ntopic:z\ntopic:z SOURCED_BY doc:a"
     custom_kg_incremental._stamp_identity_and_hashes(
         previous_relationship,
         record_id=previous_relationship["vdb_id"],
@@ -482,10 +482,10 @@ def test_full_materialization_blocker_ignores_legacy_relationship_endpoint_order
 
     blockers = custom_kg_incremental.full_materialization_cache_only_blockers(previous, desired)
 
-    assert blockers["blocked"] is False
-    assert blockers["collections"] == {}
-    assert blockers["diff"]["relationships"]["vector_update"] == 0
-    assert blockers["diff"]["relationships"]["metadata_update"] == 1
+    assert blockers["blocked"] is True
+    assert blockers["collections"] == {"relationships": {"add": 0, "vector_update": 1}}
+    assert blockers["diff"]["relationships"]["vector_update"] == 1
+    assert blockers["diff"]["relationships"]["metadata_update"] == 0
 
 
 def test_materialize_file_storage_from_all_hit_vector_cache_passes_audit(tmp_path) -> None:

@@ -47,22 +47,22 @@ from wiki_wikigraph_compat_names import (
 )
 
 _RETIRED_BACKEND = retired_graph_package_name()
-WIKIGRAPH_LEGACY_TOOL_PYTHON = Path(retired_graph_tool_python_path())
-LEGACY_WIKIGRAPH_SERVICE_NAME = retired_graph_service_name()
+RETIRED_WIKIGRAPH_TOOL_PYTHON = Path(retired_graph_tool_python_path())
+RETIRED_WIKIGRAPH_SERVICE_NAME = retired_graph_service_name()
 MATERIALIZABLE_FULL_REBUILD_REASONS = {"incremental_interval_reached"}
-LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE = "legacy-wikigraph-activation-retired"
-LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE = (
-    "legacy wikigraph production activation is retired; use batch_native_refresh.py refresh --cutover "
+RETIRED_WIKIGRAPH_ACTIVATION_CODE = "retired-wikigraph-activation-retired"
+RETIRED_WIKIGRAPH_ACTIVATION_MESSAGE = (
+    "retired wikigraph production activation is retired; use batch_native_refresh.py refresh --cutover "
     "or a dedicated audited migration slice instead of mutating live rag_storage"
 )
-LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE = "legacy-wikigraph-cold-import-retired"
-LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE = (
-    "legacy wikigraph cold full import is retired; use batch_native_refresh.py refresh --prepare-only "
+RETIRED_WIKIGRAPH_COLD_IMPORT_CODE = "retired-wikigraph-cold-import-retired"
+RETIRED_WIKIGRAPH_COLD_IMPORT_MESSAGE = (
+    "retired wikigraph cold full import is retired; use batch_native_refresh.py refresh --prepare-only "
     "or an explicit native cutover slice instead of resetting live rag_storage"
 )
-LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE = "legacy-wikigraph-full-materialization-retired"
-LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE = (
-    "legacy wikigraph full materialization is retired; use batch_native_refresh.py refresh --prepare-only "
+RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_CODE = "retired-wikigraph-full-materialization-retired"
+RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_MESSAGE = (
+    "retired wikigraph full materialization is retired; use batch_native_refresh.py refresh --prepare-only "
     "or an explicit native staging slice instead of building old-side file storage"
 )
 
@@ -76,18 +76,18 @@ def script_path(workdir: Path, name: str) -> str:
 
 
 def retired_wikigraph_activation_command() -> list[str]:
-    return ["python-internal", LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE, LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE]
+    return ["python-internal", RETIRED_WIKIGRAPH_ACTIVATION_CODE, RETIRED_WIKIGRAPH_ACTIVATION_MESSAGE]
 
 
 def retired_wikigraph_cold_import_command() -> list[str]:
-    return ["python-internal", LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE, LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE]
+    return ["python-internal", RETIRED_WIKIGRAPH_COLD_IMPORT_CODE, RETIRED_WIKIGRAPH_COLD_IMPORT_MESSAGE]
 
 
 def retired_wikigraph_full_materialization_command() -> list[str]:
     return [
         "python-internal",
-        LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE,
-        LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE,
+        RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_CODE,
+        RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_MESSAGE,
     ]
 
 
@@ -144,7 +144,7 @@ def build_refresh_commands(root: Path, state_dir: Path, workdir: Path, reuse_val
 def build_incremental_import_commands(root: Path, state_dir: Path, workdir: Path) -> list[list[str]]:
     return [
         [
-            str(WIKIGRAPH_LEGACY_TOOL_PYTHON),
+            str(RETIRED_WIKIGRAPH_TOOL_PYTHON),
             script_path(workdir, "custom_kg_incremental.py"),
             "apply",
             "--root",
@@ -359,37 +359,37 @@ def run_real_refresh(
             for command in commands:
                 if command[:2] == ["python-internal", "reset-rag-storage"]:
                     reset_rag_storage(workdir, import_log)
-                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE]:
-                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE
+                elif command[:2] == ["python-internal", RETIRED_WIKIGRAPH_ACTIVATION_CODE]:
+                    message = command[2] if len(command) > 2 else RETIRED_WIKIGRAPH_ACTIVATION_MESSAGE
                     raise RetiredWikigraphActivationError(message)
-                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE]:
-                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE
+                elif command[:2] == ["python-internal", RETIRED_WIKIGRAPH_COLD_IMPORT_CODE]:
+                    message = command[2] if len(command) > 2 else RETIRED_WIKIGRAPH_COLD_IMPORT_MESSAGE
                     raise RetiredWikigraphActivationError(message)
-                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE]:
-                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE
+                elif command[:2] == ["python-internal", RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_CODE]:
+                    message = command[2] if len(command) > 2 else RETIRED_WIKIGRAPH_FULL_MATERIALIZATION_MESSAGE
                     raise RetiredWikigraphActivationError(message)
                 elif command[:2] == ["python-internal", "health"]:
                     health = wait_health(command[2], import_log)
                 else:
                     env = os.environ.copy()
-                    if command and command[0] == str(WIKIGRAPH_LEGACY_TOOL_PYTHON):
+                    if command and command[0] == str(RETIRED_WIKIGRAPH_TOOL_PYTHON):
                         env.update(profile_env)
                     run_subprocess(command, import_log, env=env, timeout=None)
-                    if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == LEGACY_WIKIGRAPH_SERVICE_NAME:
+                    if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == RETIRED_WIKIGRAPH_SERVICE_NAME:
                         service_stopped = True
-                    if command[:3] == ["systemctl", "--user", "start"] and command[-1] == LEGACY_WIKIGRAPH_SERVICE_NAME:
+                    if command[:3] == ["systemctl", "--user", "start"] and command[-1] == RETIRED_WIKIGRAPH_SERVICE_NAME:
                         service_started = True
         except Exception as exc:
             setattr(exc, "_wikigraph_service_stopped", service_stopped)
             if service_stopped and not service_started:
-                start_command = ["systemctl", "--user", "start", LEGACY_WIKIGRAPH_SERVICE_NAME]
+                start_command = ["systemctl", "--user", "start", RETIRED_WIKIGRAPH_SERVICE_NAME]
                 append_log(import_log, f"[batch-refresh] recovery start after failure: {type(exc).__name__}: {exc}\n")
                 try:
                     run_subprocess(start_command, import_log, timeout=180)
                     service_started = True
                 except Exception as recovery_exc:  # pragma: no cover - defensive recovery path
                     append_log(import_log, f"[batch-refresh] recovery start failed: {type(recovery_exc).__name__}: {recovery_exc}\n")
-                    raise RuntimeError(f"{exc}; additionally failed to restart {LEGACY_WIKIGRAPH_SERVICE_NAME}: {recovery_exc}") from exc
+                    raise RuntimeError(f"{exc}; additionally failed to restart {RETIRED_WIKIGRAPH_SERVICE_NAME}: {recovery_exc}") from exc
             raise
         return health, service_stopped, service_started
 
@@ -400,7 +400,7 @@ def run_real_refresh(
         raise
     except Exception as exc:
         if should_use_full_materialization(import_mode) and not bool(getattr(exc, "_wikigraph_service_stopped", False)):
-            append_log(import_log, f"[batch-refresh] full materialization failed before service stop; legacy cold full import fallback is retired: {type(exc).__name__}: {exc}\n")
+            append_log(import_log, f"[batch-refresh] full materialization failed before service stop; retired cold full import fallback is disabled: {type(exc).__name__}: {exc}\n")
         raise
     timings["import_commands_s"] = round(time.perf_counter() - import_started, 6)
     append_log(import_log, f"[batch-refresh] import done {now_stamp()} mode={import_mode.get('selected_mode')}\n")
