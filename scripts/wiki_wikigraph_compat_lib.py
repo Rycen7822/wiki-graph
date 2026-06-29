@@ -90,13 +90,15 @@ from wiki_native_wiki_checks import (
     validation_report_is_fresh,
     wiki_root_machine_pollution,
 )
+from wiki_native_lib import (
+    clear_pending_wiki_integration_after_success as _native_clear_pending_wiki_integration_after_success,
+)
 from wiki_native_wiki_integration_pending import (
     DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
     PENDING_WIKI_INTEGRATION_LEDGER,
     WIKI_INTEGRATION_ACTIONABLE_STATUSES,
     WIKI_INTEGRATION_REVIEW_STATUSES,
     WIKI_INTEGRATION_TERMINAL_STATUSES,
-    clear_pending_wiki_integration_after_success as _native_clear_pending_wiki_integration_after_success,
     default_pending_wiki_integration_ledger,
     load_pending_wiki_integration_ledger,
     mark_pending_wiki_integration,
@@ -104,20 +106,6 @@ from wiki_native_wiki_integration_pending import (
     pending_wiki_integration_status,
     record_pending_wiki_integration_failure,
     save_pending_wiki_integration_ledger,
-)
-from wiki_wikigraph_refresh_pending import (
-    DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD,
-    PENDING_WIKIGRAPH_REFRESH_LEDGER,
-    clear_wikigraph_refresh_pending_after_success,
-    default_wikigraph_refresh_ledger,
-    load_wikigraph_refresh_ledger,
-    mark_wikigraph_refresh_pending,
-    pending_wikigraph_refresh_ledger_path,
-    pending_wikigraph_refresh_status,
-    record_wikigraph_refresh_failure,
-    save_wikigraph_refresh_ledger,
-    wikigraph_refresh_import_summary,
-    wiki_markdown_latest_mtime,
 )
 from wiki_native_raw_sections import (
     RAW_NOTE_CONTRACT_REQUIRED_KINDS,
@@ -137,35 +125,15 @@ def clear_pending_wiki_integration_after_success(
     state_dir: Path,
     integrated_paths: list[str] | None = None,
     reason: str = "integration",
-    mark_wikigraph_pending: bool = True,
+    mark_native_pending: bool = True,
 ) -> dict[str, Any]:
-    def mark_graph_pending(raw_path: str, item: dict[str, Any]) -> dict[str, Any]:
-        return mark_wikigraph_refresh_pending(
-            state_dir,
-            root,
-            raw_path=raw_path,
-            title=str(item.get("title") or ""),
-            event_type="batch-wiki-integration",
-            changed_surfaces=["raw-note", "_meta", "compiled-anchors", "log"],
-            expected_sections=[str(section) for section in (item.get("required_sections") or [])],
-        )
-
-    result = _native_clear_pending_wiki_integration_after_success(
+    return _native_clear_pending_wiki_integration_after_success(
         root,
         state_dir,
         integrated_paths=integrated_paths,
         reason=reason,
-        mark_graph_pending=mark_graph_pending if mark_wikigraph_pending else None,
+        mark_native_pending=mark_native_pending,
     )
-    marked_wikigraph_pending = list(result.pop("marked_graph_pending", []) or [])
-    marked_wikigraph_pending_count = int(
-        result.pop("marked_graph_pending_count", len(marked_wikigraph_pending)) or 0
-    )
-    return {
-        **result,
-        "marked_wikigraph_pending_count": marked_wikigraph_pending_count,
-        "marked_wikigraph_pending": marked_wikigraph_pending,
-    }
 
 
 from wiki_native_query_events import init_manifest_db

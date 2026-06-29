@@ -960,7 +960,7 @@ def test_clear_success_marks_native_refresh_not_legacy_backend_refresh(tmp_path)
     assert native_entries[0]["reason"] == "wiki-integration:integration-smoke"
 
 
-def test_wiki_integration_ledger_drops_historical_retired_backend_mark_fields(tmp_path) -> None:
+def test_wiki_integration_ledger_normalizes_to_current_schema(tmp_path) -> None:
     old_backend = "light" + "rag"
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
@@ -974,6 +974,7 @@ def test_wiki_integration_ledger_drops_historical_retired_backend_mark_fields(tm
                 "dirty": False,
                 f"last_marked_{old_backend}_pending": [{"raw_path": "raw/clip/old.md"}],
                 f"last_marked_{old_backend}_pending_count": 1,
+                "unexpected_future_or_retired_field": "drop me",
             },
             ensure_ascii=False,
             indent=2,
@@ -987,5 +988,7 @@ def test_wiki_integration_ledger_drops_historical_retired_backend_mark_fields(tm
 
     assert f"last_marked_{old_backend}_pending" not in loaded
     assert f"last_marked_{old_backend}_pending_count" not in loaded
+    assert "unexpected_future_or_retired_field" not in loaded
     assert f"last_marked_{old_backend}_pending" not in persisted
     assert f"last_marked_{old_backend}_pending_count" not in persisted
+    assert "unexpected_future_or_retired_field" not in persisted

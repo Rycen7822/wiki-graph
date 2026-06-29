@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Safe incremental custom_kg maintenance for the llm-wiki wikigraph workspace.
+"""Custom KG manifest and vector-contract helpers for native llm-wiki refresh.
 
-This module is deliberately conservative: it derives a complete desired manifest
-from the existing deterministic custom_kg payload, diffs that complete manifest
-against the previous successful manifest, patches a shadow copy of rag_storage,
-audits the shadow, and only then swaps it into production. The first run without
-a manifest, incompatible config/version changes, audit failures, or the periodic
-reconciliation interval all fall back to the existing full rebuild path.
+Production refresh now materializes native zvec workspaces from state artifacts.
+This module owns deterministic custom KG manifest generation, diff/hash helpers,
+and compatibility checks used by tests. Live file-storage apply, full
+materialization, import planning, and activation entrypoints are retired and fail
+closed before touching backend storage.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 import urllib.request
 from pathlib import Path
@@ -37,10 +35,8 @@ from custom_kg_vector_fill import (
     fill_missing_manifest_vectors as _native_fill_missing_manifest_vectors,
 )
 from wiki_wikigraph_compat_names import (
-    retired_graph_env_name,
     retired_graph_module_name,
     retired_graph_package_name,
-    retired_graph_tool_python_path,
 )
 
 try:  # Keep tests usable in the repo Python even when the external graph package is not importable.
@@ -63,16 +59,14 @@ GRAPH_FIELD_SEP = "<SEP>"
 MANIFEST_SCHEMA_VERSION = 1
 RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "llm-wiki-typed-directed-relationship:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
-REPORT_FILENAME = "custom_kg_import_report.json"
-PREPARED_SWAP_DIRNAME = "prepared_swaps"
-PREPARED_SWAP_REPORT_FILENAME = "custom_kg_prepared_swap.json"
-PREPARED_SWAP_MANIFEST_FILENAME = "custom_kg_prepared_manifest.json"
 DEFAULT_FULL_REBUILD_INTERVAL = 5
-PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION = 1
-PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_CODE = "prepared-wikigraph-swap-activation-retired"
 PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE = (
     "prepared wikigraph storage activation is retired; use batch_native_refresh.py refresh --cutover "
-    "or a dedicated audited migration slice instead of mutating live rag_storage"
+    "or a dedicated audited native migration slice instead of activating the retired file backend"
+)
+CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE = (
+    "custom KG live-storage runner is retired after native zvec production cutover; "
+    "use export-manifest plus native_zvec_materialize.py preflight/build for native staging"
 )
 STORAGE_AUDIT_CONTRACT_VERSION = "audit_custom_kg_storage:v1"
 CUSTOM_KG_STORAGE_AUDIT_FILES = {
@@ -85,24 +79,11 @@ CUSTOM_KG_STORAGE_AUDIT_FILES = {
     "relation_chunks": "kv_store_relation_chunks.json",
 }
 _EXTERNAL_GRAPH_PACKAGE = retired_graph_package_name()
-DEFAULT_WIKIGRAPH_TOOL_PYTHON = Path(
-    os.environ.get(
-        "WIKIGRAPH_TOOL_PYTHON",
-        os.environ.get(retired_graph_env_name("PYTHON"), retired_graph_tool_python_path()),
-    )
-)
 _CONTROL_CHAR_PATTERN_ALL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 _PLACEHOLDER_DOCUMENT_SOURCES = {"", "unknown", "unknown_source", "none", "null"}
 
 
-def prepared_wikigraph_swap_activation_retired_metadata() -> dict[str, str]:
-    return {
-        "status": "retired",
-        "code": PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_CODE,
-        "message": PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE,
-        "native_cutover_hint": "batch_native_refresh.py refresh --cutover",
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -283,26 +264,6 @@ def current_wikigraph_tool_version() -> str:
             return importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             continue
-    if DEFAULT_WIKIGRAPH_TOOL_PYTHON.exists():
-        try:
-            distribution_name = distribution_names[0]
-            completed = subprocess.run(
-                [
-                    str(DEFAULT_WIKIGRAPH_TOOL_PYTHON),
-                    "-c",
-                    f"import importlib.metadata as m; print(m.version({distribution_name!r}))",
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=True,
-            )
-            version = completed.stdout.strip()
-            if version:
-                return version
-        except Exception:
-            pass
     return "unknown"
 
 
@@ -329,16 +290,10 @@ def manifest_path(state_dir: Path) -> Path:
     return state_dir / MANIFEST_FILENAME
 
 
-def prepared_swap_dir(state_dir: Path) -> Path:
-    return state_dir / PREPARED_SWAP_DIRNAME
 
 
-def prepared_swap_report_path(state_dir: Path) -> Path:
-    return prepared_swap_dir(state_dir) / PREPARED_SWAP_REPORT_FILENAME
 
 
-def prepared_swap_manifest_path(state_dir: Path) -> Path:
-    return prepared_swap_dir(state_dir) / PREPARED_SWAP_MANIFEST_FILENAME
 
 
 def load_manifest(path_or_state_dir: Path) -> dict[str, Any] | None:
@@ -357,18 +312,6 @@ def write_manifest(state_dir: Path, manifest: dict[str, Any]) -> Path:
     return path
 
 
-def write_prepared_swap_bundle(state_dir: Path, desired_manifest: dict[str, Any], report: dict[str, Any]) -> tuple[Path, Path]:
-    """Persist an audited shadow swap bundle without mutating production manifest/storage."""
-
-    ensure_state_dirs(state_dir)
-    bundle_dir = prepared_swap_dir(state_dir)
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    manifest_out = prepared_swap_manifest_path(state_dir)
-    report_out = prepared_swap_report_path(state_dir)
-    manifest_out.write_text(json.dumps(desired_manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    report = {**report, "desired_manifest_path": str(manifest_out), "report_path": str(report_out)}
-    report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return report_out, manifest_out
 
 
 def _sha256_file(path: Path) -> str:
@@ -410,82 +353,8 @@ def _coerce_issue_count(value: Any) -> int:
         return -1
 
 
-def prepared_shadow_fingerprint(storage_dir: Path, desired_manifest_hash: str, shadow_audit: dict[str, Any]) -> dict[str, Any]:
-    storage_dir = storage_dir.resolve()
-    files = {
-        relative_path: storage_file_fingerprint(storage_dir / relative_path, relative_path=relative_path)
-        for relative_path in CUSTOM_KG_STORAGE_AUDIT_FILES.values()
-    }
-    return {
-        "schema_version": PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION,
-        "storage_dir": str(storage_dir),
-        "desired_manifest_hash": desired_manifest_hash,
-        "audit_function": {
-            "name": "audit_custom_kg_storage",
-            "version": STORAGE_AUDIT_CONTRACT_VERSION,
-            "contract_hash": _storage_audit_contract_hash(),
-        },
-        "shadow_audit": {
-            "ok": bool(shadow_audit.get("ok")),
-            "issue_count": _shadow_audit_issue_count(shadow_audit),
-        },
-        "files": files,
-    }
 
 
-def verify_prepared_shadow_fingerprint(prepared_report: dict[str, Any]) -> dict[str, Any]:
-    reasons: list[str] = []
-    fingerprint = prepared_report.get("prepared_shadow_fingerprint")
-    if not isinstance(fingerprint, dict):
-        return {"ok": False, "reasons": ["missing_prepared_shadow_fingerprint"]}
-
-    if fingerprint.get("schema_version") != PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION:
-        reasons.append("unsupported_fingerprint_schema")
-    report_hash = str(prepared_report.get("desired_manifest_hash") or "")
-    if report_hash != str(fingerprint.get("desired_manifest_hash") or ""):
-        reasons.append("desired_manifest_hash_mismatch")
-
-    audit_summary = fingerprint.get("shadow_audit", {})
-    if not isinstance(audit_summary, dict) or not audit_summary.get("ok") or _coerce_issue_count(audit_summary.get("issue_count", 1)) != 0:
-        reasons.append("prepared_shadow_audit_not_clean")
-    report_audit = prepared_report.get("shadow_audit", {})
-    if not isinstance(report_audit, dict) or not report_audit.get("ok") or _shadow_audit_issue_count(report_audit) != 0:
-        reasons.append("report_shadow_audit_not_clean")
-
-    audit_function = fingerprint.get("audit_function", {})
-    if not isinstance(audit_function, dict) or audit_function.get("contract_hash") != _storage_audit_contract_hash():
-        reasons.append("audit_contract_mismatch")
-
-    storage_value = str(prepared_report.get("shadow_storage") or fingerprint.get("storage_dir") or "")
-    if not storage_value:
-        reasons.append("missing_shadow_storage")
-        storage_dir = None
-    else:
-        storage_dir = Path(storage_value).resolve()
-        if str(storage_dir) != str(fingerprint.get("storage_dir") or ""):
-            reasons.append("shadow_storage_path_mismatch")
-
-    files = fingerprint.get("files")
-    expected_paths = set(CUSTOM_KG_STORAGE_AUDIT_FILES.values())
-    if not isinstance(files, dict):
-        reasons.append("missing_file_fingerprints")
-    elif storage_dir is not None:
-        for relative_path in sorted(expected_paths):
-            recorded = files.get(relative_path)
-            if not isinstance(recorded, dict):
-                reasons.append(f"missing_fingerprint:{relative_path}")
-                continue
-            path = storage_dir / relative_path
-            if not path.exists():
-                reasons.append(f"missing_file:{relative_path}")
-                continue
-            current = storage_file_fingerprint(path, relative_path=relative_path)
-            if any(recorded.get(field) != current[field] for field in ("size", "mtime_ns", "sha256")):
-                reasons.append(f"changed_file:{relative_path}")
-        for relative_path in sorted(set(files) - expected_paths):
-            reasons.append(f"unexpected_fingerprint:{relative_path}")
-
-    return {"ok": not reasons, "reasons": sorted(dict.fromkeys(reasons))}
 
 
 def manifest_record_count(manifest: dict[str, Any]) -> dict[str, int]:
@@ -764,10 +633,10 @@ def full_materialization_cache_only_blockers(previous_manifest: dict[str, Any] |
 def compact_vector_cache_report(vector_report: dict[str, Any], *, missing_example_limit: int = 10) -> dict[str, Any]:
     """Return report-safe vector-cache diagnostics without embedding vectors.
 
-    `resolve_manifest_vectors()` keeps full resolved vectors for storage
-    materialization. Default stdout/prepared-swap reports only need compact
-    diagnostics; otherwise every full-materialization refresh log repeats tens
-    of thousands of embedding arrays.
+    `resolve_manifest_vectors()` keeps full resolved vectors for callers that
+    need complete materialization data. Default reports only need compact
+    diagnostics; otherwise every report repeats tens of thousands of embedding
+    arrays.
     """
 
     summary = vector_report.get("summary", {}) if isinstance(vector_report, dict) else {}
@@ -1374,119 +1243,11 @@ async def apply_patch_to_storage(
     workdir: Path,
     tracking_update_mode: str = "full",
 ) -> dict[str, Any]:
-    """Apply manifest diff to a shadow wikigraph storage directory using storage APIs."""
+    """Fail closed for the retired ExternalGraph storage patch helper."""
 
-    from import_custom_kg import build_rag  # Imported lazily to avoid circular imports in full rebuild.
+    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
 
-    diff = diff_custom_kg_manifests(old_manifest, desired_manifest)
-    if tracking_update_mode not in {"full", "delta"}:
-        raise ValueError(f"tracking_update_mode must be 'full' or 'delta', got {tracking_update_mode!r}")
-    tracking_diff = diff_tracking(old_manifest, desired_manifest)
-    diff["tracking_update_mode"] = tracking_update_mode
-    diff["tracking"] = tracking_diff
-    rag = build_rag(workdir, storage_dir=shadow_storage_dir)
-    await rag.initialize_storages()
-    try:
-        old_rels = old_manifest.get("relationships", {})
-        new_rels = desired_manifest.get("relationships", {})
-        rel_vector_update_ids = set(diff["relationships"].get("vector_update_ids", diff["relationships"]["update_ids"]))
-        rel_metadata_update_ids = set(diff["relationships"].get("metadata_update_ids", [])) - rel_vector_update_ids
-        rels_to_remove = sorted(set(diff["relationships"]["delete_ids"]) | rel_vector_update_ids)
-        affected_relationship_pairs: set[str] = set()
-        for key in rels_to_remove:
-            if key in old_rels:
-                affected_relationship_pairs.add(_relationship_pair(old_rels[key]))
-        if rels_to_remove:
-            await rag.chunk_entity_relation_graph.remove_edges([tuple(old_rels[key]["rel_key"]) for key in rels_to_remove if key in old_rels])
-            delete_rel_vdb_ids = sorted(
-                {
-                    str(old_rels[key].get("vdb_id") or relation_vdb_id(old_rels[key]["src_id"], old_rels[key]["tgt_id"], str(old_rels[key].get("keywords", ""))))
-                    for key in rels_to_remove
-                    if key in old_rels
-                }
-            )
-            if delete_rel_vdb_ids:
-                await rag.relationships_vdb.delete(delete_rel_vdb_ids)
-            await rag.relation_chunks.delete([key for key in rels_to_remove if key in old_rels])
 
-        old_entities = old_manifest.get("entities", {})
-        entity_vector_update_ids = set(diff["entities"].get("vector_update_ids", diff["entities"]["update_ids"]))
-        entity_metadata_update_ids = set(diff["entities"].get("metadata_update_ids", [])) - entity_vector_update_ids
-        entities_to_delete = diff["entities"]["delete_ids"]
-        if entities_to_delete:
-            await rag.chunk_entity_relation_graph.remove_nodes(entities_to_delete)
-            await rag.entities_vdb.delete([old_entities[key]["vdb_id"] for key in entities_to_delete if key in old_entities])
-            await rag.entity_chunks.delete([key for key in entities_to_delete if key in old_entities])
-
-        chunks_to_delete = diff["chunks"]["delete_ids"]
-        if chunks_to_delete:
-            await rag.chunks_vdb.delete(chunks_to_delete)
-            await rag.text_chunks.delete(chunks_to_delete)
-
-        chunk_upsert_ids = sorted(set(diff["chunks"]["add_ids"]) | set(diff["chunks"]["update_ids"]))
-        if chunk_upsert_ids:
-            chunk_payload = {chunk_id: _chunk_storage_record(desired_manifest["chunks"][chunk_id]) for chunk_id in chunk_upsert_ids}
-            await asyncio.gather(rag.chunks_vdb.upsert(chunk_payload), rag.text_chunks.upsert(chunk_payload))
-
-        entity_graph_upsert_ids = sorted(set(diff["entities"]["add_ids"]) | set(diff["entities"]["update_ids"]))
-        if entity_graph_upsert_ids:
-            entities = [desired_manifest["entities"][entity_name] for entity_name in entity_graph_upsert_ids]
-            await rag.chunk_entity_relation_graph.upsert_nodes_batch([(record["entity_name"], _entity_graph_data(record)) for record in entities])
-        entity_vdb_upsert_ids = sorted(set(diff["entities"]["add_ids"]) | entity_vector_update_ids)
-        if entity_vdb_upsert_ids:
-            entities = [desired_manifest["entities"][entity_name] for entity_name in entity_vdb_upsert_ids]
-            await rag.entities_vdb.upsert({record["vdb_id"]: _entity_vdb_data(record) for record in entities})
-        entity_metadata_records = [desired_manifest["entities"][entity_name] for entity_name in sorted(entity_metadata_update_ids)]
-        if entity_metadata_records:
-            await _patch_materialized_vdb_metadata(
-                rag.entities_vdb,
-                {record["vdb_id"]: _entity_vdb_data(record) for record in entity_metadata_records},
-            )
-
-        rel_graph_upsert_ids = sorted(set(diff["relationships"]["add_ids"]) | set(diff["relationships"]["update_ids"]))
-        for key in rel_graph_upsert_ids:
-            if key in new_rels:
-                affected_relationship_pairs.add(_relationship_pair(new_rels[key]))
-        rel_graph_records = [record for record in new_rels.values() if _relationship_pair(record) in affected_relationship_pairs]
-        if rel_graph_records:
-            await rag.chunk_entity_relation_graph.upsert_edges_batch(_relationship_graph_edge_upserts(rel_graph_records))
-        rel_vdb_upsert_ids = sorted(set(diff["relationships"]["add_ids"]) | rel_vector_update_ids)
-        if rel_vdb_upsert_ids:
-            relationships = [new_rels[key] for key in rel_vdb_upsert_ids]
-            await rag.relationships_vdb.upsert({record["vdb_id"]: _relationship_vdb_data(record) for record in relationships})
-        rel_metadata_records = [new_rels[key] for key in sorted(rel_metadata_update_ids)]
-        if rel_metadata_records:
-            await _patch_materialized_vdb_metadata(
-                rag.relationships_vdb,
-                {record["vdb_id"]: _relationship_vdb_data(record) for record in rel_metadata_records},
-            )
-
-        if tracking_update_mode == "delta":
-            entity_tracking_delta = tracking_diff["entities"]
-            relation_tracking_delta = tracking_diff["relationships"]
-            if entity_tracking_delta["delete_ids"]:
-                await rag.entity_chunks.delete(entity_tracking_delta["delete_ids"])
-            if relation_tracking_delta["delete_ids"]:
-                await rag.relation_chunks.delete(relation_tracking_delta["delete_ids"])
-            if entity_tracking_delta["upsert_records"]:
-                await rag.entity_chunks.upsert(entity_tracking_delta["upsert_records"])
-            if relation_tracking_delta["upsert_records"]:
-                await rag.relation_chunks.upsert(relation_tracking_delta["upsert_records"])
-        else:
-            entity_tracking, relation_tracking = _tracking_from_manifest(desired_manifest)
-            await rag.entity_chunks.drop()
-            await rag.relation_chunks.drop()
-            if entity_tracking:
-                await rag.entity_chunks.upsert(entity_tracking)
-            if relation_tracking:
-                await rag.relation_chunks.upsert(relation_tracking)
-
-        # This patch includes deletes, so use plain _insert_done instead of the
-        # upsert-only cleanup helper. The shadow directory is discarded on error.
-        await rag._insert_done()
-    finally:
-        await rag.finalize_storages()
-    return diff
 
 
 def build_desired_manifest(root: Path, state_dir: Path, *, limit_docs: int | None = None, limit_edges: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1599,25 +1360,10 @@ def run_export_manifest(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def plan_incremental_import(root: Path, state_dir: Path, workdir: Path, *, full_rebuild_interval: int = DEFAULT_FULL_REBUILD_INTERVAL) -> dict[str, Any]:
-    ensure_state_dirs(state_dir)
-    load_env_file(workdir / ".env")
-    desired_manifest, payload_summary = build_desired_manifest(root, state_dir)
-    previous_manifest = load_manifest(state_dir)
-    storage_audit = {"ok": True, "issues": [], "counts": {}}
-    if previous_manifest is not None:
-        storage_audit = audit_custom_kg_storage(workdir / "rag_storage", previous_manifest)
-    plan = choose_refresh_mode(previous_manifest, desired_manifest, storage_audit_ok=bool(storage_audit.get("ok")), full_rebuild_interval=full_rebuild_interval)
-    plan.update(
-        {
-            "manifest_path": str(manifest_path(state_dir)),
-            "payload": payload_summary,
-            "desired_summary": desired_manifest.get("summary", {}),
-            "storage_audit": storage_audit,
-        }
+    raise RuntimeError(
+        "custom KG incremental import planner is retired after native zvec production cutover; "
+        "use export-manifest plus native_zvec_materialize.py preflight/build"
     )
-    del desired_manifest, previous_manifest, storage_audit
-    release_process_memory()
-    return plan
 
 
 def _safe_remove(path: Path) -> None:
@@ -1648,358 +1394,20 @@ def _count_query_data_items(response: Any) -> dict[str, int]:
     return counts
 
 
-def run_shadow_query_data_smokes(
-    *,
-    workdir: Path,
-    storage_dir: Path,
-    queries: list[str],
-    mode: str = "mix",
-    top_k: int = 5,
-    chunk_top_k: int = 5,
-) -> dict[str, Any]:
-    """Run direct wikigraph query-data smokes against an explicit shadow storage dir."""
-
-    from import_custom_kg import build_rag
-    external_graph = importlib.import_module(_EXTERNAL_GRAPH_PACKAGE)
-    QueryParam = external_graph.QueryParam
-
-    workdir = Path(workdir).resolve()
-    storage_dir = Path(storage_dir).resolve()
-    load_env_file(workdir / ".env")
-
-    async def _run() -> dict[str, Any]:
-        rag = build_rag(workdir, storage_dir=storage_dir)
-        await rag.initialize_storages()
-        results: list[dict[str, Any]] = []
-        try:
-            for query in queries:
-                response = await rag.aquery_data(
-                    query,
-                    param=QueryParam(mode=mode, top_k=top_k, chunk_top_k=chunk_top_k, max_total_tokens=8000),
-                )
-                counts = _count_query_data_items(response)
-                results.append({"query": query, "ok": any(counts.values()), "counts": counts})
-        finally:
-            await rag.finalize_storages()
-        return {"ok": bool(results) and all(item["ok"] for item in results), "queries": results}
-
-    return asyncio.run(_run())
 
 
 async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
-    total_started = time.perf_counter()
-    timings: dict[str, float] = {}
-    root = args.root.resolve()
-    state_dir = args.state_dir.resolve()
-    workdir = args.workdir.resolve()
+    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
 
-    phase_started = time.perf_counter()
-    ensure_state_dirs(state_dir)
-    load_env_file(workdir / ".env")
-    _record_timing(timings, "load_env_s", phase_started)
 
-    phase_started = time.perf_counter()
-    previous_manifest = load_manifest(state_dir)
-    _record_timing(timings, "load_previous_manifest_s", phase_started)
-
-    phase_started = time.perf_counter()
-    desired_manifest, payload_summary = build_desired_manifest(root, state_dir, limit_docs=args.limit_docs, limit_edges=args.limit_edges)
-    _record_timing(timings, "build_desired_manifest_s", phase_started)
-
-    phase_started = time.perf_counter()
-    storage_audit = {"ok": False, "issues": [{"type": "missing_manifest"}], "counts": {}}
-    if previous_manifest is not None:
-        storage_audit = audit_custom_kg_storage(workdir / "rag_storage", previous_manifest)
-    _record_timing(timings, "audit_live_storage_s", phase_started)
-    release_process_memory()
-
-    phase_started = time.perf_counter()
-    plan = choose_refresh_mode(previous_manifest, desired_manifest, storage_audit_ok=bool(storage_audit.get("ok")), full_rebuild_interval=args.full_rebuild_interval)
-    _record_timing(timings, "choose_mode_s", phase_started)
-    if plan["selected_mode"] != "incremental" and not args.force_incremental:
-        raise RuntimeError(f"Incremental apply is not allowed; selected_mode={plan['selected_mode']} reasons={plan['reasons']}")
-    if previous_manifest is None:
-        raise RuntimeError("Incremental apply requires a previous custom_kg manifest")
-    prepare_swap = bool(getattr(args, "prepare_swap", False))
-    if not args.no_swap and not prepare_swap:
-        raise RuntimeError(
-            "direct custom KG apply swap is retired; use --no-swap for audit-only runs "
-            "or --prepare-swap followed by finalize-prepared-swap"
-        )
-
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    live_storage = workdir / "rag_storage"
-    if not live_storage.exists():
-        raise RuntimeError(f"missing live rag_storage: {live_storage}")
-    shadow_storage = workdir / f"rag_storage.shadow.{stamp}"
-    backup_dir = state_dir / "backups" / f"rag_storage_incremental_{stamp}"
-
-    phase_started = time.perf_counter()
-    _safe_remove(shadow_storage)
-    shutil.copytree(live_storage, shadow_storage)
-    _record_timing(timings, "copy_live_to_shadow_s", phase_started)
-
-    started_at = now_stamp()
-    phase_started = time.perf_counter()
-    diff = await apply_patch_to_storage(
-        shadow_storage,
-        previous_manifest,
-        desired_manifest,
-        workdir=workdir,
-        tracking_update_mode=getattr(args, "tracking_update_mode", "full"),
-    )
-    _record_timing(timings, "apply_patch_to_shadow_s", phase_started)
-    release_process_memory()
-
-    phase_started = time.perf_counter()
-    shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
-    _record_timing(timings, "audit_shadow_storage_s", phase_started)
-    release_process_memory()
-    if not shadow_audit.get("ok"):
-        raise RuntimeError(f"shadow storage audit failed: {json.dumps(shadow_audit.get('issues', [])[:10], ensure_ascii=False)}")
-
-    phase_started = time.perf_counter()
-    swapped = False
-    if not args.no_swap and not prepare_swap:
-        backup_dir.parent.mkdir(parents=True, exist_ok=True)
-        _safe_remove(backup_dir)
-        try:
-            live_storage.rename(backup_dir)
-            shadow_storage.rename(live_storage)
-            swapped = True
-        except Exception:
-            if not live_storage.exists() and backup_dir.exists():
-                backup_dir.rename(live_storage)
-            raise
-    _record_timing(timings, "swap_shadow_to_live_s", phase_started)
-
-    phase_started = time.perf_counter()
-    if args.no_swap and not prepare_swap and args.delete_shadow_on_no_swap:
-        shutil.rmtree(shadow_storage, ignore_errors=True)
-    _record_timing(timings, "cleanup_shadow_s", phase_started)
-
-    phase_started = time.perf_counter()
-    final_manifest = successful_manifest(desired_manifest, import_mode="incremental", previous_manifest=previous_manifest)
-    manifest_written = None
-    if swapped or args.write_manifest_without_swap:
-        manifest_written = str(write_manifest(state_dir, final_manifest))
-    _record_timing(timings, "write_manifest_s", phase_started)
-    timings["total_s"] = round(time.perf_counter() - total_started, 6)
-
-    previous_manifest_hash = stable_hash(previous_manifest)
-    desired_manifest_hash = stable_hash(desired_manifest)
-    report = {
-        "started_at": started_at,
-        "finished_at": now_stamp(),
-        "wiki_root": str(root),
-        "workdir": str(workdir),
-        "state_dir": str(state_dir),
-        "dry_run": False,
-        "import_mode": "incremental",
-        "full_rebuild_interval": args.full_rebuild_interval,
-        "payload": payload_summary,
-        "manifest": final_manifest.get("summary", {}),
-        "manifest_path": manifest_written,
-        "diff": diff,
-        "plan": plan,
-        "pre_audit": storage_audit,
-        "shadow_audit": shadow_audit,
-        "shadow_storage": str(shadow_storage),
-        "backup_dir": str(backup_dir) if (swapped or prepare_swap) else None,
-        "swapped": swapped,
-        "prepared_for_swap": prepare_swap,
-        "previous_manifest_hash": previous_manifest_hash,
-        "desired_manifest_hash": desired_manifest_hash,
-        "timings": timings,
-    }
-    if prepare_swap:
-        report["prepared_activation"] = prepared_wikigraph_swap_activation_retired_metadata()
-        report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
-        report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
-        report["report_path"] = str(report_path)
-        report["desired_manifest_path"] = str(desired_manifest_path)
-    if swapped:
-        report_path = state_dir / REPORT_FILENAME
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        report["report_path"] = str(report_path)
-    return report
 
 
 def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]:
-    """Build and audit a full materialized shadow storage directory without swapping live state."""
+    """Fail closed for the retired full-materialization runner."""
 
-    from custom_kg_materialize import materialize_file_storage_from_manifest
-    from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage
+    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
 
-    total_started = time.perf_counter()
-    timings: dict[str, float] = {}
-    root = args.root.resolve()
-    state_dir = args.state_dir.resolve()
-    workdir = args.workdir.resolve()
 
-    phase_started = time.perf_counter()
-    ensure_state_dirs(state_dir)
-    load_env_file(workdir / ".env")
-    prepare_swap = bool(getattr(args, "prepare_swap", False))
-    if prepare_swap and getattr(args, "delete_shadow_on_no_swap", False):
-        raise RuntimeError("--prepare-swap cannot be combined with --delete-shadow-on-no-swap; prepared shadow must remain for finalize")
-    _record_timing(timings, "load_env_s", phase_started)
-
-    phase_started = time.perf_counter()
-    previous_manifest = load_manifest(state_dir)
-    _record_timing(timings, "load_previous_manifest_s", phase_started)
-
-    phase_started = time.perf_counter()
-    desired_manifest, payload_summary = build_desired_manifest(
-        root,
-        state_dir,
-        limit_docs=getattr(args, "limit_docs", None),
-        limit_edges=getattr(args, "limit_edges", None),
-    )
-    _record_timing(timings, "build_desired_manifest_s", phase_started)
-
-    fill_missing_vectors_enabled = bool(getattr(args, "fill_missing_vectors", False))
-    embedding_profile = str(getattr(args, "embedding_profile", DEFAULT_EMBEDDING_PROFILE) or DEFAULT_EMBEDDING_PROFILE)
-    embedding_profile_env(embedding_profile)
-    cache_only_blockers = full_materialization_cache_only_blockers(previous_manifest, desired_manifest)
-    cache_only_blocker_summary = {
-        "blocked": bool(cache_only_blockers.get("blocked")),
-        "total": int(cache_only_blockers.get("total", 0) or 0),
-        "collections": cache_only_blockers.get("collections", {}),
-    }
-    if cache_only_blocker_summary["blocked"] and not fill_missing_vectors_enabled:
-        raise RuntimeError(
-            "cache-only full materialization is unsafe without --fill-missing-vectors; "
-            f"new_or_vector_updated_records={cache_only_blocker_summary['total']} "
-            f"collections={json.dumps(cache_only_blocker_summary['collections'], ensure_ascii=False, sort_keys=True)}"
-        )
-
-    phase_started = time.perf_counter()
-    cache_path = _arg_path(args, "vector_cache", state_dir / "vector_cache.sqlite").resolve()
-    cache = VectorCache(cache_path)
-    vector_seed_report = None
-    if getattr(args, "seed_from_storage", False):
-        if previous_manifest is None:
-            raise RuntimeError("--seed-from-storage requires a previous custom_kg manifest so storage vectors can be matched to their original vector_hash")
-        seed_storage_dir = _arg_path(args, "seed_storage_dir", workdir / "rag_storage").resolve()
-        vector_seed_report = seed_vector_cache_from_storage(desired_manifest, seed_storage_dir, cache, previous_manifest=previous_manifest)
-    _record_timing(timings, "seed_vector_cache_s", phase_started)
-
-    phase_started = time.perf_counter()
-    vector_report = resolve_manifest_vectors(desired_manifest, cache)
-    _record_timing(timings, "resolve_vector_cache_s", phase_started)
-    misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
-    vector_fill_report = None
-    if misses and fill_missing_vectors_enabled:
-        phase_started = time.perf_counter()
-        vector_fill_report = fill_missing_manifest_vectors(
-            desired_manifest,
-            vector_report,
-            cache,
-            workdir=workdir,
-            embedding_profile=embedding_profile,
-        )
-        _record_timing(timings, "fill_missing_vectors_s", phase_started)
-        phase_started = time.perf_counter()
-        vector_report = resolve_manifest_vectors(desired_manifest, cache)
-        _record_timing(timings, "resolve_vector_cache_after_fill_s", phase_started)
-        misses = int(vector_report.get("summary", {}).get("total", {}).get("misses", 0) or 0)
-    if misses:
-        raise RuntimeError(f"full materialization requires all vectors resolved from cache; misses={misses}")
-
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    shadow_storage = _arg_path(args, "storage_dir", workdir / f"rag_storage.full_materialize.{stamp}").resolve()
-    started_at = now_stamp()
-
-    phase_started = time.perf_counter()
-    materialize_report = materialize_file_storage_from_manifest(desired_manifest, vector_report["resolved"], shadow_storage)
-    _record_timing(timings, "materialize_shadow_storage_s", phase_started)
-
-    phase_started = time.perf_counter()
-    shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
-    _record_timing(timings, "audit_shadow_storage_s", phase_started)
-    if not shadow_audit.get("ok"):
-        raise RuntimeError(f"full materialized shadow audit failed: {json.dumps(shadow_audit.get('issues', [])[:10], ensure_ascii=False)}")
-
-    phase_started = time.perf_counter()
-    pre_audit = None
-    if prepare_swap:
-        if previous_manifest is None:
-            raise RuntimeError("full materialization prepare-swap requires a current custom_kg manifest")
-        live_storage = workdir / "rag_storage"
-        if not live_storage.exists():
-            raise RuntimeError(f"missing live rag_storage before prepared full materialization: {live_storage}")
-        pre_audit = audit_custom_kg_storage(live_storage, previous_manifest)
-        if not pre_audit.get("ok") and not getattr(args, "allow_current_storage_audit_failure", False):
-            raise RuntimeError(f"live storage audit failed before prepared full materialization: {json.dumps(pre_audit.get('issues', [])[:10], ensure_ascii=False)}")
-    _record_timing(timings, "audit_live_storage_s", phase_started)
-
-    phase_started = time.perf_counter()
-    query_smoke = None
-    smoke_queries = list(getattr(args, "smoke_query", None) or [])
-    if smoke_queries:
-        query_smoke = run_shadow_query_data_smokes(
-            workdir=workdir,
-            storage_dir=shadow_storage,
-            queries=smoke_queries,
-            mode=str(getattr(args, "smoke_mode", "mix") or "mix"),
-            top_k=int(getattr(args, "smoke_top_k", 5) or 5),
-            chunk_top_k=int(getattr(args, "smoke_chunk_top_k", 5) or 5),
-        )
-        if not query_smoke.get("ok"):
-            raise RuntimeError(f"shadow query smoke failed: {json.dumps(query_smoke, ensure_ascii=False)[:1000]}")
-    _record_timing(timings, "query_shadow_storage_s", phase_started)
-
-    phase_started = time.perf_counter()
-    shadow_deleted = False
-    if getattr(args, "delete_shadow_on_no_swap", False) and not prepare_swap:
-        shutil.rmtree(shadow_storage, ignore_errors=True)
-        shadow_deleted = True
-    _record_timing(timings, "cleanup_shadow_s", phase_started)
-    timings["total_s"] = round(time.perf_counter() - total_started, 6)
-
-    previous_manifest_hash = stable_hash(previous_manifest) if previous_manifest is not None else None
-    desired_manifest_hash = stable_hash(desired_manifest)
-    report = {
-        "started_at": started_at,
-        "finished_at": now_stamp(),
-        "wiki_root": str(root),
-        "workdir": str(workdir),
-        "state_dir": str(state_dir),
-        "dry_run": False,
-        "import_mode": "full_materialization",
-        "payload": payload_summary,
-        "manifest": desired_manifest.get("summary", {}),
-        "manifest_path": None,
-        "materialize": materialize_report,
-        "vector_cache_path": str(cache_path),
-        "cache_only_blockers": cache_only_blocker_summary,
-        "fill_missing_vectors": fill_missing_vectors_enabled,
-        "embedding_profile": embedding_profile,
-        "vector_cache_seed": vector_seed_report,
-        "vector_cache_fill": vector_fill_report,
-        "vector_cache": compact_vector_cache_report(vector_report),
-        "pre_audit": pre_audit,
-        "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
-        "shadow_audit": shadow_audit,
-        "query_smoke": query_smoke,
-        "shadow_storage": str(shadow_storage),
-        "shadow_deleted": shadow_deleted,
-        "backup_dir": str(state_dir / "backups" / f"rag_storage_full_materialization_{stamp}") if prepare_swap else None,
-        "swapped": False,
-        "prepared_for_swap": prepare_swap,
-        "previous_manifest_hash": previous_manifest_hash,
-        "desired_manifest_hash": desired_manifest_hash,
-        "timings": timings,
-    }
-    if prepare_swap:
-        report["prepared_activation"] = prepared_wikigraph_swap_activation_retired_metadata()
-        report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
-        report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
-        report["report_path"] = str(report_path)
-        report["desired_manifest_path"] = str(desired_manifest_path)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return report
 
 
 def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
@@ -2019,10 +1427,10 @@ def add_common_paths(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Safe incremental custom_kg planner/apply/audit for llm-wiki wikigraph")
+    parser = argparse.ArgumentParser(description="Custom KG manifest helpers for llm-wiki native refresh")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    plan_parser = sub.add_parser("plan", help="Build desired manifest and decide full vs incremental without mutation")
+    plan_parser = sub.add_parser("plan", help="Retired command; use export-manifest plus native_zvec_materialize.py")
     add_common_paths(plan_parser)
     plan_parser.add_argument("--full-rebuild-interval", type=int, default=DEFAULT_FULL_REBUILD_INTERVAL)
 
@@ -2036,7 +1444,7 @@ def main() -> int:
     audit_manifest_parser.add_argument("--limit-docs", type=int, default=None)
     audit_manifest_parser.add_argument("--limit-edges", type=int, default=None)
 
-    audit_parser = sub.add_parser("audit-storage", help="Audit rag_storage consistency, optionally against the saved manifest")
+    audit_parser = sub.add_parser("audit-storage", help="Retired command; native refresh audits native artifacts")
     add_common_paths(audit_parser)
     audit_parser.add_argument("--manifest", type=Path, default=None)
     audit_parser.add_argument("--storage-dir", type=Path, default=None)
@@ -2054,7 +1462,7 @@ def main() -> int:
     apply_parser.add_argument("--prepare-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before apply")
     apply_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
     apply_parser.add_argument("--write-manifest-without-swap", action="store_true")
-    apply_parser.add_argument("--tracking-update-mode", choices=["full", "delta"], default="full", help="How to update entity/relation chunk tracking stores inside the audited shadow copy")
+    apply_parser.add_argument("--tracking-update-mode", choices=["full", "delta"], default="full", help="Retired compatibility flag; command fails before tracking updates")
 
     finalize_parser = sub.add_parser("finalize-prepared-swap", help="Retired command; native refresh cutover owns production activation")
     add_common_paths(finalize_parser)
@@ -2062,11 +1470,11 @@ def main() -> int:
     finalize_parser.add_argument("--server-host", default="127.0.0.1")
     finalize_parser.add_argument("--server-port", type=int, default=9621)
     finalize_parser.add_argument("--allow-server-running", action="store_true")
-    finalize_parser.add_argument("--force-shadow-audit", action="store_true", help="Rerun the prepared shadow storage audit instead of using a verified prepared fingerprint")
+    finalize_parser.add_argument("--force-shadow-audit", action="store_true", help="Retired compatibility flag; command fails before auditing")
     finalize_parser.add_argument(
         "--allow-current-storage-audit-failure",
         action="store_true",
-        help="Allow replacing a live rag_storage that fails audit, but only after the prepared shadow audit passes and manifest hash checks hold",
+        help="Retired compatibility flag accepted only so the command can fail closed before activation",
     )
 
     materialize_parser = sub.add_parser("materialize-full", help="Retired command; native staging uses export-manifest plus native_zvec_materialize.py")
@@ -2075,16 +1483,16 @@ def main() -> int:
     materialize_parser.add_argument("--limit-edges", type=int, default=None)
     materialize_parser.add_argument("--vector-cache", type=Path, default=None)
     materialize_parser.add_argument("--storage-dir", type=Path, default=None)
-    materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Seed the vector cache from an explicit file-backend storage directory before resolving vectors")
-    materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Storage directory used with --seed-from-storage; defaults to <workdir>/rag_storage")
-    materialize_parser.add_argument("--fill-missing-vectors", action="store_true", help="Embed only vectors still missing after cache/storage seeding before materializing the full shadow")
+    materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Retired compatibility flag; command fails before seeding")
+    materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Retired compatibility path; command fails before use")
+    materialize_parser.add_argument("--fill-missing-vectors", action="store_true", help="Retired compatibility flag; command fails before embedding")
     materialize_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for --fill-missing-vectors; default stays conservative")
     materialize_parser.add_argument(
         "--allow-current-storage-audit-failure",
         action="store_true",
-        help="Allow preparing a full-materialization swap even when current live rag_storage fails audit; shadow audit and manifest hash checks still must pass",
+        help="Retired compatibility flag accepted only so the command can fail closed before materialization",
     )
-    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Run a direct wikigraph query-data smoke against the materialized shadow before optional cleanup; repeat for multiple queries")
+    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Retired compatibility flag; command fails before query smokes")
     materialize_parser.add_argument("--smoke-mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
     materialize_parser.add_argument("--smoke-top-k", type=int, default=5)
     materialize_parser.add_argument("--smoke-chunk-top-k", type=int, default=5)
@@ -2095,8 +1503,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "plan":
-            print_json(plan_incremental_import(args.root.resolve(), args.state_dir.resolve(), args.workdir.resolve(), full_rebuild_interval=args.full_rebuild_interval))
-            return 0
+            raise RuntimeError(
+                "plan CLI is retired; use export-manifest plus native_zvec_materialize.py preflight/build"
+            )
         if args.command == "export-manifest":
             print_json(run_export_manifest(args))
             return 0
@@ -2105,13 +1514,9 @@ def main() -> int:
             print_json(result)
             return 0 if result["ok"] else 1
         if args.command == "audit-storage":
-            state_dir = args.state_dir.resolve()
-            workdir = args.workdir.resolve()
-            manifest = load_manifest(args.manifest.resolve()) if args.manifest else load_manifest(state_dir)
-            storage_dir = args.storage_dir.resolve() if args.storage_dir else workdir / "rag_storage"
-            audit = audit_custom_kg_storage(storage_dir, manifest)
-            print_json(audit)
-            return 0 if audit.get("ok") else 1
+            raise RuntimeError(
+                "audit-storage CLI is retired; use native_zvec_materialize.py preflight/build artifacts instead"
+            )
         if args.command == "apply":
             raise RuntimeError(
                 "apply CLI is retired; use export-manifest plus native_zvec_materialize.py "
@@ -2120,7 +1525,7 @@ def main() -> int:
         if args.command == "finalize-prepared-swap":
             raise RuntimeError(
                 "finalize-prepared-swap CLI is retired; use batch_native_refresh.py cutover "
-                "or a dedicated audited migration slice instead of mutating live rag_storage"
+                "or a dedicated audited native migration slice instead of activating the retired file backend"
             )
         if args.command == "materialize-full":
             raise RuntimeError(

@@ -533,7 +533,6 @@ def synthesize_blocked_native_refresh_status(
         "raw_fast_review_wiki_integration_count": review,
         "total_not_graph_fresh_count": blocking,
         "pending_count_excludes_raw_fast": True,
-        "threshold": args.refresh_threshold or 10,
         "dirty": False,
         "raw_clip_count": wiki_status.get("raw_clip_count"),
         "skipped": True,
@@ -607,7 +606,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tmp", action="append", default=[], type=Path)
     parser.add_argument("--allow-non-tmp-cleanup", action="store_true", help="Permit cleanup outside /tmp after protection checks; default refuses non-/tmp paths")
     parser.add_argument("--threshold", type=int, default=None, help="Override pending wiki-integration threshold")
-    parser.add_argument("--refresh-threshold", type=int, default=None, help="Retired compatibility option accepted as a no-op; native refresh status has no threshold")
     parser.add_argument("--auto-integrate", action="store_true", help="Launch wiki integration automatically when threshold says it should run")
     parser.add_argument("--auto-integrate-dry-run", action="store_true")
     parser.add_argument("--integration-command", default=None)
