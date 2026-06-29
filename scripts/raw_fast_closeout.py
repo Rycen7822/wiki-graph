@@ -442,11 +442,9 @@ def run_wiki_status(args: argparse.Namespace) -> dict[str, Any]:
     return result.get("json") if isinstance(result.get("json"), dict) else {"error": "status_json_missing", "returncode": result.get("returncode")}
 
 
-def run_native_refresh_status(args: argparse.Namespace, *, migrate_legacy: bool = True) -> dict[str, Any]:
+def run_native_refresh_status(args: argparse.Namespace) -> dict[str, Any]:
     script = args.workdir / "scripts" / "batch_native_refresh.py"
     command = [sys.executable, str(script), "status", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir)]
-    if not migrate_legacy:
-        command.append("--no-migrate-legacy")
     result = run_json(command, cwd=args.workdir, timeout=args.timeout)
     payload = result.get("json") if isinstance(result.get("json"), dict) else {"error": "status_json_missing", "returncode": result.get("returncode")}
     payload["command_returncode"] = result.get("returncode")
@@ -609,7 +607,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tmp", action="append", default=[], type=Path)
     parser.add_argument("--allow-non-tmp-cleanup", action="store_true", help="Permit cleanup outside /tmp after protection checks; default refuses non-/tmp paths")
     parser.add_argument("--threshold", type=int, default=None, help="Override pending wiki-integration threshold")
-    parser.add_argument("--refresh-threshold", type=int, default=None, help="Compatibility option retained for legacy callers; native refresh status has no threshold")
+    parser.add_argument("--refresh-threshold", type=int, default=None, help="Retired compatibility option accepted as a no-op; native refresh status has no threshold")
     parser.add_argument("--auto-integrate", action="store_true", help="Launch wiki integration automatically when threshold says it should run")
     parser.add_argument("--auto-integrate-dry-run", action="store_true")
     parser.add_argument("--integration-command", default=None)
@@ -678,7 +676,7 @@ def main() -> int:
     wiki_status = timings.record("wiki_status", run_wiki_status, args)
     synthesized_native = synthesize_blocked_native_refresh_status(args, wiki_status)
     if synthesized_native:
-        standalone_native_status = timings.record("standalone_native_refresh_status", run_native_refresh_status, args, migrate_legacy=False)
+        standalone_native_status = timings.record("standalone_native_refresh_status", run_native_refresh_status, args)
         native_refresh_status = timings.record(
             "native_refresh_status",
             synthesize_blocked_native_refresh_status,

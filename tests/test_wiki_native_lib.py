@@ -143,17 +143,29 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> N
 
     assert report["ok"] is True
     assert report["offenders"] == []
-    assert "scripts/batch_native_refresh.py" in report["allowed_refs"]
-    assert "scripts/wiki_native_wiki_checks.py" in report["allowed_refs"]
+    assert "scripts/batch_native_refresh.py" not in report["allowed_refs"]
     assert "scripts/wiki_search.py" in report["checked_paths"]
     assert "scripts/sync_virtual_docs.py" in report["checked_paths"]
     assert "llm-wiki-native/src/llm_wiki_native/api/server.py" in report["checked_paths"]
     assert "compat_registry_module" in report["marker_labels"]
-    wrapper_refs = report["legacy_wikigraph_wrapper_refs"]
+    assert report["allowed_refs"] == {}
+    retired_wrapper_key = "retired_wikigraph_wrapper_refs"
+    old_wrapper_key = "legacy" + "_wikigraph_wrapper_refs"
+    assert old_wrapper_key not in report
+    wrapper_refs = report[retired_wrapper_key]
     assert wrapper_refs["ok"] is True
     assert wrapper_refs["offender_count"] == 0
     assert wrapper_refs["offenders"] == []
-    assert wrapper_refs["marker_labels"] == ["legacy_wikigraph_refresh_module", "legacy_wikigraph_refresh_script"]
+    assert wrapper_refs["marker_labels"] == ["retired_wikigraph_refresh_module", "retired_wikigraph_refresh_script"]
+
+
+def test_active_native_diagnostics_do_not_import_retired_compat_name_registry() -> None:
+    checks_text = (SCRIPTS / "wiki_native_wiki_checks.py").read_text(encoding="utf-8")
+    facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
+
+    assert "wiki_wikigraph_compat_names" not in checks_text
+    assert "retired_graph_package_name" not in checks_text
+    assert "wiki_wikigraph_refresh_pending" not in facade_text
 
 
 def test_audit_native_production_refs_imports_active_modules_with_retired_package_blocked() -> None:
@@ -946,3 +958,34 @@ def test_clear_success_marks_native_refresh_not_legacy_backend_refresh(tmp_path)
     native_entries = batch_native_refresh.pending_entries(state_dir)
     assert len(native_entries) == 1
     assert native_entries[0]["reason"] == "wiki-integration:integration-smoke"
+
+
+def test_wiki_integration_ledger_drops_historical_retired_backend_mark_fields(tmp_path) -> None:
+    old_backend = "light" + "rag"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    ledger_path = state_dir / "pending_wiki_integration.json"
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "threshold": 10,
+                "pending": [],
+                "dirty": False,
+                f"last_marked_{old_backend}_pending": [{"raw_path": "raw/clip/old.md"}],
+                f"last_marked_{old_backend}_pending_count": 1,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = wiki_native_lib.load_pending_wiki_integration_ledger(state_dir)
+    wiki_native_lib.save_pending_wiki_integration_ledger(state_dir, loaded)
+    persisted = json.loads(ledger_path.read_text(encoding="utf-8"))
+
+    assert f"last_marked_{old_backend}_pending" not in loaded
+    assert f"last_marked_{old_backend}_pending_count" not in loaded
+    assert f"last_marked_{old_backend}_pending" not in persisted
+    assert f"last_marked_{old_backend}_pending_count" not in persisted

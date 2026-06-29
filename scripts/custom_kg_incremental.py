@@ -61,7 +61,7 @@ from wiki_native_lib import (
 
 GRAPH_FIELD_SEP = "<SEP>"
 MANIFEST_SCHEMA_VERSION = 1
-RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "wikigraph-pair-sorted-endpoints:v1"
+RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "llm-wiki-typed-directed-relationship:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
 REPORT_FILENAME = "custom_kg_import_report.json"
 PREPARED_SWAP_DIRNAME = "prepared_swaps"
@@ -130,10 +130,9 @@ def _relation_key_part(value: Any, *, field: str) -> str:
     return text
 
 
-def relation_vdb_id(src_id: str, tgt_id: str, keywords: str | None = None) -> str:
-    if keywords is None:
-        normalized_src, normalized_tgt = sorted((src_id, tgt_id))
-        return compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")
+def relation_vdb_id(src_id: str, tgt_id: str, keywords: str) -> str:
+    if keywords in (None, ""):
+        raise ValueError("relationship keywords are required for typed directed relation IDs")
     return compute_mdhash_id(
         GRAPH_FIELD_SEP.join(
             [
@@ -146,25 +145,6 @@ def relation_vdb_id(src_id: str, tgt_id: str, keywords: str | None = None) -> st
     )
 
 
-def legacy_relation_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
-    normalized_src, normalized_tgt = sorted((src_id, tgt_id))
-    ids = [compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")]
-    reverse = compute_mdhash_id(normalized_tgt + normalized_src, prefix="rel-")
-    if reverse not in ids:
-        ids.append(reverse)
-    return ids
-
-
-def relation_vdb_ids(src_id: str, tgt_id: str, keywords: str | None = None) -> list[str]:
-    ids: list[str] = []
-    if keywords is not None:
-        ids.append(relation_vdb_id(src_id, tgt_id, keywords))
-    for legacy_id in legacy_relation_vdb_ids(src_id, tgt_id):
-        if legacy_id not in ids:
-            ids.append(legacy_id)
-    return ids
-
-
 def relation_chunk_key(src_id: str, tgt_id: str) -> str:
     """Compatibility graph/storage pair key for the one-edge-per-pair graph."""
 
@@ -172,16 +152,9 @@ def relation_chunk_key(src_id: str, tgt_id: str) -> str:
 
 
 def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, description: str) -> str:
-    """Embedding text for a typed relationship using wikigraph pair-stable endpoint order.
+    """Embedding text for a typed, directed relationship record."""
 
-    The record identity remains typed/directed, but the vector text follows the
-    sorted endpoint order used by legacy relationship VDB records so
-    existing vectors remain reusable when the relationship semantics are exact.
-    Directional semantics must live in ``keywords`` and ``description``.
-    """
-
-    normalized_src, normalized_tgt = sorted((str(src_id), str(tgt_id)))
-    return f"{keywords}\t{normalized_src}\n{normalized_tgt}\n{description}"
+    return f"{keywords}\t{src_id}\n{tgt_id}\n{description}"
 
 
 def relationship_record_key(src_id: str, tgt_id: str, keywords: str) -> str:
@@ -565,9 +538,8 @@ def build_custom_kg_manifest(
 
     The canonicalization mirrors the external custom_kg storage contract where safe:
     chunks are content-hashed, entities keep the last declaration by name, and
-    relationship vector text uses pair-stable endpoint order. Unlike
-    upstream cold import, relationship identity remains typed/directed so same
-    endpoint pairs with distinct semantics do not silent-last-win collapse.
+    relationship identity and vector text are typed/directed so same endpoint
+    pairs with distinct semantics do not silent-last-win collapse.
     Logical ``source_id`` fields are resolved through the complete payload's
     source-to-chunk map before any diff is attempted.
     """
@@ -714,33 +686,6 @@ def _embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
     )
 
 
-def _legacy_directed_relationship_content(record: dict[str, Any]) -> str | None:
-    required = [record.get("keywords"), record.get("src_id"), record.get("tgt_id"), record.get("description")]
-    if any(value is None for value in required):
-        return None
-    return f"{record['keywords']}\t{record['src_id']}\n{record['tgt_id']}\n{record['description']}"
-
-
-def _relationship_endpoint_order_only_vector_change(old_record: dict[str, Any], new_record: dict[str, Any]) -> bool:
-    if old_record.get("record_type") != "relationship" or new_record.get("record_type") != "relationship":
-        return False
-    for field in ("src_id", "tgt_id", "keywords", "description"):
-        if str(old_record.get(field)) != str(new_record.get(field)):
-            return False
-    if _embedding_contract(old_record) != _embedding_contract(new_record):
-        return False
-    expected_new_content = relationship_vector_content(
-        str(new_record["src_id"]),
-        str(new_record["tgt_id"]),
-        str(new_record["keywords"]),
-        str(new_record["description"]),
-    )
-    if str(new_record.get("content")) != expected_new_content:
-        return False
-    old_content = str(old_record.get("content"))
-    return old_content == expected_new_content or old_content == _legacy_directed_relationship_content(old_record)
-
-
 def _diff_collection(collection: str, old_items: dict[str, Any], new_items: dict[str, Any]) -> dict[str, Any]:
     old_keys = set(old_items)
     new_keys = set(new_items)
@@ -760,15 +705,12 @@ def _diff_collection(collection: str, old_items: dict[str, Any], new_items: dict
         if not old_vector_hash or not new_vector_hash:
             vector_update_ids.append(key)
         elif old_vector_hash != new_vector_hash:
-            if collection == "relationships" and _relationship_endpoint_order_only_vector_change(old_record, new_record):
-                metadata_update_ids.append(key)
-            else:
-                vector_update_ids.append(key)
+            vector_update_ids.append(key)
         elif old_metadata_hash != new_metadata_hash:
             metadata_update_ids.append(key)
         else:
             # The full record hash changed but the known split hashes did not.
-            # Treat this as a semantic/vector update so legacy or future fields
+            # Treat this as a semantic/vector update so future fields
             # cannot be silently skipped by the optimization.
             vector_update_ids.append(key)
     update_ids = sorted([*vector_update_ids, *metadata_update_ids])
@@ -1065,10 +1007,10 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
         )
 
     rel_pairs_to_ids: dict[str, list[str]] = {}
-    manifest_relationship_vdb_ids = {
-        str(record.get("vdb_id"))
+    manifest_relationship_vdb_ids_by_signature = {
+        (str(record.get("src_id")), str(record.get("tgt_id")), str(record.get("keywords"))): str(record.get("vdb_id"))
         for record in (manifest or {}).get("relationships", {}).values()
-        if isinstance(record, dict) and record.get("vdb_id")
+        if isinstance(record, dict) and record.get("vdb_id") and record.get("src_id") and record.get("tgt_id") and record.get("keywords") not in (None, "")
     }
     for record_id, record in vdb_relationships.items():
         src = record.get("src_id")
@@ -1078,10 +1020,16 @@ def audit_custom_kg_storage(storage_dir: Path, manifest: dict[str, Any] | None =
             continue
         pair = relation_chunk_key(str(src), str(tgt))
         rel_pairs_to_ids.setdefault(pair, []).append(record_id)
-        keywords = str(record.get("keywords")) if record.get("keywords") not in (None, "") else None
-        accepted_ids = set(relation_vdb_ids(str(src), str(tgt), keywords)) | manifest_relationship_vdb_ids
+        if record.get("keywords") in (None, ""):
+            _append_issue(issues, "relationship_vdb_missing_keywords", record_id=record_id, pair=pair)
+            continue
+        keywords = str(record["keywords"])
+        accepted_ids = {
+            manifest_relationship_vdb_ids_by_signature.get((str(src), str(tgt), keywords))
+            or relation_vdb_id(str(src), str(tgt), keywords)
+        }
         if record_id not in accepted_ids:
-            _append_issue(issues, "legacy_or_noncanonical_relationship_id", record_id=record_id, accepted=sorted(accepted_ids)[:max_samples], pair=pair)
+            _append_issue(issues, "noncanonical_relationship_id", record_id=record_id, accepted=sorted(accepted_ids)[:max_samples], pair=pair)
     rel_pairs = set(rel_pairs_to_ids)
     if graph_pairs != rel_pairs:
         _append_issue(
@@ -1452,11 +1400,9 @@ async def apply_patch_to_storage(
             await rag.chunk_entity_relation_graph.remove_edges([tuple(old_rels[key]["rel_key"]) for key in rels_to_remove if key in old_rels])
             delete_rel_vdb_ids = sorted(
                 {
-                    rel_id
+                    str(old_rels[key].get("vdb_id") or relation_vdb_id(old_rels[key]["src_id"], old_rels[key]["tgt_id"], str(old_rels[key].get("keywords", ""))))
                     for key in rels_to_remove
                     if key in old_rels
-                    for rel_id in [str(old_rels[key].get("vdb_id") or ""), *relation_vdb_ids(old_rels[key]["src_id"], old_rels[key]["tgt_id"], str(old_rels[key].get("keywords", "")))]
-                    if rel_id
                 }
             )
             if delete_rel_vdb_ids:
@@ -1508,9 +1454,6 @@ async def apply_patch_to_storage(
         if rel_vdb_upsert_ids:
             relationships = [new_rels[key] for key in rel_vdb_upsert_ids]
             await rag.relationships_vdb.upsert({record["vdb_id"]: _relationship_vdb_data(record) for record in relationships})
-            legacy_ids = sorted({rel_id for record in relationships for rel_id in legacy_relation_vdb_ids(record["src_id"], record["tgt_id"])})
-            if legacy_ids:
-                await rag.relationships_vdb.delete(legacy_ids)
         rel_metadata_records = [new_rels[key] for key in sorted(rel_metadata_update_ids)]
         if rel_metadata_records:
             await _patch_materialized_vdb_metadata(
@@ -2113,7 +2056,7 @@ def main() -> int:
     apply_parser.add_argument("--write-manifest-without-swap", action="store_true")
     apply_parser.add_argument("--tracking-update-mode", choices=["full", "delta"], default="full", help="How to update entity/relation chunk tracking stores inside the audited shadow copy")
 
-    finalize_parser = sub.add_parser("finalize-prepared-swap", help="Retired legacy command; native refresh cutover owns production activation")
+    finalize_parser = sub.add_parser("finalize-prepared-swap", help="Retired command; native refresh cutover owns production activation")
     add_common_paths(finalize_parser)
     finalize_parser.add_argument("--prepared-report", type=Path, default=None)
     finalize_parser.add_argument("--server-host", default="127.0.0.1")

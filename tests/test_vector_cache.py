@@ -15,7 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage  # noqa: E402
 
 
-def _legacy_rel_id(src_id: str, tgt_id: str) -> str:
+def _pair_only_rel_id(src_id: str, tgt_id: str) -> str:
     normalized_src, normalized_tgt = sorted((src_id, tgt_id))
     return "rel-" + hashlib.md5((normalized_src + normalized_tgt).encode("utf-8")).hexdigest()
 
@@ -249,13 +249,13 @@ def test_seed_vector_cache_skips_storage_vectors_when_previous_vector_hash_diffe
     assert resolved["summary"]["total"] == {"total": 1, "hits": 0, "misses": 1}
 
 
-def test_seed_vector_cache_reuses_legacy_relationship_storage_when_content_matches_desired(tmp_path) -> None:
+def test_seed_vector_cache_does_not_probe_pair_only_relationship_storage(tmp_path) -> None:
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir()
     src_id = "raw_section:z"
     tgt_id = "raw_clip:a"
-    legacy_id = _legacy_rel_id(src_id, tgt_id)
-    desired_content = "RAW_SECTION_OF\traw_clip:a\nraw_section:z\nraw_section:z RAW_SECTION_OF raw_clip:a"
+    pair_only_id = _pair_only_rel_id(src_id, tgt_id)
+    desired_content = "RAW_SECTION_OF\traw_section:z\nraw_clip:a\nraw_section:z RAW_SECTION_OF raw_clip:a"
     (storage_dir / "vdb_chunks.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
     (storage_dir / "vdb_entities.json").write_text(json.dumps({"embedding_dim": 2, "data": [], "matrix": ""}), encoding="utf-8")
     (storage_dir / "vdb_relationships.json").write_text(
@@ -264,7 +264,7 @@ def test_seed_vector_cache_reuses_legacy_relationship_storage_when_content_match
                 "embedding_dim": 2,
                 "data": [
                     {
-                        "__id__": legacy_id,
+                        "__id__": pair_only_id,
                         "src_id": "raw_clip:a",
                         "tgt_id": "raw_section:z",
                         "keywords": "RAW_SECTION_OF",
@@ -300,25 +300,24 @@ def test_seed_vector_cache_reuses_legacy_relationship_storage_when_content_match
     }
     desired_manifest = json.loads(json.dumps(previous_manifest))
     desired_manifest["relationships"][key]["content"] = desired_content
-    desired_manifest["relationships"][key]["vector_hash"] = "new-sorted-hash"
+    desired_manifest["relationships"][key]["vector_hash"] = "new-directed-hash"
     cache = VectorCache(tmp_path / "cache.sqlite")
 
     seed = seed_vector_cache_from_storage(desired_manifest, storage_dir, cache, previous_manifest=previous_manifest)
     resolved = resolve_manifest_vectors(desired_manifest, cache)
 
-    assert seed["summary"]["total"] == {"total": 1, "seeded": 1, "missing": 0}
-    assert seed["skipped_vector_hash_mismatch"]["relationships"] == []
-    assert resolved["summary"]["total"] == {"total": 1, "hits": 1, "misses": 0}
-    assert resolved["resolved"]["relationships"][key]["vector"] == pytest.approx([1.0, 2.0])
+    assert seed["summary"]["total"] == {"total": 1, "seeded": 0, "missing": 1}
+    assert seed["skipped_vector_hash_mismatch"]["relationships"] == [key]
+    assert resolved["summary"]["total"] == {"total": 1, "hits": 0, "misses": 1}
 
 
-def test_seed_vector_cache_rejects_legacy_relationship_reuse_when_embedding_contract_changes(tmp_path) -> None:
+def test_seed_vector_cache_rejects_pair_only_relationship_reuse_when_embedding_contract_changes(tmp_path) -> None:
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir()
     src_id = "raw_section:z"
     tgt_id = "raw_clip:a"
-    legacy_id = _legacy_rel_id(src_id, tgt_id)
-    desired_content = "RAW_SECTION_OF\traw_clip:a\nraw_section:z\nraw_section:z RAW_SECTION_OF raw_clip:a"
+    pair_only_id = _pair_only_rel_id(src_id, tgt_id)
+    desired_content = "RAW_SECTION_OF\traw_section:z\nraw_clip:a\nraw_section:z RAW_SECTION_OF raw_clip:a"
     (storage_dir / "vdb_chunks.json").write_text(json.dumps({"embedding_dim": 3, "data": [], "matrix": ""}), encoding="utf-8")
     (storage_dir / "vdb_entities.json").write_text(json.dumps({"embedding_dim": 3, "data": [], "matrix": ""}), encoding="utf-8")
     (storage_dir / "vdb_relationships.json").write_text(
@@ -327,7 +326,7 @@ def test_seed_vector_cache_rejects_legacy_relationship_reuse_when_embedding_cont
                 "embedding_dim": 3,
                 "data": [
                     {
-                        "__id__": legacy_id,
+                        "__id__": pair_only_id,
                         "src_id": "raw_clip:a",
                         "tgt_id": "raw_section:z",
                         "keywords": "RAW_SECTION_OF",

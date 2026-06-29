@@ -25,15 +25,6 @@ def _compute_mdhash_id(content: str, prefix: str = "") -> str:
     return prefix + digest
 
 
-def _legacy_relationship_vdb_ids(src_id: str, tgt_id: str) -> list[str]:
-    normalized_src, normalized_tgt = sorted((str(src_id), str(tgt_id)))
-    ids = [_compute_mdhash_id(normalized_src + normalized_tgt, prefix="rel-")]
-    reverse = _compute_mdhash_id(normalized_tgt + normalized_src, prefix="rel-")
-    if reverse not in ids:
-        ids.append(reverse)
-    return ids
-
-
 def _record_embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
     dim = record.get("embedding_dim")
     try:
@@ -52,10 +43,6 @@ def _storage_record_ids_for_manifest_record(collection: str, key: str, record: d
     record_id = record.get("record_id") or key
     if record_id not in (None, ""):
         ids.append(str(record_id))
-    if collection == "relationships" and record.get("src_id") and record.get("tgt_id"):
-        for legacy_id in _legacy_relationship_vdb_ids(str(record["src_id"]), str(record["tgt_id"])):
-            if legacy_id not in ids:
-                ids.append(legacy_id)
     return ids
 
 

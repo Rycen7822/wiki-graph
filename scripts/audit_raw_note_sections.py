@@ -42,7 +42,7 @@ def main() -> int:
 
     result = audit_raw_note_section_contracts(
         args.root,
-        include_legacy=not args.structured_only,
+        include_unstructured=not args.structured_only,
         issue_limit=args.limit_issues,
     )
     if args.write_report:

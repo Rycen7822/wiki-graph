@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,13 @@ DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD = 10
 WIKI_INTEGRATION_ACTIONABLE_STATUSES = {"raw_saved"}
 WIKI_INTEGRATION_REVIEW_STATUSES = {"needs_review"}
 WIKI_INTEGRATION_TERMINAL_STATUSES = {"failed", "skipped_duplicate"}
+_RETIRED_MARKED_PENDING_KEY = re.compile(r"^last_marked_(?!graph_pending(?:_count)?$)[A-Za-z0-9_]+_pending(?:_count)?$")
+
+
+def normalize_pending_wiki_integration_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Drop retired downstream-backend marker keys while preserving current schema fields."""
+
+    return {key: value for key, value in ledger.items() if not _RETIRED_MARKED_PENDING_KEY.match(str(key))}
 
 
 def pending_wiki_integration_ledger_path(state_dir: Path) -> Path:
@@ -43,7 +51,7 @@ def load_pending_wiki_integration_ledger(state_dir: Path, threshold: int | None 
     if not isinstance(ledger, dict):
         raise ValueError(f"{path} must contain a JSON object")
     merged = default_pending_wiki_integration_ledger(threshold)
-    merged.update(ledger)
+    merged.update(normalize_pending_wiki_integration_ledger(ledger))
     merged["threshold"] = int(
         threshold if threshold is not None else (merged.get("threshold") or DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD)
     )
@@ -59,6 +67,7 @@ def save_pending_wiki_integration_ledger(state_dir: Path, ledger: dict[str, Any]
     ensure_state_dirs(state_dir)
     path = pending_wiki_integration_ledger_path(state_dir)
     tmp = path.with_suffix(path.suffix + ".tmp")
+    ledger = normalize_pending_wiki_integration_ledger(ledger)
     tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
     return path

@@ -17,9 +17,6 @@ from typing import Any
 from urllib.parse import urlparse
 import urllib.request
 
-from wiki_wikigraph_compat_names import retired_refresh_ledger_name
-
-
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
 EXTERNAL_TRUE_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,10 +26,6 @@ DEFAULT_WORKDIR = REPO_ROOT / "tmp" / "native_refresh"
 
 def pending_ledger_path(state_dir: Path) -> Path:
     return Path(state_dir) / PENDING_NATIVE_REFRESH_LEDGER
-
-
-def retired_wikigraph_refresh_ledger_path(state_dir: Path) -> Path:
-    return Path(state_dir) / retired_refresh_ledger_name()
 
 
 def native_dir(state_dir: Path) -> Path:
@@ -143,18 +136,7 @@ def pending_entries(state_dir: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in pending if isinstance(item, dict)]
 
 
-def migrate_retired_wikigraph_refresh_ledger(state_dir: Path) -> bool:
-    native_path = pending_ledger_path(state_dir)
-    legacy_path = retired_wikigraph_refresh_ledger_path(state_dir)
-    if native_path.exists() or not legacy_path.exists():
-        return False
-    native_path.parent.mkdir(parents=True, exist_ok=True)
-    legacy_path.replace(native_path)
-    return True
-
-
 def mark_pending(state_dir: Path, root: Path, *, reason: str) -> dict[str, Any]:
-    migrate_retired_wikigraph_refresh_ledger(state_dir)
     entries = pending_entries(state_dir)
     entry = {
         "reason": reason,
@@ -174,8 +156,7 @@ def mark_pending(state_dir: Path, root: Path, *, reason: str) -> dict[str, Any]:
     return entry
 
 
-def status(root: Path, state_dir: Path, *, migrate_legacy: bool = True) -> dict[str, Any]:
-    migrated = migrate_retired_wikigraph_refresh_ledger(state_dir) if migrate_legacy else False
+def status(root: Path, state_dir: Path) -> dict[str, Any]:
     entries = pending_entries(state_dir)
     return {
         "root": str(root),
@@ -184,8 +165,6 @@ def status(root: Path, state_dir: Path, *, migrate_legacy: bool = True) -> dict[
         "pending_count": len(entries),
         "pending": entries,
         "should_refresh": bool(entries),
-        "migrated_from_legacy_refresh": migrated,
-        "legacy_refresh_migration_allowed": migrate_legacy,
         "native_dir": str(native_dir(state_dir)),
         "prepared_workspace": str(prepared_workspace_path(state_dir)),
         "active_workspace": str(active_workspace_path(state_dir)),
@@ -649,7 +628,6 @@ def main(argv: list[str] | None = None) -> int:
 
     status_parser = sub.add_parser("status", help="Show native refresh pending state")
     common_paths(status_parser)
-    status_parser.add_argument("--no-migrate-legacy", action="store_true")
 
     mark_parser = sub.add_parser("mark-pending", help="Mark a native refresh as pending")
     common_paths(mark_parser)
@@ -682,14 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     workdir = args.workdir.resolve()
     state_dir = (args.state_dir or workdir / "state").resolve()
     if args.command == "status":
-        if not args.no_migrate_legacy:
-            try:
-                reject_external_true_wiki_refresh_root(root)
-            except ValueError as exc:
-                raise ValueError(
-                    "external true wiki root status requires --no-migrate-legacy"
-                ) from exc
-        print_json(status(root, state_dir, migrate_legacy=not args.no_migrate_legacy))
+        print_json(status(root, state_dir))
         return 0
     if args.command == "mark-pending":
         reject_external_true_wiki_refresh_root(root)

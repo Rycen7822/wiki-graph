@@ -11,7 +11,7 @@ def unsupported_document_sync_payload(script_name: str) -> dict[str, object]:
         "script": script_name,
         "operation": "document_sync",
         "unsupported_endpoint": "/documents/texts",
-        "message": "Legacy document ingestion is disabled during native-zvec migration.",
+        "message": "Generated-document ingestion is disabled for the native-zvec production backend.",
         "native_refresh": {
             "command": "scripts/batch_native_refresh.py refresh --prepare-only",
             "cutover_command": "scripts/batch_native_refresh.py refresh --cutover",
@@ -21,7 +21,7 @@ def unsupported_document_sync_payload(script_name: str) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = common_paths_parser("Unsupported legacy generated-doc sync entrypoint")
+    parser = common_paths_parser("Unsupported generated-doc sync entrypoint")
     parser.add_argument("--kind", choices=["all", "edge", "method_atom", "raw_section"], default="all")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--force", action="store_true")

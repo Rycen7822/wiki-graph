@@ -11,7 +11,8 @@ __pycache__/
 
 # Local temp artifacts
 .tmp_*/
-tmp/wiki_test_state/
+tmp/
+.noemaloom/
 wiki_test/
 
 # Local reference checkouts

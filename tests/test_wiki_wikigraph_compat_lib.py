@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -1420,7 +1421,7 @@ def test_batch_wikigraph_refresh_command_groups_preserve_order_without_positiona
     assert flattened == groups["artifact"] + groups["full_import"]
     assert all("systemctl" not in command[0] for command in groups["artifact"])
     assert len(groups["full_import"]) == 1
-    assert groups["full_import"][0][:2] == ["python-internal", "legacy-wikigraph-cold-import-retired"]
+    assert groups["full_import"][0][:2] == ["python-internal", "retired-wikigraph-cold-import-retired"]
     full_import_flattened = " ".join(" ".join(command) for command in groups["full_import"])
     assert "systemctl" not in full_import_flattened
     assert "reset-rag-storage" not in full_import_flattened
@@ -1512,7 +1513,7 @@ def test_batch_wikigraph_refresh_dry_run_reports_embedding_profile(tmp_path: Pat
     flattened = "\n".join(" ".join(command) for command in payload["commands"])
 
     assert payload["embedding_profile"] == "shadow-medium"
-    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "retired-wikigraph-full-materialization-retired" in flattened
     assert "custom_kg_incremental.py materialize-full" not in flattened
     assert "--embedding-profile shadow-medium" not in flattened
 
@@ -1534,7 +1535,7 @@ def test_batch_wikigraph_refresh_run_real_refresh_retires_full_materialization_b
 
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph full materialization is retired"):
         batch_wikigraph_refresh.run_real_refresh(
             root,
             state,
@@ -1586,7 +1587,7 @@ def test_batch_wikigraph_refresh_explicit_full_rebuild_reuses_vector_cache_in_dr
     assert payload["import_mode"]["selected_mode"] == "full_rebuild"
     assert payload["import_mode"]["force_full_rebuild"] is True
     assert payload["import_mode"]["reuse_vector_cache"] is True
-    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "retired-wikigraph-full-materialization-retired" in flattened
     assert "custom_kg_incremental.py materialize-full" not in flattened
     assert "--vector-cache" not in flattened
     assert "--seed-from-storage" not in flattened
@@ -1741,16 +1742,16 @@ def test_batch_wikigraph_refresh_threshold_defaults_to_full_rebuild_with_vector_
     assert payload["import_mode"]["force_full_rebuild"] is True
     assert payload["import_mode"]["reuse_vector_cache"] is True
     assert payload["import_mode"]["force_reason"] == "threshold_default"
-    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "retired-wikigraph-full-materialization-retired" in flattened
     assert "custom_kg_incremental.py materialize-full" not in flattened
     assert "--vector-cache" not in flattened
     assert "--seed-from-storage" not in flattened
     assert "--fill-missing-vectors" not in flattened
     assert "--allow-current-storage-audit-failure" not in flattened
-    assert "legacy-wikigraph-activation-retired" not in flattened
+    assert "retired-wikigraph-activation-retired" not in flattened
     assert "finalize-prepared-swap" not in flattened
-    assert f"systemctl --user stop {batch_wikigraph_refresh.LEGACY_WIKIGRAPH_SERVICE_NAME}" not in flattened
-    assert f"systemctl --user start {batch_wikigraph_refresh.LEGACY_WIKIGRAPH_SERVICE_NAME}" not in flattened
+    assert f"systemctl --user stop {batch_wikigraph_refresh.RETIRED_WIKIGRAPH_SERVICE_NAME}" not in flattened
+    assert f"systemctl --user start {batch_wikigraph_refresh.RETIRED_WIKIGRAPH_SERVICE_NAME}" not in flattened
     assert "reset-rag-storage" not in flattened
     assert load_wikigraph_refresh_ledger(state)["pending"]
 
@@ -1770,7 +1771,7 @@ def test_batch_wikigraph_refresh_cold_import_is_retired_before_service_stop(tmp_
 
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph cold full import is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph cold full import is retired"):
         batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert not any(command and command[0] == "systemctl" for command in calls)
@@ -2212,7 +2213,7 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
     assert metadata["wikigraph_tool_version"] == "1.5.0"
     assert f"{retired_backend}_version" not in metadata
     assert metadata["canonical_id_algorithm"] == "llm-wiki-canonical-id:v1+wikigraph-custom-kg:v1.5"
-    assert metadata["relationship_vector_content_algorithm"] == "wikigraph-pair-sorted-endpoints:v1"
+    assert metadata["relationship_vector_content_algorithm"] == "llm-wiki-typed-directed-relationship:v1"
     assert retired_backend not in metadata["canonical_id_algorithm"]
     assert retired_backend not in metadata["relationship_vector_content_algorithm"]
 
@@ -3067,7 +3068,7 @@ def test_custom_kg_storage_audit_detects_graph_vdb_mismatch_and_unknown_source(t
     write(storage / "vdb_chunks.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": chunk_id, "content": "Doc A", "full_doc_id": "doc:a", "file_path": "a.md"}], "matrix": ""}))
     write(storage / "kv_store_text_chunks.json", json.dumps({chunk_id: {"content": "Doc A", "source_id": "doc:a", "full_doc_id": "doc:a", "file_path": "a.md"}}))
     write(storage / "vdb_entities.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": entity["vdb_id"], "entity_name": entity["entity_name"], "source_id": entity["source_chunk_id"], "file_path": entity["file_path"]} for entity in manifest["entities"].values()], "matrix": ""}))
-    write(storage / "vdb_relationships.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": rel["vdb_id"], "src_id": rel["src_id"], "tgt_id": rel["tgt_id"], "source_id": rel["source_chunk_id"], "file_path": rel["file_path"]}], "matrix": ""}))
+    write(storage / "vdb_relationships.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": rel["vdb_id"], "src_id": rel["src_id"], "tgt_id": rel["tgt_id"], "keywords": rel["keywords"], "source_id": rel["source_chunk_id"], "file_path": rel["file_path"]}], "matrix": ""}))
     write(storage / "kv_store_entity_chunks.json", json.dumps({name: {"chunk_ids": [entity["source_chunk_id"]], "count": 1} for name, entity in manifest["entities"].items()}))
     write(storage / "kv_store_relation_chunks.json", json.dumps({rel["chunk_key"]: {"chunk_ids": [rel["source_chunk_id"]], "count": 1}}))
 
@@ -3116,7 +3117,7 @@ def test_batch_wikigraph_refresh_uses_incremental_apply_when_plan_allows(tmp_pat
 
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph production activation is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph production activation is retired"):
         batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert release_calls
@@ -3154,7 +3155,7 @@ def test_batch_wikigraph_refresh_uses_full_materialization_for_scheduled_full_re
     monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", lambda *_args, **_kwargs: clear_calls.append("cleared"))
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph full materialization is retired"):
         batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
 
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
@@ -3181,7 +3182,7 @@ def test_batch_wikigraph_refresh_keeps_cold_full_import_for_unsafe_full_rebuild_
             {"selected_mode": "full_rebuild", "reasons": reasons},
         )
         assert len(commands) == 1
-        assert commands[0][:2] == ["python-internal", "legacy-wikigraph-cold-import-retired"]
+        assert commands[0][:2] == ["python-internal", "retired-wikigraph-cold-import-retired"]
         flattened = " ".join(" ".join(command) for command in commands)
         assert "reset-rag-storage" not in flattened
         assert "import_custom_kg.py" not in flattened
@@ -3209,7 +3210,7 @@ def test_batch_wikigraph_refresh_full_materialization_retirement_does_not_fallba
 
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph full materialization is retired"):
         batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
@@ -3237,7 +3238,7 @@ def test_batch_wikigraph_refresh_threshold_full_reuse_fails_closed_without_cold_
 
     monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+    with pytest.raises(RuntimeError, match="retired wikigraph full materialization is retired"):
         batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
 
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
@@ -4467,14 +4468,16 @@ def test_raw_fast_closeout_native_status_uses_batch_native_refresh(tmp_path: Pat
     status = raw_fast_closeout.run_native_refresh_status(args)
 
     command = calls[0]["command"]
+    assert isinstance(command, list)
     assert str(command[1]).endswith("scripts/batch_native_refresh.py")
     assert command[2] == "status"
     assert "--workdir" in command
+    assert "--no-migrate-legacy" not in command
     assert status["pending_count"] == 1
     assert status["command_returncode"] == 0
 
 
-def test_raw_fast_closeout_native_status_can_skip_legacy_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_fast_closeout_native_status_has_no_legacy_migration_knob(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     args = types.SimpleNamespace(
         root=tmp_path / "wiki",
         state_dir=tmp_path / "work" / "wikigraph" / "state",
@@ -4489,10 +4492,12 @@ def test_raw_fast_closeout_native_status_can_skip_legacy_migration(tmp_path: Pat
 
     monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
 
-    status = raw_fast_closeout.run_native_refresh_status(args, migrate_legacy=False)
+    assert "migrate_legacy" not in inspect.signature(raw_fast_closeout.run_native_refresh_status).parameters
+    status = raw_fast_closeout.run_native_refresh_status(args)
 
     command = calls[0]["command"]
-    assert "--no-migrate-legacy" in command
+    assert isinstance(command, list)
+    assert "--no-migrate-legacy" not in command
     assert status["pending_count"] == 1
     assert status["command_returncode"] == 0
 
