@@ -1,4 +1,4 @@
-"""Read-only loaders for existing llm-wiki LightRAG state artifacts."""
+"""Read-only loaders for existing llm-wiki wikigraph state artifacts."""
 
 from __future__ import annotations
 

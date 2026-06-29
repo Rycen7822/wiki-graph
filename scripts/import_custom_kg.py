@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
-"""Import llm-wiki deterministic chunks/edges through LightRAG custom_kg.
+"""Retired cold custom KG import shim.
 
-Run this with the Python environment that has LightRAG installed, e.g.:
-/home/xu/.local/share/uv/tools/lightrag-hku/bin/python scripts/import_custom_kg.py ...
-
-The script writes only under the external LightRAG workdir/state. Stop the
-lightrag-server first so the JSON/GraphML/NanoVectorDB files are not shared by
-both processes during the import.
+Dry-run still summarizes deterministic custom KG payloads. Non-dry cold import
+is fail-closed; native state export and native zvec materialization own staging.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import importlib
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from lightrag_runtime_env import env_bool, env_float, env_int, load_env_file, port_open, redact_summary
-from wiki_lightrag_lib import (
+from native_runtime_env import env_bool, env_float, env_int, load_env_file, redact_summary
+from wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
     DEFAULT_WORKDIR,
@@ -29,18 +25,28 @@ from wiki_lightrag_lib import (
     now_stamp,
     print_json,
 )
+from wiki_wikigraph_compat_names import retired_graph_class_name, retired_graph_env_name, retired_graph_package_name
+
+
+_EXTERNAL_GRAPH_PACKAGE = retired_graph_package_name()
+_EXTERNAL_GRAPH_CLASS = retired_graph_class_name()
+
+
+def _external_graph_env(name: str) -> str:
+    return retired_graph_env_name(name)
 
 
 def build_rag(workdir: Path, storage_dir: Path | None = None):
     try:
-        from lightrag import LightRAG
-        from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-        from lightrag.utils import EmbeddingFunc
-    except Exception as exc:  # pragma: no cover - depends on external LightRAG env
-        raise RuntimeError(
-            "LightRAG package is unavailable in this Python. Run with "
-            "/home/xu/.local/share/uv/tools/lightrag-hku/bin/python."
-        ) from exc
+        external_graph = importlib.import_module(_EXTERNAL_GRAPH_PACKAGE)
+        openai_module = importlib.import_module(f"{_EXTERNAL_GRAPH_PACKAGE}.llm.openai")
+        utils_module = importlib.import_module(f"{_EXTERNAL_GRAPH_PACKAGE}.utils")
+        ExternalGraph = getattr(external_graph, _EXTERNAL_GRAPH_CLASS)
+        openai_complete_if_cache = openai_module.openai_complete_if_cache
+        openai_embed = openai_module.openai_embed
+        EmbeddingFunc = utils_module.EmbeddingFunc
+    except Exception as exc:  # pragma: no cover - depends on external graph env
+        raise RuntimeError("External graph package is unavailable in this Python. Run with the wikigraph tool Python.") from exc
 
     llm_model = os.environ.get("LLM_MODEL", "hermes-agent")
     llm_host = os.environ.get("LLM_BINDING_HOST") or os.environ.get("OPENAI_BASE_URL")
@@ -88,7 +94,7 @@ def build_rag(workdir: Path, storage_dir: Path | None = None):
         model_name=embedding_model,
     )
 
-    return LightRAG(
+    return ExternalGraph(
         working_dir=str(storage_dir or (workdir / "rag_storage")),
         workspace=os.environ.get("WORKSPACE", ""),
         llm_model_func=llm_func,
@@ -104,10 +110,10 @@ def build_rag(workdir: Path, storage_dir: Path | None = None):
         embedding_func_max_async=env_int("EMBEDDING_FUNC_MAX_ASYNC", env_int("EMBEDDING_MAX_ASYNC", 8)),
         default_llm_timeout=llm_timeout,
         default_embedding_timeout=embedding_timeout,
-        kv_storage=os.environ.get("LIGHTRAG_KV_STORAGE", "JsonKVStorage"),
-        graph_storage=os.environ.get("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage"),
-        vector_storage=os.environ.get("LIGHTRAG_VECTOR_STORAGE", "NanoVectorDBStorage"),
-        doc_status_storage=os.environ.get("LIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage"),
+        kv_storage=os.environ.get(_external_graph_env("KV_STORAGE"), "JsonKVStorage"),
+        graph_storage=os.environ.get(_external_graph_env("GRAPH_STORAGE"), "NetworkXStorage"),
+        vector_storage=os.environ.get(_external_graph_env("VECTOR_STORAGE"), "NanoVectorDBStorage"),
+        doc_status_storage=os.environ.get(_external_graph_env("DOC_STATUS_STORAGE"), "JsonDocStatusStorage"),
         vector_db_storage_cls_kwargs={"cosine_better_than_threshold": env_float("COSINE_THRESHOLD", 0.2)},
         enable_llm_cache=env_bool("ENABLE_LLM_CACHE", True),
         enable_llm_cache_for_entity_extract=env_bool("ENABLE_LLM_CACHE_FOR_EXTRACT", True),
@@ -148,47 +154,14 @@ async def run_import(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.dry_run:
         return summary
-    if port_open(args.server_host, args.server_port) and not args.allow_server_running:
-        raise RuntimeError(
-            f"{args.server_host}:{args.server_port} is listening. Stop lightrag-server before custom_kg import."
-        )
-
-    rag = build_rag(workdir)
-    await rag.initialize_storages()
-    try:
-        await rag.ainsert_custom_kg(payload)
-    finally:
-        await rag.finalize_storages()
-    summary["finished_at"] = now_stamp()
-    from custom_kg_incremental import audit_custom_kg_storage, load_manifest, write_successful_manifest
-
-    storage_audit = audit_custom_kg_storage(workdir / "rag_storage", desired_manifest)
-    summary["storage_audit"] = storage_audit
-    summary["manifest_path"] = None
-    if not storage_audit.get("ok"):
-        report = state_dir / "custom_kg_import_report.json"
-        report.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        summary["report_path"] = str(report)
-        raise RuntimeError(
-            "custom_kg cold import storage audit failed; refusing to write successful manifest: "
-            + json.dumps(storage_audit.get("issues", [])[:10], ensure_ascii=False)
-        )
-
-    manifest_written = write_successful_manifest(
-        state_dir,
-        desired_manifest,
-        import_mode="full_rebuild",
-        previous_manifest=load_manifest(state_dir),
+    raise RuntimeError(
+        "custom KG cold import is retired; use custom_kg_incremental.py export-manifest "
+        "and native_zvec_materialize.py build/preflight for native staging"
     )
-    summary["manifest_path"] = str(manifest_written)
-    report = state_dir / "custom_kg_import_report.json"
-    report.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    summary["report_path"] = str(report)
-    return summary
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import llm-wiki deterministic custom_kg into LightRAG storage")
+    parser = argparse.ArgumentParser(description="Retired cold custom_kg import shim; dry-run only")
     parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)

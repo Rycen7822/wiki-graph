@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit raw-note section headings for section-level LightRAG retrieval."""
+"""Audit raw-note section headings for section-level native retrieval."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     audit_raw_note_section_contracts,
     common_paths_parser,
     ensure_state_dirs,
@@ -16,7 +16,7 @@ from wiki_lightrag_lib import (
 
 
 def main() -> int:
-    parser = common_paths_parser("Audit raw-note section headings for LightRAG raw-section retrieval")
+    parser = common_paths_parser("Audit raw-note section headings for native raw-section retrieval")
     parser.add_argument(
         "--structured-only",
         action="store_true",

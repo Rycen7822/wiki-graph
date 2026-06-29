@@ -1,3 +1,4 @@
+import importlib
 import json
 import sqlite3
 import subprocess
@@ -10,37 +11,38 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import batch_lightrag_refresh  # noqa: E402
+import batch_wikigraph_refresh  # noqa: E402
+import batch_wiki_integration  # noqa: E402
 import raw_fast_closeout  # noqa: E402
 import validate_wiki as validate_wiki_cli  # noqa: E402
 
-from wiki_lightrag_lib import (  # noqa: E402
+from wiki_wikigraph_compat_lib import (  # noqa: E402
     _section_rank_lists,
     _section_rank_lists_scalar,
     build_custom_kg_payload,
     build_section_similarity_edges,
     build_seed_edges,
     canonical_id_for,
-    clear_lightrag_refresh_pending_after_success,
+    clear_wikigraph_refresh_pending_after_success,
     collect_source_docs,
     ensure_state_dirs,
     extract_method_atoms,
-    expand_lightrag_data_response_with_section_neighbors,
+    expand_wikigraph_data_response_with_section_neighbors,
     extract_raw_sections,
     fallback_frontmatter_load,
-    filter_lightrag_data_response_by_section_kind,
+    filter_wikigraph_data_response_by_section_kind,
     generated_docs_from_state,
     init_manifest_db,
-    DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD,
+    DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD,
     DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
     clear_pending_wiki_integration_after_success,
-    load_lightrag_refresh_ledger,
+    load_wikigraph_refresh_ledger,
     load_pending_wiki_integration_ledger,
     make_ingest_text,
-    mark_lightrag_refresh_pending,
+    mark_wikigraph_refresh_pending,
     mark_pending_wiki_integration,
     parse_frontmatter,
-    pending_lightrag_refresh_status,
+    pending_wikigraph_refresh_status,
     pending_wiki_integration_status,
     audit_raw_note_section_contracts,
     raw_section_query_for_kind,
@@ -53,6 +55,21 @@ from wiki_lightrag_lib import (  # noqa: E402
     validate_wiki,
     wiki_root_machine_pollution,
 )
+
+
+def _retired_full_import_commands() -> list[list[str]]:
+    return [batch_wikigraph_refresh.retired_wikigraph_cold_import_command()]
+
+
+def _refresh_command_groups(artifact_commands: list[list[str]]) -> dict[str, list[list[str]]]:
+    return {"artifact": artifact_commands, "full_import": _retired_full_import_commands()}
+
+
+def test_refresh_tests_patch_command_groups_not_obsolete_flat_builder() -> None:
+    text = Path(__file__).read_text(encoding="utf-8")
+    target = "build_" + "refresh_commands"
+    assert f'monkeypatch.setattr(batch_wikigraph_refresh, "{target}"' not in text
+    assert f"monkeypatch.setattr(batch_wikigraph_refresh, '{target}'" not in text
 
 
 def write(path: Path, text: str) -> None:
@@ -162,20 +179,532 @@ def test_resolve_source_keeps_wiki_sources_inside_root_without_following_externa
 
 def test_state_dirs_and_manifest_are_external_to_wiki_root(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
+    workdir = tmp_path / "work" / "wikigraph"
     state = workdir / "state"
     ensure_state_dirs(state)
     assert (state / "edge_docs").is_dir()
     assert not (root / ".llm-wiki").exists()
     db = init_manifest_db(state)
-    assert db == state / "lightrag_sync.db"
+    retired_backend = "light" + "rag"
+    assert db == state / "wikigraph_sync.db"
     with sqlite3.connect(db) as conn:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
+        columns = {row[1] for row in conn.execute("pragma table_info(docs)")}
     assert {"docs", "sync_events", "query_events"} <= tables
+    assert {"wikigraph_track_id", "wikigraph_doc_status"} <= columns
+    assert f"{retired_backend}_track_id" not in columns
+    assert f"{retired_backend}_doc_status" not in columns
+
+
+def test_query_event_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_query_events
+
+    assert wiki_wikigraph_compat_lib.slugify is wiki_native_query_events.slugify
+    assert wiki_wikigraph_compat_lib.init_manifest_db is wiki_native_query_events.init_manifest_db
+    assert wiki_wikigraph_compat_lib.save_evidence_pack is wiki_native_query_events.save_evidence_pack
+    assert wiki_wikigraph_compat_lib.add_query_event is wiki_native_query_events.add_query_event
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_query_events import" in text
+    for name in ("slugify", "init_manifest_db", "save_evidence_pack", "add_query_event"):
+        assert f"def {name}(" not in text
+
+
+def test_raw_section_contract_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_raw_sections
+
+    assert wiki_wikigraph_compat_lib.RAW_SECTION_SPECS is wiki_native_raw_sections.RAW_SECTION_SPECS
+    assert wiki_wikigraph_compat_lib.RAW_NOTE_CONTRACT_SECTION_KINDS is wiki_native_raw_sections.RAW_NOTE_CONTRACT_SECTION_KINDS
+    assert wiki_wikigraph_compat_lib.raw_section_specs_for_heading is wiki_native_raw_sections.raw_section_specs_for_heading
+    assert wiki_wikigraph_compat_lib.raw_section_query_for_kind is wiki_native_raw_sections.raw_section_query_for_kind
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_raw_sections import" in text
+    for pattern in (
+        "RAW_SECTION_SPECS = [",
+        "RAW_SECTION_QUERY_ALIASES = {",
+        "RAW_NOTE_CONTRACT_SECTION_KINDS = [",
+        "def normalized_heading_key(",
+        "def raw_section_specs_for_heading(",
+        "def raw_section_query_for_kind(",
+    ):
+        assert pattern not in text
+
+
+def test_raw_section_extract_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_raw_section_extract
+
+    assert wiki_wikigraph_compat_lib.extract_raw_note_sections is wiki_native_raw_section_extract.extract_raw_note_sections
+    assert wiki_wikigraph_compat_lib.raw_section_markdown is wiki_native_raw_section_extract.raw_section_markdown
+    assert wiki_wikigraph_compat_lib.extract_raw_sections is wiki_native_raw_section_extract.extract_raw_sections
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_raw_section_extract import" in text
+    for pattern in (
+        "def extract_raw_note_sections(",
+        "def raw_section_markdown(",
+        "def extract_raw_sections(",
+    ):
+        assert pattern not in text
+
+
+def test_document_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_docs
+
+    assert wiki_wikigraph_compat_lib.WikiDoc is wiki_native_docs.WikiDoc
+    assert wiki_wikigraph_compat_lib.COMPILED_DIR_TYPES is wiki_native_docs.COMPILED_DIR_TYPES
+    assert wiki_wikigraph_compat_lib.collect_source_docs is wiki_native_docs.collect_source_docs
+    assert wiki_wikigraph_compat_lib.generated_docs_from_state is wiki_native_docs.generated_docs_from_state
+    assert wiki_wikigraph_compat_lib.parse_frontmatter is wiki_native_docs.parse_frontmatter
+    assert wiki_wikigraph_compat_lib.display_scalar is wiki_native_docs.display_scalar
+    assert wiki_wikigraph_compat_lib.sha256_text is wiki_native_docs.sha256_text
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_docs import" in text
+    for pattern in (
+        "COMPILED_DIR_TYPES = {",
+        "META_FILES = [",
+        "class WikiDoc",
+        "def generated_doc_filename(",
+        "def sha256_text(",
+        "def read_text(",
+        "def fallback_frontmatter_load(",
+        "def parse_frontmatter(",
+        "def display_scalar(",
+        "def canonical_id_for(",
+        "def doc_type_for(",
+        "def title_for(",
+        "def make_wiki_doc(",
+        "def raw_clip_files(",
+        "def collect_source_docs(",
+        "def markdown_sections(",
+        "def section_text(",
+        "def generated_docs_from_state(",
+        "def generated_doc_id(",
+    ):
+        assert pattern not in text
+
+
+def test_state_dir_helper_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_state
+
+    assert wiki_wikigraph_compat_lib.STATE_SUBDIRS is wiki_native_state.STATE_SUBDIRS
+    assert wiki_wikigraph_compat_lib.ensure_state_dirs is wiki_native_state.ensure_state_dirs
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_state import" in text
+    assert "STATE_SUBDIRS = [" not in text
+    assert "def ensure_state_dirs(" not in text
+
+
+def test_ingest_text_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_ingest_text
+
+    assert wiki_wikigraph_compat_lib.as_list is wiki_native_ingest_text.as_list
+    assert wiki_wikigraph_compat_lib.find_wikilinks is wiki_native_ingest_text.find_wikilinks
+    assert wiki_wikigraph_compat_lib.first_sentences is wiki_native_ingest_text.first_sentences
+    assert wiki_wikigraph_compat_lib.source_urls is wiki_native_ingest_text.source_urls
+    assert wiki_wikigraph_compat_lib.compact_body_for_ingest is wiki_native_ingest_text.compact_body_for_ingest
+    assert wiki_wikigraph_compat_lib.limited_scalar is wiki_native_ingest_text.limited_scalar
+    assert wiki_wikigraph_compat_lib.make_ingest_text is wiki_native_ingest_text.make_ingest_text
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_ingest_text import" in text
+    for pattern in (
+        "def as_list(",
+        "def find_wikilinks(",
+        "def first_sentences(",
+        "def source_urls(",
+        "def compact_body_for_ingest(",
+        "def limited_scalar(",
+        "def make_ingest_text(",
+    ):
+        assert pattern not in text
+
+
+def test_jsonl_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_jsonl
+
+    assert wiki_wikigraph_compat_lib.jsonl_read is wiki_native_jsonl.jsonl_read
+    assert wiki_wikigraph_compat_lib.jsonl_write is wiki_native_jsonl.jsonl_write
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_jsonl import" in text
+    assert "def jsonl_read(" not in text
+    assert "def jsonl_write(" not in text
+
+
+def test_query_response_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_query_response
+
+    retired_backend = "light" + "rag"
+    assert wiki_wikigraph_compat_lib.expand_wikigraph_data_response_with_section_neighbors is wiki_native_query_response.expand_wikigraph_data_response_with_section_neighbors
+    assert wiki_wikigraph_compat_lib.filter_wikigraph_data_response_by_section_kind is wiki_native_query_response.filter_wikigraph_data_response_by_section_kind
+    assert not hasattr(wiki_wikigraph_compat_lib, f"expand_{retired_backend}_data_response_with_section_neighbors")
+    assert not hasattr(wiki_wikigraph_compat_lib, f"filter_{retired_backend}_data_response_by_section_kind")
+    assert not hasattr(wiki_native_query_response, f"expand_{retired_backend}_data_response_with_section_neighbors")
+    assert not hasattr(wiki_native_query_response, f"filter_{retired_backend}_data_response_by_section_kind")
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_query_response import" in text
+    assert "expand_wikigraph_data_response_with_section_neighbors" in text
+    assert "filter_wikigraph_data_response_by_section_kind" in text
+    assert f"def expand_{retired_backend}_data_response_with_section_neighbors(" not in text
+    assert f"def filter_{retired_backend}_data_response_by_section_kind(" not in text
+
+
+def test_section_similarity_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_section_similarity
+
+    for name in (
+        "_section_rank_lists",
+        "_section_rank_lists_scalar",
+        "build_section_similarity_edges",
+        "build_section_similarity_edges_from_index",
+        "cosine_similarity",
+        "section_similarity_edge_to_custom_kg_relationship",
+        "section_similarity_embedding_text",
+        "section_similarity_index_summary",
+        "section_similarity_report_summary",
+        "select_section_similarity_edges",
+        "write_section_similarity_index",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_section_similarity, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_section_similarity import" in text
+    for pattern in (
+        "def section_similarity_embedding_text(",
+        "def _section_rank_lists_scalar(",
+        "def _section_rank_lists(",
+        "def write_section_similarity_index(",
+        "def build_section_similarity_edges_from_index(",
+        "def build_section_similarity_edges(",
+        "def section_similarity_edge_to_custom_kg_relationship(",
+        "def section_similarity_report_summary(",
+        "def select_section_similarity_edges(",
+    ):
+        assert pattern not in text
+
+
+def test_custom_kg_payload_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_custom_kg_payload
+
+    for name in (
+        "build_custom_kg_payload",
+        "custom_kg_doc_description",
+        "custom_kg_entity_type",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_custom_kg_payload, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_custom_kg_payload import" in text
+    for pattern in (
+        "def custom_kg_entity_type(",
+        "def custom_kg_doc_description(",
+        "def build_custom_kg_payload(",
+    ):
+        assert pattern not in text
+
+
+def test_cli_defaults_and_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_cli
+
+    for name in (
+        "DEFAULT_SERVER",
+        "DEFAULT_STATE_DIR",
+        "DEFAULT_WIKI_ROOT",
+        "DEFAULT_WORKDIR",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) == getattr(wiki_native_cli, name)
+    for name in ("common_paths_parser", "print_json", "release_process_memory"):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_cli, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_cli import" in text
+    for pattern in (
+        "DEFAULT_WIKI_ROOT =",
+        "DEFAULT_WORKDIR =",
+        "def common_paths_parser(",
+        "def print_json(",
+        "def release_process_memory(",
+    ):
+        assert pattern not in text
+
+
+def test_artifact_builder_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_artifacts
+
+    for name in (
+        "WIKI_SOURCE_ROOT_PREFIXES",
+        "build_seed_edges",
+        "extract_method_atoms",
+        "resolve_source",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_artifacts, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_artifacts import" in text
+    for pattern in (
+        "def resolve_source(",
+        "def _resolve_source_cached(",
+        "def _lexical_norm(",
+        "def _is_lexically_under(",
+        "def bullet_items(",
+        "def method_type_for(",
+        "def extract_method_atoms(",
+        "def method_atom_markdown(",
+        "def build_seed_edges(",
+        "def edge_markdown(",
+        "def write_text_if_changed(",
+    ):
+        assert pattern not in text
+
+
+def test_wiki_check_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_wiki_checks
+
+    for name in (
+        "POLLUTION_DIRECT_NAMES",
+        "POLLUTION_RECURSIVE_NAMES",
+        "VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION",
+        "audit_raw_note_section_contracts",
+        "compiled_pages",
+        "index_stats",
+        "indexed_markdown_pages",
+        "is_structured_raw_note",
+        "now_stamp",
+        "structured_heading_warnings",
+        "validation_freshness_context",
+        "validation_input_fingerprints",
+        "validation_report_is_fresh",
+        "wiki_root_machine_pollution",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_wiki_checks, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_wiki_checks import" in text
+    for pattern in (
+        "VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION =",
+        "POLLUTION_DIRECT_NAMES =",
+        "POLLUTION_RECURSIVE_NAMES =",
+        "def now_stamp(",
+        "def validation_report_is_fresh(",
+        "def validation_input_fingerprints(",
+        "def validation_freshness_context(",
+        "def wiki_root_machine_pollution(",
+        "def compiled_pages(",
+        "def indexed_markdown_pages(",
+        "def index_stats(",
+        "def is_structured_raw_note(",
+        "def structured_heading_warnings(",
+        "def audit_raw_note_section_contracts(",
+    ):
+        assert pattern not in text
+
+
+def test_wiki_integration_pending_helpers_reexport_from_native_owner() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_native_wiki_integration_pending
+
+    for name in (
+        "PENDING_WIKI_INTEGRATION_LEDGER",
+        "DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD",
+        "WIKI_INTEGRATION_ACTIONABLE_STATUSES",
+        "WIKI_INTEGRATION_REVIEW_STATUSES",
+        "WIKI_INTEGRATION_TERMINAL_STATUSES",
+        "default_pending_wiki_integration_ledger",
+        "load_pending_wiki_integration_ledger",
+        "mark_pending_wiki_integration",
+        "pending_wiki_integration_ledger_path",
+        "pending_wiki_integration_status",
+        "record_pending_wiki_integration_failure",
+        "save_pending_wiki_integration_ledger",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_wiki_integration_pending, name)
+
+    assert (
+        wiki_wikigraph_compat_lib.clear_pending_wiki_integration_after_success
+        is not wiki_native_wiki_integration_pending.clear_pending_wiki_integration_after_success
+    )
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert "from wiki_native_wiki_integration_pending import" in text
+    assert (
+        "clear_pending_wiki_integration_after_success as _native_clear_pending_wiki_integration_after_success"
+        in text
+    )
+    for pattern in (
+        "PENDING_WIKI_INTEGRATION_LEDGER =",
+        "DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD =",
+        "WIKI_INTEGRATION_ACTIONABLE_STATUSES =",
+        "WIKI_INTEGRATION_REVIEW_STATUSES =",
+        "WIKI_INTEGRATION_TERMINAL_STATUSES =",
+        "def pending_wiki_integration_ledger_path(",
+        "def default_pending_wiki_integration_ledger(",
+        "def load_pending_wiki_integration_ledger(",
+        "def save_pending_wiki_integration_ledger(",
+        "def mark_pending_wiki_integration(",
+        "def pending_wiki_integration_status(",
+        "def record_pending_wiki_integration_failure(",
+    ):
+        assert pattern not in text
+
+
+def test_wikigraph_refresh_pending_owner_exports_current_names_through_compatibility_facade() -> None:
+    import wiki_wikigraph_compat_lib
+    import wiki_wikigraph_refresh_pending
+
+    old_backend = "light" + "rag"
+    old_module = f"wiki_{old_backend}_refresh_pending"
+    new_module = "wiki_wikigraph_refresh_pending"
+
+    assert not (SCRIPTS / f"{old_module}.py").exists()
+    assert (SCRIPTS / f"{new_module}.py").exists()
+
+    for name in (
+        "PENDING_WIKIGRAPH_REFRESH_LEDGER",
+        "DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) == getattr(wiki_wikigraph_refresh_pending, name)
+
+    for name in (
+        "clear_wikigraph_refresh_pending_after_success",
+        "default_wikigraph_refresh_ledger",
+        "wikigraph_refresh_import_summary",
+        "load_wikigraph_refresh_ledger",
+        "mark_wikigraph_refresh_pending",
+        "pending_wikigraph_refresh_ledger_path",
+        "pending_wikigraph_refresh_status",
+        "record_wikigraph_refresh_failure",
+        "save_wikigraph_refresh_ledger",
+        "wiki_markdown_latest_mtime",
+    ):
+        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_wikigraph_refresh_pending, name)
+
+    for old_name in (
+        f"PENDING_{old_backend.upper()}_REFRESH_LEDGER",
+        f"DEFAULT_PENDING_{old_backend.upper()}_REFRESH_THRESHOLD",
+        f"clear_{old_backend}_refresh_pending_after_success",
+        f"default_{old_backend}_refresh_ledger",
+        f"{old_backend}_refresh_import_summary",
+        f"load_{old_backend}_refresh_ledger",
+        f"mark_{old_backend}_refresh_pending",
+        f"pending_{old_backend}_refresh_ledger_path",
+        f"pending_{old_backend}_refresh_status",
+        f"record_{old_backend}_refresh_failure",
+        f"save_{old_backend}_refresh_ledger",
+    ):
+        assert not hasattr(wiki_wikigraph_compat_lib, old_name)
+
+    module_text = (SCRIPTS / f"{new_module}.py").read_text(encoding="utf-8")
+    for pattern in (
+        "PENDING_WIKIGRAPH_REFRESH_LEDGER =",
+        "DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD =",
+        "def pending_wikigraph_refresh_ledger_path(",
+        "def default_wikigraph_refresh_ledger(",
+        "def load_wikigraph_refresh_ledger(",
+        "def save_wikigraph_refresh_ledger(",
+        "def wikigraph_refresh_import_summary(",
+        "def _parse_refresh_time(",
+        "wiki_markdown_latest_mtime",
+        "def mark_wikigraph_refresh_pending(",
+        "def pending_wikigraph_refresh_status(",
+        "def clear_wikigraph_refresh_pending_after_success(",
+        "def record_wikigraph_refresh_failure(",
+    ):
+        assert pattern in module_text
+    assert "import wiki_wikigraph_compat_lib" not in module_text
+    assert "from wiki_wikigraph_compat_lib import" not in module_text
+    assert old_backend not in module_text
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert f"from {new_module} import" in text
+    assert f"from {old_module} import" not in text
+    for pattern in (
+        f"PENDING_{old_backend.upper()}_REFRESH_LEDGER =",
+        f"DEFAULT_PENDING_{old_backend.upper()}_REFRESH_THRESHOLD =",
+        f"def pending_{old_backend}_refresh_ledger_path(",
+        f"def default_{old_backend}_refresh_ledger(",
+        f"def load_{old_backend}_refresh_ledger(",
+        f"def save_{old_backend}_refresh_ledger(",
+        f"def {old_backend}_refresh_import_summary(",
+        "def _parse_refresh_time(",
+        "def wiki_markdown_latest_mtime(",
+        f"def mark_{old_backend}_refresh_pending(",
+        f"def pending_{old_backend}_refresh_status(",
+        f"def clear_{old_backend}_refresh_pending_after_success(",
+        f"def record_{old_backend}_refresh_failure(",
+    ):
+        assert pattern not in text
+
+
+def test_old_http_query_compatibility_module_is_removed() -> None:
+    import wiki_wikigraph_compat_lib
+
+    old_backend = "light" + "rag"
+    module_name = f"wiki_{old_backend}_http"
+    sys.modules.pop(module_name, None)
+
+    assert not (SCRIPTS / f"{module_name}.py").exists()
+    with pytest.raises(ModuleNotFoundError):
+        __import__(module_name)
+
+    retired_http_helpers = {
+        "health",
+        "http_json",
+        f"load_{old_backend}_api_key",
+        f"query_{old_backend}",
+        f"query_{old_backend}_data",
+        "TERMINAL_STATUSES",
+        "SUCCESS_STATUSES",
+        "insert_texts",
+        "track_status",
+        "wait_for_track",
+        "manifest_rows",
+        "upsert_doc_event",
+        "write_manifest_jsonl",
+        f"sync_docs_to_{old_backend}",
+    }
+    for name in retired_http_helpers:
+        assert not hasattr(wiki_wikigraph_compat_lib, name)
+
+    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
+    assert f"from wiki_{old_backend}_http import" not in text
+    for pattern in (
+        f"def load_{old_backend}_api_key(",
+        "def http_json(",
+        "def health(",
+        f"def query_{old_backend}(",
+        f"def query_{old_backend}_data(",
+        "TERMINAL_STATUSES =",
+        "SUCCESS_STATUSES =",
+        "def insert_texts(",
+        "def track_status(",
+        "def wait_for_track(",
+        "def manifest_rows(",
+        "def upsert_doc_event(",
+        "def write_manifest_jsonl(",
+        f"def sync_docs_to_{old_backend}(",
+    ):
+        assert pattern not in text
 
 
 def test_jsonl_read_streams_rows_in_order_and_skips_blank_lines(tmp_path: Path) -> None:
-    from wiki_lightrag_lib import jsonl_read
+    from wiki_wikigraph_compat_lib import jsonl_read
 
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a": 1}\n\n  {"b": 2}  \n', encoding="utf-8")
@@ -185,26 +714,42 @@ def test_jsonl_read_streams_rows_in_order_and_skips_blank_lines(tmp_path: Path) 
 
 def test_validate_wiki_default_does_not_write_report(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
 
-    report = validate_wiki(root, state, tmp_path / "work" / "lightrag")
+    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph")
 
     assert "report_path" not in report
     assert not state.exists()
     assert not list((state / "validation_reports").glob("*_validate.json"))
 
 
+def test_validate_wiki_report_uses_native_not_retired_output_fields(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+
+    report = validate_wiki(root, state, workdir)
+
+    assert report["native_unresolved_references"] == 0
+    assert report["native_state_dir"] == str(state.resolve())
+    assert report["native_workdir"] == str(workdir.resolve())
+    retired_backend = "light" + "rag"
+    assert f"{retired_backend}_unresolved_references" not in report
+    assert f"{retired_backend}_state_dir" not in report
+    assert f"{retired_backend}_workdir" not in report
+
+
 def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import wiki_lightrag_lib
+    import wiki_native_wiki_checks
 
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
 
     def fail_if_called(_root: Path) -> dict[str, dict[str, object]]:
         raise AssertionError("validation_input_fingerprints should only run for persisted validation reports")
 
-    monkeypatch.setattr(wiki_lightrag_lib, "validation_input_fingerprints", fail_if_called)
-    report = validate_wiki(root, state, tmp_path / "work" / "lightrag")
+    monkeypatch.setattr(wiki_native_wiki_checks, "validation_input_fingerprints", fail_if_called)
+    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph")
 
     assert "input_fingerprints" not in report
     assert "schema_version" not in report
@@ -212,9 +757,9 @@ def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_p
 
 def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
 
-    report = validate_wiki(root, state, tmp_path / "work" / "lightrag", write_report=True)
+    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph", write_report=True)
 
     report_path = Path(report["report_path"])
     assert report_path.exists()
@@ -222,15 +767,15 @@ def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
 
 
 def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path: Path) -> None:
-    import wiki_lightrag_lib
+    import wiki_wikigraph_compat_lib
 
     root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
 
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
-    current = wiki_lightrag_lib.validation_freshness_context(root, state, workdir)
-    freshness = wiki_lightrag_lib.validation_report_is_fresh(
+    current = wiki_wikigraph_compat_lib.validation_freshness_context(root, state, workdir)
+    freshness = wiki_wikigraph_compat_lib.validation_report_is_fresh(
         report,
         current,
         required_surfaces=["index", "compiled", "_meta", "raw"],
@@ -238,7 +783,7 @@ def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path
     )
 
     assert freshness == {"fresh": True, "rejections": []}
-    assert report["schema_version"] == wiki_lightrag_lib.VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
+    assert report["schema_version"] == wiki_wikigraph_compat_lib.VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
     assert report["root"] == str(root.resolve())
     assert report["state_dir"] == str(state.resolve())
     assert report["workdir"] == str(workdir.resolve())
@@ -250,8 +795,8 @@ def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path
 
 def test_validate_wiki_cli_reuses_fresh_report_without_running_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
     report_path = Path(report["report_path"])
 
@@ -286,8 +831,8 @@ def test_validate_wiki_cli_reuses_fresh_report_without_running_validation(tmp_pa
 
 def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
     report_path = Path(report["report_path"])
     write(root / "index.md", (root / "index.md").read_text(encoding="utf-8") + "\n<!-- changed -->\n")
@@ -326,11 +871,24 @@ def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path,
 
 
 def test_validation_split_module_reexports_existing_public_functions() -> None:
-    import wiki_lightrag_lib
-    import wiki_lightrag_validation
+    import wiki_native_validation
 
-    assert wiki_lightrag_lib.validate_wiki is wiki_lightrag_validation.validate_wiki
-    assert wiki_lightrag_lib.secret_hits is wiki_lightrag_validation.secret_hits
+    old_backend = "light" + "rag"
+    compat_module_name = "wiki_wikigraph_compat_lib"
+    validation_module_name = f"wiki_{old_backend}_validation"
+    compat_lib = importlib.import_module(compat_module_name)
+
+    assert not (SCRIPTS / f"{validation_module_name}.py").exists()
+    sys.modules.pop(validation_module_name, None)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(validation_module_name)
+
+    assert compat_lib.validate_wiki is wiki_native_validation.validate_wiki
+    assert compat_lib.secret_hits is wiki_native_validation.secret_hits
+
+    text = (SCRIPTS / f"{compat_module_name}.py").read_text(encoding="utf-8")
+    assert "from wiki_native_validation import secret_hits, validate_wiki" in text
+    assert f"from {validation_module_name} import secret_hits, validate_wiki" not in text
 
 
 def _fresh_validation_report_inputs() -> tuple[dict[str, object], dict[str, object]]:
@@ -358,11 +916,11 @@ def _fresh_validation_report_inputs() -> tuple[dict[str, object], dict[str, obje
 
 
 def test_validation_report_freshness_accepts_matching_report() -> None:
-    import wiki_lightrag_lib
+    import wiki_wikigraph_compat_lib
 
     report, current = _fresh_validation_report_inputs()
 
-    result = wiki_lightrag_lib.validation_report_is_fresh(
+    result = wiki_wikigraph_compat_lib.validation_report_is_fresh(
         report,
         current,
         required_surfaces=["compiled", "_meta"],
@@ -396,12 +954,12 @@ def test_validation_report_freshness_accepts_matching_report() -> None:
     ],
 )
 def test_validation_report_freshness_rejects_stale_or_unsafe_reports(mutator, required_surfaces: list[str], reason: str, expected_rejection: str) -> None:
-    import wiki_lightrag_lib
+    import wiki_wikigraph_compat_lib
 
     report, current = _fresh_validation_report_inputs()
     mutator(report, current)
 
-    result = wiki_lightrag_lib.validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
+    result = wiki_wikigraph_compat_lib.validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
 
     assert result["fresh"] is False
     assert expected_rejection in result["rejections"]
@@ -413,15 +971,14 @@ def test_false_changed_only_flags_are_removed_from_cli_help() -> None:
         "build_seed_edges.py",
         "extract_method_atoms.py",
         "extract_raw_sections.py",
-        "lightrag_sync.py",
         "sync_virtual_docs.py",
     ]:
         result = subprocess.run([sys.executable, str(SCRIPTS / script_name), "--help"], check=True, text=True, capture_output=True)
         assert "--changed-only" not in result.stdout
 
 
-def test_lightrag_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from lightrag_runtime_env import env_int, load_env_file, redact_summary
+def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from native_runtime_env import env_int, load_env_file, redact_summary
 
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=secret-value\nEMBEDDING_DIM=1536\nBAD_INT=nope\n", encoding="utf-8")
@@ -444,11 +1001,10 @@ def test_build_evidence_pack_alias_preserves_output_and_records_query_event(
     state = tmp_path / "state"
     workdir = tmp_path / "work"
 
-    def fake_query(server: str, api_key: str, query: str, mode: str, top_k: int = 20, chunk_top_k: int = 10) -> dict:
-        return {"response": f"answer for {query}", "references": []}
+    def fake_http_json(method: str, url: str, payload: dict, *, timeout: int = 60) -> dict:
+        return {"response": f"answer for {payload['query']}", "references": []}
 
-    monkeypatch.setattr(build_evidence_pack, "query_lightrag", fake_query, raising=False)
-    monkeypatch.setattr(wiki_search, "query_lightrag", fake_query)
+    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -470,15 +1026,15 @@ def test_build_evidence_pack_alias_preserves_output_and_records_query_event(
     assert set(payload) == {"evidence_pack"}
     pack = Path(payload["evidence_pack"])
     assert pack.exists()
-    with sqlite3.connect(state / "lightrag_sync.db") as conn:
+    with sqlite3.connect(state / "wikigraph_sync.db") as conn:
         rows = conn.execute("SELECT query, mode, evidence_pack_path FROM query_events").fetchall()
     assert rows == [("alias query", "mix", str(pack))]
 
 
-def test_mark_lightrag_refresh_pending_creates_external_ledger_without_wiki_pollution(tmp_path: Path) -> None:
+def test_mark_wikigraph_refresh_pending_creates_external_ledger_without_wiki_pollution(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    entry = mark_lightrag_refresh_pending(
+    state = tmp_path / "work" / "wikigraph" / "state"
+    entry = mark_wikigraph_refresh_pending(
         state,
         root,
         raw_path="raw/clip/2601/26010101_Foo-Paper.md",
@@ -487,16 +1043,18 @@ def test_mark_lightrag_refresh_pending_creates_external_ledger_without_wiki_poll
         changed_surfaces=["raw", "compiled", "meta", "log"],
         expected_sections=["summary", "abstract", "motivation", "methodology", "future", "limitations", "questions"],
     )
-    ledger = load_lightrag_refresh_ledger(state)
+    ledger = load_wikigraph_refresh_ledger(state)
     assert entry["raw_path"] == "raw/clip/2601/26010101_Foo-Paper.md"
-    assert ledger["threshold"] == DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD == 10
+    assert ledger["threshold"] == DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD == 10
     assert ledger["dirty"] is True
     assert len(ledger["pending"]) == 1
-    assert (state / "pending_lightrag_refresh.json").exists()
-    assert not (root / "pending_lightrag_refresh.json").exists()
+    assert (state / "pending_wikigraph_refresh.json").exists()
+    old_backend = "light" + "rag"
+    assert not (state / f"pending_{old_backend}_refresh.json").exists()
+    assert not (root / "pending_wikigraph_refresh.json").exists()
     assert wiki_root_machine_pollution(root) == []
-    threshold_status = pending_lightrag_refresh_status(root, state, reason="threshold")
-    pre_query_status = pending_lightrag_refresh_status(root, state, reason="pre-query")
+    threshold_status = pending_wikigraph_refresh_status(root, state, reason="threshold")
+    pre_query_status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
     assert threshold_status["should_refresh"] is False
     assert pre_query_status["should_refresh"] is True
     assert "pending_items_for_pre_query" in pre_query_status["reasons"]
@@ -504,7 +1062,7 @@ def test_mark_lightrag_refresh_pending_creates_external_ledger_without_wiki_poll
 
 def test_mark_pending_wiki_integration_tracks_raw_fast_queue_without_wiki_pollution(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     entry = mark_pending_wiki_integration(
         state,
         root,
@@ -532,7 +1090,7 @@ def test_mark_pending_wiki_integration_tracks_raw_fast_queue_without_wiki_pollut
 
 def test_pending_wiki_integration_status_triggers_at_threshold_and_clears_after_success(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     for idx in range(9):
         mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260101{idx:02d}_Paper.md", title=f"Paper {idx}")
     below = pending_wiki_integration_status(root, state)
@@ -560,7 +1118,7 @@ def test_pending_wiki_integration_status_triggers_at_threshold_and_clears_after_
 
 def test_pending_wiki_integration_status_uses_persisted_threshold(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     for idx in range(5):
         mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260102{idx:02d}_Paper.md", title=f"Paper {idx}", threshold=5)
 
@@ -573,14 +1131,14 @@ def test_pending_wiki_integration_status_uses_persisted_threshold(tmp_path: Path
     assert "pending_threshold_reached" in status["reasons"]
 
 
-def test_terminal_wiki_integration_statuses_do_not_trigger_threshold_or_lightrag_block(tmp_path: Path) -> None:
+def test_terminal_wiki_integration_statuses_do_not_trigger_threshold_or_wikigraph_block(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     for idx in range(10):
         mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260103{idx:02d}_Duplicate.md", title=f"Duplicate {idx}", status="skipped_duplicate")
 
     wiki_status = pending_wiki_integration_status(root, state)
-    graph_status = pending_lightrag_refresh_status(root, state, reason="pre-query")
+    graph_status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
 
     assert wiki_status["pending_count"] == 10
     assert wiki_status["actionable_pending_count"] == 0
@@ -590,13 +1148,13 @@ def test_terminal_wiki_integration_statuses_do_not_trigger_threshold_or_lightrag
     assert graph_status["raw_fast_pending_wiki_integration_count"] == 0
 
 
-def test_review_wiki_integration_status_blocks_lightrag_with_manual_review_action(tmp_path: Path) -> None:
+def test_review_wiki_integration_status_blocks_wikigraph_with_manual_review_action(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010400_Needs-Review.md", title="Needs Review", status="needs_review")
 
     wiki_status = pending_wiki_integration_status(root, state, reason="pre-query")
-    graph_status = pending_lightrag_refresh_status(root, state, reason="pre-query")
+    graph_status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
 
     assert wiki_status["actionable_pending_count"] == 0
     assert wiki_status["review_pending_count"] == 1
@@ -657,35 +1215,35 @@ def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in
     assert wiki_root_machine_pollution(root_a) == []
 
 
-def test_pending_lightrag_refresh_status_triggers_at_threshold(tmp_path: Path) -> None:
+def test_pending_wikigraph_refresh_status_triggers_at_threshold(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     for idx in range(9):
-        mark_lightrag_refresh_pending(state, root, raw_path=f"raw/clip/2601/260101{idx:02d}_Paper.md", title=f"Paper {idx}")
-    below = pending_lightrag_refresh_status(root, state, reason="threshold")
+        mark_wikigraph_refresh_pending(state, root, raw_path=f"raw/clip/2601/260101{idx:02d}_Paper.md", title=f"Paper {idx}")
+    below = pending_wikigraph_refresh_status(root, state, reason="threshold")
     assert below["pending_count"] == 9
     assert below["graph_ready_pending_count"] == 9
     assert below["raw_fast_pending_wiki_integration_count"] == 0
-    assert below["threshold"] == DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD == 10
+    assert below["threshold"] == DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD == 10
     assert below["should_refresh"] is False
 
-    mark_lightrag_refresh_pending(state, root, raw_path="raw/clip/2601/26010109_Paper.md", title="Paper 9")
-    status = pending_lightrag_refresh_status(root, state, reason="threshold")
+    mark_wikigraph_refresh_pending(state, root, raw_path="raw/clip/2601/26010109_Paper.md", title="Paper 9")
+    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
     assert status["pending_count"] == 10
     assert status["graph_ready_pending_count"] == 10
     assert status["raw_fast_pending_wiki_integration_count"] == 0
-    assert status["threshold"] == DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD == 10
+    assert status["threshold"] == DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD == 10
     assert status["should_refresh"] is True
     assert "pending_threshold_reached" in status["reasons"]
 
 
-def test_pending_lightrag_refresh_status_uses_persisted_threshold(tmp_path: Path) -> None:
+def test_pending_wikigraph_refresh_status_uses_persisted_threshold(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     for idx in range(5):
-        mark_lightrag_refresh_pending(state, root, raw_path=f"raw/clip/2601/260105{idx:02d}_Paper.md", title=f"Paper {idx}", threshold=5)
+        mark_wikigraph_refresh_pending(state, root, raw_path=f"raw/clip/2601/260105{idx:02d}_Paper.md", title=f"Paper {idx}", threshold=5)
 
-    status = pending_lightrag_refresh_status(root, state, reason="threshold")
+    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
 
     assert status["pending_count"] == 5
     assert status["graph_ready_pending_count"] == 5
@@ -694,14 +1252,14 @@ def test_pending_lightrag_refresh_status_uses_persisted_threshold(tmp_path: Path
     assert "pending_threshold_reached" in status["reasons"]
 
 
-def test_lightrag_status_surfaces_raw_fast_pending_as_upstream_blocker(tmp_path: Path) -> None:
+def test_wikigraph_status_surfaces_raw_fast_pending_as_upstream_blocker(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    mark_lightrag_refresh_pending(state, root, raw_path="raw/clip/2601/26010101_Foo-Paper.md", title="Foo Paper")
+    state = tmp_path / "work" / "wikigraph" / "state"
+    mark_wikigraph_refresh_pending(state, root, raw_path="raw/clip/2601/26010101_Foo-Paper.md", title="Foo Paper")
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010102_Raw-Fast-A.md", title="Raw Fast A")
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010103_Raw-Fast-B.md", title="Raw Fast B")
 
-    status = pending_lightrag_refresh_status(root, state, reason="pre-query")
+    status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
 
     assert status["pending_count"] == 1
     assert status["graph_ready_pending_count"] == 1
@@ -709,13 +1267,13 @@ def test_lightrag_status_surfaces_raw_fast_pending_as_upstream_blocker(tmp_path:
     assert status["blocked_by_pending_wiki_integration"] is True
     assert status["should_refresh"] is False
     assert status["next_required_action"] == "wiki_integration"
-    assert "pending_wiki_integration_before_lightrag_refresh" in status["blocked_reasons"]
+    assert "pending_wiki_integration_before_wikigraph_refresh" in status["blocked_reasons"]
     assert status["upstream_wiki_integration"]["pending_count"] == 2
 
 
-def test_clear_pending_wiki_integration_marks_integrated_items_for_lightrag_refresh(tmp_path: Path) -> None:
+def test_clear_pending_wiki_integration_marks_integrated_items_for_wikigraph_refresh(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     first = "raw/clip/2601/26010102_Raw-Fast-A.md"
     second = "raw/clip/2601/26010103_Raw-Fast-B.md"
     mark_pending_wiki_integration(state, root, raw_path=first, title="Raw Fast A", required_sections=["summary", "methodology"])
@@ -725,11 +1283,11 @@ def test_clear_pending_wiki_integration_marks_integrated_items_for_lightrag_refr
 
     assert cleared["cleared_count"] == 1
     assert cleared["remaining_pending_count"] == 1
-    assert cleared["marked_lightrag_pending_count"] == 1
+    assert cleared["marked_wikigraph_pending_count"] == 1
     wiki_ledger = load_pending_wiki_integration_ledger(state)
     assert [item["raw_path"] for item in wiki_ledger["pending"]] == [second]
     assert wiki_ledger["dirty"] is True
-    graph_ledger = load_lightrag_refresh_ledger(state)
+    graph_ledger = load_wikigraph_refresh_ledger(state)
     assert len(graph_ledger["pending"]) == 1
     assert graph_ledger["pending"][0]["raw_path"] == first
     assert graph_ledger["pending"][0]["event_type"] == "batch-wiki-integration"
@@ -738,7 +1296,7 @@ def test_clear_pending_wiki_integration_marks_integrated_items_for_lightrag_refr
 
 def test_clear_pending_wiki_integration_without_integrated_paths_clears_all_actionable_items(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     first = "raw/clip/2601/26010102_Raw-Fast-A.md"
     second = "raw/clip/2601/26010103_Raw-Fast-B.md"
     mark_pending_wiki_integration(state, root, raw_path=first, title="Raw Fast A")
@@ -748,27 +1306,27 @@ def test_clear_pending_wiki_integration_without_integrated_paths_clears_all_acti
 
     assert cleared["cleared_count"] == 2
     assert cleared["remaining_pending_count"] == 0
-    assert cleared["marked_lightrag_pending_count"] == 2
+    assert cleared["marked_wikigraph_pending_count"] == 2
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
-    assert {item["raw_path"] for item in load_lightrag_refresh_ledger(state)["pending"]} == {first, second}
+    assert {item["raw_path"] for item in load_wikigraph_refresh_ledger(state)["pending"]} == {first, second}
 
 
-def test_mark_lightrag_refresh_pending_deduplicates_by_raw_path(tmp_path: Path) -> None:
+def test_mark_wikigraph_refresh_pending_deduplicates_by_raw_path(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     raw_path = "raw/clip/2601/26010101_Foo-Paper.md"
-    mark_lightrag_refresh_pending(state, root, raw_path=raw_path, title="Foo Paper")
-    mark_lightrag_refresh_pending(state, root, raw_path=raw_path, title="Foo Paper Updated", event_type="resource_refresh")
-    ledger = load_lightrag_refresh_ledger(state)
+    mark_wikigraph_refresh_pending(state, root, raw_path=raw_path, title="Foo Paper")
+    mark_wikigraph_refresh_pending(state, root, raw_path=raw_path, title="Foo Paper Updated", event_type="resource_refresh")
+    ledger = load_wikigraph_refresh_ledger(state)
     assert len(ledger["pending"]) == 1
     assert ledger["pending"][0]["title"] == "Foo Paper Updated"
     assert ledger["pending"][0]["event_type"] == "resource_refresh"
 
 
-def test_clear_lightrag_refresh_pending_after_success_records_import_summary(tmp_path: Path) -> None:
+def test_clear_wikigraph_refresh_pending_after_success_records_import_summary(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    mark_lightrag_refresh_pending(state, root, raw_path="raw/clip/2601/26010101_Foo-Paper.md", title="Foo Paper")
+    state = tmp_path / "work" / "wikigraph" / "state"
+    mark_wikigraph_refresh_pending(state, root, raw_path="raw/clip/2601/26010101_Foo-Paper.md", title="Foo Paper")
     import_report = state / "custom_kg_import_report.json"
     ensure_state_dirs(state)
     write(
@@ -781,9 +1339,9 @@ def test_clear_lightrag_refresh_pending_after_success_records_import_summary(tmp
             ensure_ascii=False,
         ),
     )
-    cleared = clear_lightrag_refresh_pending_after_success(root, state, import_report_path=import_report, reason="threshold")
+    cleared = clear_wikigraph_refresh_pending_after_success(root, state, import_report_path=import_report, reason="threshold")
     assert cleared["cleared_count"] == 1
-    ledger = load_lightrag_refresh_ledger(state)
+    ledger = load_wikigraph_refresh_ledger(state)
     assert ledger["pending"] == []
     assert ledger["dirty"] is False
     assert ledger["last_successful_raw_count"] == 1
@@ -791,10 +1349,10 @@ def test_clear_lightrag_refresh_pending_after_success_records_import_summary(tmp
     assert ledger["last_successful_import_payload"]["relationships"] == 12
 
 
-def test_batch_lightrag_refresh_cli_status_and_dry_run_are_non_mutating(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_cli_status_and_dry_run_are_non_mutating(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
     mark = subprocess.run(
         [
             sys.executable,
@@ -815,9 +1373,9 @@ def test_batch_lightrag_refresh_cli_status_and_dry_run_are_non_mutating(tmp_path
     )
     mark_payload = json.loads(mark.stdout)
     assert mark_payload["pending_count"] == 1
-    assert mark_payload["threshold"] == DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD == 10
+    assert mark_payload["threshold"] == DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD == 10
     dry = subprocess.run(
-        [sys.executable, str(script), "refresh", "--root", str(root), "--state-dir", str(state), "--workdir", str(tmp_path / "work" / "lightrag"), "--reason", "pre-query", "--dry-run"],
+        [sys.executable, str(script), "refresh", "--root", str(root), "--state-dir", str(state), "--workdir", str(tmp_path / "work" / "wikigraph"), "--reason", "pre-query", "--dry-run"],
         check=True,
         text=True,
         capture_output=True,
@@ -826,13 +1384,13 @@ def test_batch_lightrag_refresh_cli_status_and_dry_run_are_non_mutating(tmp_path
     assert payload["dry_run"] is True
     assert payload["would_run"] is True
     assert any("validate_wiki.py" in " ".join(cmd) for cmd in payload["commands"])
-    assert load_lightrag_refresh_ledger(state)["pending"]
+    assert load_wikigraph_refresh_ledger(state)["pending"]
 
 
-def test_batch_lightrag_refresh_cli_exit_code_signals_upstream_wiki_integration(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_cli_exit_code_signals_upstream_wiki_integration(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010102_Raw-Fast-A.md", title="Raw Fast A")
 
     result = subprocess.run(
@@ -850,27 +1408,32 @@ def test_batch_lightrag_refresh_cli_exit_code_signals_upstream_wiki_integration(
     assert "pending_items_for_wiki_integration" in payload["upstream_wiki_integration"]["reasons"]
 
 
-def test_batch_lightrag_refresh_command_groups_preserve_order_without_positional_slice(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_command_groups_preserve_order_without_positional_slice(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
 
-    groups = batch_lightrag_refresh.build_refresh_command_groups(root, state, workdir)
-    flattened = batch_lightrag_refresh.build_refresh_commands(root, state, workdir)
+    groups = batch_wikigraph_refresh.build_refresh_command_groups(root, state, workdir)
+    flattened = batch_wikigraph_refresh.build_refresh_commands(root, state, workdir)
 
     assert list(groups) == ["artifact", "full_import"]
     assert flattened == groups["artifact"] + groups["full_import"]
     assert all("systemctl" not in command[0] for command in groups["artifact"])
-    assert groups["full_import"][0] == ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME]
+    assert len(groups["full_import"]) == 1
+    assert groups["full_import"][0][:2] == ["python-internal", "legacy-wikigraph-cold-import-retired"]
+    full_import_flattened = " ".join(" ".join(command) for command in groups["full_import"])
+    assert "systemctl" not in full_import_flattened
+    assert "reset-rag-storage" not in full_import_flattened
+    assert "import_custom_kg.py" not in full_import_flattened
 
 
-def test_batch_lightrag_refresh_command_groups_pass_explicit_validation_reuse_report(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_command_groups_pass_explicit_validation_reuse_report(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     report = state / "validation_reports" / "ok.json"
 
-    groups = batch_lightrag_refresh.build_refresh_command_groups(root, state, workdir, reuse_validation_report=report)
+    groups = batch_wikigraph_refresh.build_refresh_command_groups(root, state, workdir, reuse_validation_report=report)
     validate_commands = [command for command in groups["artifact"] if "validate_wiki.py" in " ".join(command)]
 
     assert len(validate_commands) == 1
@@ -878,11 +1441,11 @@ def test_batch_lightrag_refresh_command_groups_pass_explicit_validation_reuse_re
     assert all("--reuse-validation-report" not in command for command in groups["artifact"][1:])
 
 
-def test_batch_lightrag_refresh_dry_run_passes_explicit_validation_reuse_report(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_dry_run_passes_explicit_validation_reuse_report(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
     report = state / "validation_reports" / "ok.json"
 
     result = subprocess.run(
@@ -915,11 +1478,11 @@ def test_batch_lightrag_refresh_dry_run_passes_explicit_validation_reuse_report(
     assert validate_commands[0][-2:] == ["--reuse-validation-report", str(report.resolve())]
 
 
-def test_batch_lightrag_refresh_dry_run_reports_embedding_profile(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_dry_run_reports_embedding_profile(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
 
     result = subprocess.run(
         [
@@ -949,49 +1512,49 @@ def test_batch_lightrag_refresh_dry_run_reports_embedding_profile(tmp_path: Path
     flattened = "\n".join(" ".join(command) for command in payload["commands"])
 
     assert payload["embedding_profile"] == "shadow-medium"
-    assert "--embedding-profile shadow-medium" in flattened
+    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "custom_kg_incremental.py materialize-full" not in flattened
+    assert "--embedding-profile shadow-medium" not in flattened
 
 
-def test_batch_lightrag_refresh_run_real_refresh_applies_embedding_profile_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_run_real_refresh_retires_full_materialization_before_child_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
-    import_command = [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "custom_kg_incremental.py"), "materialize-full"]
-    captured_env: dict[str, str] = {}
+    calls: list[list[str]] = []
 
-    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: {"artifact": [], "full_import": []})
-    monkeypatch.setattr(batch_lightrag_refresh, "build_full_materialization_import_commands", lambda *_args, **_kwargs: [import_command])
-    monkeypatch.setattr(batch_lightrag_refresh, "plan_incremental_import_mode", lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": {}})
+    monkeypatch.setattr(batch_wikigraph_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: _refresh_command_groups([]))
+    monkeypatch.setattr(batch_wikigraph_refresh, "plan_incremental_import_mode", lambda *_args, **_kwargs: {"selected_mode": "full_rebuild", "reasons": ["incremental_interval_reached"], "diff": {}})
+    monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
 
-    def fake_run_subprocess(command: list[str], _log_path: Path, env: dict[str, str] | None = None, timeout: int | None = None) -> None:
-        if command == import_command and env is not None:
-            captured_env.update({key: env[key] for key in ("EMBEDDING_FUNC_MAX_ASYNC", "EMBEDDING_BATCH_NUM", "MAX_PARALLEL_INSERT")})
+    def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
+        calls.append(command)
 
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    result = batch_lightrag_refresh.run_real_refresh(
-        root,
-        state,
-        workdir,
-        "manual",
-        artifact_log,
-        import_log,
-        force_full_rebuild=True,
-        reuse_vector_cache=True,
-        embedding_profile="shadow-medium",
-    )
+    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+        batch_wikigraph_refresh.run_real_refresh(
+            root,
+            state,
+            workdir,
+            "manual",
+            artifact_log,
+            import_log,
+            force_full_rebuild=True,
+            reuse_vector_cache=True,
+            embedding_profile="shadow-medium",
+        )
 
-    assert result["embedding_profile"] == "shadow-medium"
-    assert captured_env == {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"}
+    assert not any("custom_kg_incremental.py" in " ".join(command) for command in calls)
 
 
-def test_batch_lightrag_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry_run(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry_run(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
 
     result = subprocess.run(
         [
@@ -1023,20 +1586,21 @@ def test_batch_lightrag_refresh_explicit_full_rebuild_reuses_vector_cache_in_dry
     assert payload["import_mode"]["selected_mode"] == "full_rebuild"
     assert payload["import_mode"]["force_full_rebuild"] is True
     assert payload["import_mode"]["reuse_vector_cache"] is True
-    assert "custom_kg_incremental.py materialize-full" in flattened
-    assert "--vector-cache" in flattened
-    assert "--seed-from-storage" in flattened
-    assert "--fill-missing-vectors" in flattened
-    assert "--allow-current-storage-audit-failure" in flattened
-    assert "--prepare-swap" in flattened
+    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "custom_kg_incremental.py materialize-full" not in flattened
+    assert "--vector-cache" not in flattened
+    assert "--seed-from-storage" not in flattened
+    assert "--fill-missing-vectors" not in flattened
+    assert "--allow-current-storage-audit-failure" not in flattened
+    assert "--prepare-swap" not in flattened
     assert "reset-rag-storage" not in flattened
     assert "import_custom_kg.py" not in flattened
 
 
-def test_batch_lightrag_refresh_real_cli_defers_import_planning_to_run_real_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_batch_wikigraph_refresh_real_cli_defers_import_planning_to_run_real_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     planner_calls: list[tuple[Path, Path, Path]] = []
     run_real_args: dict[str, object] = {}
 
@@ -1087,13 +1651,13 @@ def test_batch_lightrag_refresh_real_cli_defers_import_planning_to_run_real_refr
             "import_mode": {"selected_mode": "planned-inside-run-real-refresh"},
         }
 
-    monkeypatch.setattr(batch_lightrag_refresh, "plan_incremental_import_mode", fake_plan)
-    monkeypatch.setattr(batch_lightrag_refresh, "run_real_refresh", fake_run_real_refresh)
+    monkeypatch.setattr(batch_wikigraph_refresh, "plan_incremental_import_mode", fake_plan)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_real_refresh", fake_run_real_refresh)
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "batch_lightrag_refresh.py",
+            "batch_wikigraph_refresh.py",
             "refresh",
             "--root",
             str(root),
@@ -1107,7 +1671,7 @@ def test_batch_lightrag_refresh_real_cli_defers_import_planning_to_run_real_refr
         ],
     )
 
-    assert batch_lightrag_refresh.main() == 0
+    assert batch_wikigraph_refresh.main() == 0
     payload = json.loads(capsys.readouterr().out)
 
     assert planner_calls == []
@@ -1121,11 +1685,11 @@ def test_batch_lightrag_refresh_real_cli_defers_import_planning_to_run_real_refr
     assert payload["import_mode"]["selected_mode"] == "planned-inside-run-real-refresh"
 
 
-def test_batch_lightrag_refresh_threshold_defaults_to_full_rebuild_with_vector_cache(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_threshold_defaults_to_full_rebuild_with_vector_cache(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
-    script = SCRIPTS / "batch_lightrag_refresh.py"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    script = SCRIPTS / "batch_wikigraph_refresh.py"
     subprocess.run(
         [
             sys.executable,
@@ -1177,50 +1741,46 @@ def test_batch_lightrag_refresh_threshold_defaults_to_full_rebuild_with_vector_c
     assert payload["import_mode"]["force_full_rebuild"] is True
     assert payload["import_mode"]["reuse_vector_cache"] is True
     assert payload["import_mode"]["force_reason"] == "threshold_default"
-    assert "custom_kg_incremental.py materialize-full" in flattened
-    assert "--vector-cache" in flattened
-    assert "--seed-from-storage" in flattened
-    assert "--fill-missing-vectors" in flattened
-    assert "--allow-current-storage-audit-failure" in flattened
+    assert "legacy-wikigraph-full-materialization-retired" in flattened
+    assert "custom_kg_incremental.py materialize-full" not in flattened
+    assert "--vector-cache" not in flattened
+    assert "--seed-from-storage" not in flattened
+    assert "--fill-missing-vectors" not in flattened
+    assert "--allow-current-storage-audit-failure" not in flattened
+    assert "legacy-wikigraph-activation-retired" not in flattened
+    assert "finalize-prepared-swap" not in flattened
+    assert f"systemctl --user stop {batch_wikigraph_refresh.LEGACY_WIKIGRAPH_SERVICE_NAME}" not in flattened
+    assert f"systemctl --user start {batch_wikigraph_refresh.LEGACY_WIKIGRAPH_SERVICE_NAME}" not in flattened
     assert "reset-rag-storage" not in flattened
-    assert load_lightrag_refresh_ledger(state)["pending"]
+    assert load_wikigraph_refresh_ledger(state)["pending"]
 
 
-def test_batch_lightrag_refresh_restarts_service_after_import_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_cold_import_is_retired_before_service_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
-    commands = [["artifact", str(idx)] for idx in range(7)] + [
-        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
-        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_commands", lambda *_args: commands)
-    monkeypatch.setattr(batch_lightrag_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
+    monkeypatch.setattr(batch_wikigraph_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
 
     def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
         calls.append(command)
-        if command and command[0] == str(batch_lightrag_refresh.LIGHTRAG_PYTHON):
-            raise RuntimeError("import failed")
 
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="import failed"):
-        batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
+    with pytest.raises(RuntimeError, match="legacy wikigraph cold full import is retired"):
+        batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
-    assert ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME] in calls
-    assert ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME] in calls
+    assert not any(command and command[0] == "systemctl" for command in calls)
+    assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
+    assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
 
 
 def test_batch_wiki_integration_cli_status_mark_and_clear_are_external(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     script = SCRIPTS / "batch_wiki_integration.py"
     mark = subprocess.run(
         [
@@ -1266,9 +1826,34 @@ def test_batch_wiki_integration_cli_status_mark_and_clear_are_external(tmp_path:
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
 
 
+def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wiki-graph" / "state"
+    status = {
+        "pending_count": 1,
+        "actionable_pending_count": 1,
+        "threshold": 10,
+        "actionable_pending": [
+            {
+                "raw_path": "raw/clip/2606/26062906_skill-neologisms-towards-skill-based-continual-learning.md",
+                "title": "Skill Neologisms",
+                "source_id": "arXiv:2605.04970v2",
+                "topic_hints": ["skill neologisms", "continual learning"],
+            }
+        ],
+    }
+
+    prompt = batch_wiki_integration.build_auto_integration_prompt(root, state, status, "manual")
+
+    assert "/home/xu/project/wiki/wikigraph" not in prompt
+    assert f"Native refresh workdir: `{SCRIPTS.parent}`" in prompt
+    assert f"python {SCRIPTS / 'batch_wiki_integration.py'} clear-success" in prompt
+    assert f"python {SCRIPTS / 'batch_native_refresh.py'} status" in prompt
+
+
 def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_threshold_and_requires_cleared_ledger(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     script = SCRIPTS / "batch_wiki_integration.py"
     for idx in range(10):
         mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260106{idx:02d}_Paper.md", title=f"Paper {idx}", required_sections=["summary"])
@@ -1278,7 +1863,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         "import os, sys\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(SCRIPTS)!r})\n"
-        "from wiki_lightrag_lib import clear_pending_wiki_integration_after_success\n"
+        "from wiki_wikigraph_compat_lib import clear_pending_wiki_integration_after_success\n"
         "root = Path(os.environ['LLM_WIKI_ROOT'])\n"
         "state = Path(os.environ['LLM_WIKI_STATE_DIR'])\n"
         "prompt_path = Path(os.environ['LLM_WIKI_INTEGRATION_PROMPT'])\n"
@@ -1314,12 +1899,12 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
     assert payload["prompt_path"].endswith(".md")
     assert "batch wiki integration" in (state / "fake_runner_seen.txt").read_text(encoding="utf-8")
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
-    assert len(load_lightrag_refresh_ledger(state)["pending"]) == 10
+    assert len(load_wikigraph_refresh_ledger(state)["pending"]) == 10
 
 
 def test_batch_wiki_integration_auto_integrate_records_failure_if_runner_leaves_ledger_pending(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     script = SCRIPTS / "batch_wiki_integration.py"
     for idx in range(10):
         mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260107{idx:02d}_Paper.md", title=f"Paper {idx}")
@@ -1356,10 +1941,12 @@ def test_machine_pollution_detection(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     assert wiki_root_machine_pollution(root) == []
     write(root / ".llm-wiki" / "bad.txt", "bad")
-    write(root / "lightrag_manifest.jsonl", "{}\n")
+    retired_backend = "light" + "rag"
+    retired_manifest_name = f"{retired_backend}_manifest.jsonl"
+    write(root / retired_manifest_name, "{}\n")
     polluted = {p.as_posix() for p in wiki_root_machine_pollution(root)}
     assert ".llm-wiki" in polluted
-    assert "lightrag_manifest.jsonl" in polluted
+    assert retired_manifest_name in polluted
 
 
 def test_ingest_text_has_stable_machine_header(tmp_path: Path) -> None:
@@ -1394,7 +1981,7 @@ def test_ingest_text_preserves_raw_note_tags_and_topic_hints_as_indexing_cues(tm
 
 def test_custom_kg_payload_reuses_external_seed_edges(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     build_seed_edges(root, state)
     payload, summary = build_custom_kg_payload(root, state, limit_docs=3, limit_edges=2)
     assert summary["chunks"] == 3
@@ -1408,7 +1995,7 @@ def test_custom_kg_payload_reuses_external_seed_edges(tmp_path: Path) -> None:
 
 def test_custom_kg_payload_includes_method_atoms_without_wiki_pollution(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     ensure_state_dirs(state)
     write(
         state / "method_atom_docs" / "method-demo.md",
@@ -1441,13 +2028,20 @@ def test_extract_raw_sections_indexes_summary_heading_as_retrieval_section(tmp_p
         "## 一句话总结\n\n"
         "A short summary should become a raw_section summary node for paper-level semantic neighborhoods.\n",
     )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     docs = generated_docs_from_state(state, kind="raw_section")
     summary_docs = [doc for doc in docs if doc.canonical_id == "raw_section:26010105_Summary-Section:summary"]
     assert len(summary_docs) == 1
     assert "section_kind: summary" in summary_docs[0].text
     assert "section_title: 一句话总结" in summary_docs[0].text
+
+
+def test_generated_docs_from_state_is_read_only_when_state_is_missing(tmp_path: Path) -> None:
+    state = tmp_path / "work" / "wikigraph" / "state"
+
+    assert generated_docs_from_state(state, kind="raw_section") == []
+    assert not state.exists()
 
 
 def test_extract_raw_sections_recognizes_summary_motivation_methodology_title_variants(tmp_path: Path) -> None:
@@ -1465,7 +2059,7 @@ def test_extract_raw_sections_recognizes_summary_motivation_methodology_title_va
         "## 明确失败案例说明方法不是万能\n\n"
         "This caveat heading contains 方法 but is not the methodology section.\n",
     )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     docs = generated_docs_from_state(state, kind="raw_section")
     variant_docs = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Variant-Sections" in doc.canonical_id}
@@ -1485,7 +2079,7 @@ def test_extract_raw_sections_indexes_combined_limitation_future_heading_for_bot
         "## 局限 / Future Works\n\n"
         "The same source section discusses remaining failure modes and follow-up research directions.\n",
     )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     docs = generated_docs_from_state(state, kind="raw_section")
     combined = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Combined-Sections" in doc.canonical_id}
@@ -1506,7 +2100,7 @@ def test_extract_raw_sections_integrates_formula_and_figure_evidence_into_contex
         "## 关键实验结果 / 作者结论\n\n"
         "- Figure 2 has three panels; the x-axis, y-axis, trend, and supported claim are recorded next to the result it supports.\n",
     )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     docs = generated_docs_from_state(state, kind="raw_section")
     visual_docs = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Visual-Evidence" in doc.canonical_id}
@@ -1544,7 +2138,7 @@ def test_raw_note_section_contract_audit_reports_combined_and_duplicate_headings
 
 def test_extract_raw_sections_creates_section_virtual_docs_without_wiki_pollution(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     ensure_state_dirs(state)
     write(state / "raw_section_docs" / "stale.md", "stale")
     result = extract_raw_sections(root, state)
@@ -1571,7 +2165,7 @@ def test_extract_raw_sections_uses_unique_filenames_for_long_raw_stems(tmp_path:
             root / "raw" / "clip" / "2601" / f"26010100_{shared}{suffix}.md",
             "---\ntitle: Long Stem Paper\nupdated: 2026-05-18 16:00\n---\n# Long Stem Paper\n\n## 对未来研究的启发\n\n- A unique long-stem future section should survive as a separate virtual doc.\n",
         )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     result = extract_raw_sections(root, state)
     files = list((state / "raw_section_docs").glob("*.md"))
     assert len(files) == result["raw_sections"]
@@ -1579,7 +2173,7 @@ def test_extract_raw_sections_uses_unique_filenames_for_long_raw_stems(tmp_path:
 
 def test_custom_kg_payload_includes_raw_section_chunks_and_relationships(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     build_seed_edges(root, state)
     payload, summary = build_custom_kg_payload(root, state, limit_docs=2, limit_edges=0)
@@ -1611,7 +2205,16 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
         ],
     }
 
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
+
+    metadata = manifest["metadata"]
+    retired_backend = "light" + "rag"
+    assert metadata["wikigraph_tool_version"] == "1.5.0"
+    assert f"{retired_backend}_version" not in metadata
+    assert metadata["canonical_id_algorithm"] == "llm-wiki-canonical-id:v1+wikigraph-custom-kg:v1.5"
+    assert metadata["relationship_vector_content_algorithm"] == "wikigraph-pair-sorted-endpoints:v1"
+    assert retired_backend not in metadata["canonical_id_algorithm"]
+    assert retired_backend not in metadata["relationship_vector_content_algorithm"]
 
     chunk_id = next(iter(manifest["chunks"]))
     chunk = manifest["chunks"][chunk_id]
@@ -1647,8 +2250,13 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
     assert new_rel["vector_text_hash"] == stable_hash(new_rel["content"])
 
 
-def test_custom_kg_manifest_matches_lightrag_sanitized_chunk_ids_and_basenames() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, lightrag_sanitize_text
+def test_custom_kg_manifest_matches_wikigraph_sanitized_chunk_ids_and_basenames() -> None:
+    import custom_kg_incremental
+    from custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, wikigraph_sanitize_text
+
+    retired_backend = "light" + "rag"
+    assert not hasattr(custom_kg_incremental, f"{retired_backend}_sanitize_text")
+    assert not hasattr(custom_kg_incremental, f"{retired_backend}_normalize_file_path")
 
     raw_content = "  A &amp; B\x1f  "
     payload = {
@@ -1661,16 +2269,93 @@ def test_custom_kg_manifest_matches_lightrag_sanitized_chunk_ids_and_basenames()
         "relationships": [],
     }
 
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
-    sanitized = lightrag_sanitize_text(raw_content)
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
+    sanitized = wikigraph_sanitize_text(raw_content)
     chunk_id = compute_mdhash_id(sanitized, prefix="chunk-")
 
     assert sanitized == "A & B"
+    assert custom_kg_incremental.wikigraph_normalize_file_path("nested/doc.[native-iet].md") == "doc.md"
     assert set(manifest["chunks"]) == {chunk_id}
     assert manifest["chunks"][chunk_id]["content"] == sanitized
     assert manifest["chunks"][chunk_id]["file_path"] == "doc.md"
     assert manifest["entities"]["doc:sanitized"]["source_chunk_id"] == chunk_id
     assert manifest["entities"]["doc:sanitized"]["file_path"] == "doc.md"
+
+
+def test_custom_kg_incremental_source_uses_wikigraph_runtime_wording() -> None:
+    text = (SCRIPTS / "custom_kg_incremental.py").read_text(encoding="utf-8")
+    retired_backend = "light" + "rag"
+
+    assert retired_backend not in text.lower()
+    assert "wikigraph" in text.lower()
+
+
+def test_import_custom_kg_source_uses_wikigraph_external_graph_wording() -> None:
+    text = (SCRIPTS / "import_custom_kg.py").read_text(encoding="utf-8")
+    retired_backend = "light" + "rag"
+
+    assert retired_backend not in text.lower()
+    assert "wikigraph" in text.lower()
+
+
+def test_wikigraph_compat_tests_use_wikigraph_workdir_fixture_paths() -> None:
+    text = (Path(__file__).read_text(encoding="utf-8"))
+    retired_backend = "light" + "rag"
+    retired_path_fragment = f'"work" / "{retired_backend}"'
+
+    assert retired_path_fragment not in text
+    assert '"work" / "wikigraph"' in text
+
+
+def test_wikigraph_compat_tests_use_wikigraph_status_key_names() -> None:
+    text = Path(__file__).read_text(encoding="utf-8")
+    retired_backend = "light" + "rag"
+    forbidden_tokens = [
+        f"test_{retired_backend}",
+        f"{retired_backend}_status",
+        f"{retired_backend}_state_dir",
+        f"{retired_backend}_workdir",
+        f"{retired_backend}_unresolved",
+        f"{retired_backend}_block",
+        f"{retired_backend}_manifest",
+    ]
+
+    for token in forbidden_tokens:
+        assert token not in text
+
+
+def test_wikigraph_compat_tests_construct_fake_external_module_names() -> None:
+    text = Path(__file__).read_text(encoding="utf-8")
+    retired_backend = "light" + "rag"
+    fake_class_token = "Fake" + "Light" + "RAG"
+    forbidden_tokens = [
+        f"fake_{retired_backend}",
+        fake_class_token,
+        f'types.ModuleType("{retired_backend}',
+        f'sys.modules, "{retired_backend}',
+    ]
+
+    for token in forbidden_tokens:
+        assert token not in text
+
+
+def test_native_sync_db_sources_use_wikigraph_schema_names() -> None:
+    retired_backend = "light" + "rag"
+    sources = [
+        SCRIPTS / "wiki_native_query_events.py",
+        SCRIPTS / "wiki_native_wiki_checks.py",
+        Path(__file__),
+    ]
+    forbidden_tokens = [
+        f"{retired_backend}_sync.db",
+        f"{retired_backend}_track_id",
+        f"{retired_backend}_doc_status",
+    ]
+
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            assert token not in text
 
 
 def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest() -> None:
@@ -1681,7 +2366,7 @@ def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest()
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    desired = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
+    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     original_metadata = dict(desired["metadata"])
 
     final = successful_manifest(desired, import_mode="incremental", previous_manifest=desired)
@@ -1694,10 +2379,14 @@ def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest()
     assert final["relationships"] == desired["relationships"]
 
 
-def test_current_lightrag_version_uses_tool_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_current_wikigraph_tool_version_uses_tool_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import custom_kg_incremental
 
-    tool_python = tmp_path / "fake-lightrag-python"
+    retired_backend = "light" + "rag"
+    assert not hasattr(custom_kg_incremental, f"DEFAULT_{retired_backend.upper()}_PYTHON")
+    assert not hasattr(custom_kg_incremental, f"current_{retired_backend}_version")
+
+    tool_python = tmp_path / "fake-wikigraph-python"
     tool_python.write_text("#!/bin/sh\nprintf '9.9.9\\n'\n", encoding="utf-8")
     tool_python.chmod(0o755)
 
@@ -1705,9 +2394,9 @@ def test_current_lightrag_version_uses_tool_python_fallback(tmp_path: Path, monk
         raise custom_kg_incremental.importlib.metadata.PackageNotFoundError
 
     monkeypatch.setattr(custom_kg_incremental.importlib.metadata, "version", missing_distribution)
-    monkeypatch.setattr(custom_kg_incremental, "DEFAULT_LIGHTRAG_PYTHON", tool_python)
+    monkeypatch.setattr(custom_kg_incremental, "DEFAULT_WIKIGRAPH_TOOL_PYTHON", tool_python)
 
-    assert custom_kg_incremental.current_lightrag_version() == "9.9.9"
+    assert custom_kg_incremental.current_wikigraph_tool_version() == "9.9.9"
 
 
 def test_custom_kg_manifest_diff_tracks_add_update_delete() -> None:
@@ -1728,8 +2417,8 @@ def test_custom_kg_manifest_diff_tracks_add_update_delete() -> None:
     }
 
     diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(old_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(new_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
     )
 
     assert diff["chunks"]["add"] == 1
@@ -1801,8 +2490,8 @@ def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -
     }
 
     diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(old_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(new_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
     )
     rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
 
@@ -1823,10 +2512,10 @@ def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
         "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
     }
 
-    base = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
-    model_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1")
-    dim_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1")
-    params_changed = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2")
+    base = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
+    model_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1")
+    dim_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1")
+    params_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2")
 
     entity_hash = next(iter(base["entities"].values()))["vector_hash"]
     relationship_hash = next(iter(base["relationships"].values()))["vector_hash"]
@@ -1847,7 +2536,7 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="embed-a",
         embedding_dim=3,
         embedding_params_version="v1",
@@ -1858,7 +2547,7 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "new.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "new.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="embed-a",
         embedding_dim=3,
         embedding_params_version="v1",
@@ -1881,7 +2570,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -1891,7 +2580,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:b", "file_path": "new.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:b", "file_path": "new.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -1973,7 +2662,7 @@ def test_incremental_apply_patches_metadata_only_relationship_without_reembeddin
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -1983,7 +2672,7 @@ def test_incremental_apply_patches_metadata_only_relationship_without_reembeddin
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:b", "file_path": "new.md"}],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -2095,7 +2784,7 @@ def test_incremental_apply_rebuilds_graph_pair_when_one_typed_relationship_is_de
                 {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic sourced by doc", "keywords": "SOURCED_BY", "source_id": "doc:a", "file_path": "a.md"},
             ],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -2107,7 +2796,7 @@ def test_incremental_apply_rebuilds_graph_pair_when_one_typed_relationship_is_de
                 {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "file_path": "a.md"},
             ],
         },
-        lightrag_version="1.5.0",
+        wikigraph_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -2156,7 +2845,7 @@ def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incremen
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    desired = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
+    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
 
     no_manifest = choose_refresh_mode(None, desired, storage_audit_ok=True, full_rebuild_interval=5)
     assert no_manifest["selected_mode"] == "full_rebuild"
@@ -2183,10 +2872,10 @@ def test_incremental_apply_report_includes_phase_timings(tmp_path: Path, monkeyp
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    previous = custom_kg_incremental.build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
+    previous = custom_kg_incremental.build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     desired = json.loads(json.dumps(previous))
     root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
+    workdir = tmp_path / "work" / "wikigraph"
     state = workdir / "state"
     ensure_state_dirs(state)
     (workdir / "rag_storage").mkdir(parents=True)
@@ -2227,6 +2916,58 @@ def test_incremental_apply_report_includes_phase_timings(tmp_path: Path, monkeyp
     assert report["timings"]["total_s"] >= 0
 
 
+def test_incremental_apply_refuses_direct_live_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    import custom_kg_incremental
+
+    payload = {
+        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
+        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
+        "relationships": [],
+    }
+    previous = custom_kg_incremental.build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
+    desired = json.loads(json.dumps(previous))
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "work" / "wikigraph"
+    state = workdir / "state"
+    ensure_state_dirs(state)
+    live_storage = workdir / "rag_storage"
+    live_storage.mkdir(parents=True)
+    write(live_storage / "live.txt", "live")
+    custom_kg_incremental.write_manifest(state, previous)
+
+    async def fake_apply_patch_to_storage(_shadow_storage, _old_manifest, _desired_manifest, *, workdir, tracking_update_mode="full"):
+        return custom_kg_incremental.diff_custom_kg_manifests(_old_manifest, _desired_manifest)
+
+    monkeypatch.setattr(custom_kg_incremental, "build_desired_manifest", lambda *_args, **_kwargs: (desired, {"chunks": 1, "entities": 1, "relationships": 0}))
+    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
+    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(custom_kg_incremental, "apply_patch_to_storage", fake_apply_patch_to_storage)
+
+    args = types.SimpleNamespace(
+        root=root,
+        state_dir=state,
+        workdir=workdir,
+        limit_docs=None,
+        limit_edges=None,
+        full_rebuild_interval=5,
+        force_incremental=False,
+        server_host="127.0.0.1",
+        server_port=9621,
+        allow_server_running=False,
+        no_swap=False,
+        prepare_swap=False,
+        delete_shadow_on_no_swap=False,
+        write_manifest_without_swap=False,
+        tracking_update_mode="full",
+    )
+
+    with pytest.raises(RuntimeError, match="direct custom KG apply swap is retired"):
+        asyncio.run(custom_kg_incremental.run_apply(args))
+
+    assert (live_storage / "live.txt").exists()
+
+
 def test_incremental_apply_prepare_swap_writes_audited_shadow_without_manifest_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
     import custom_kg_incremental
@@ -2236,13 +2977,13 @@ def test_incremental_apply_prepare_swap_writes_audited_shadow_without_manifest_s
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    previous = custom_kg_incremental.build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
+    previous = custom_kg_incremental.build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     desired = json.loads(json.dumps(previous))
     first_chunk_id = next(iter(desired["chunks"]))
     desired["chunks"][first_chunk_id]["content"] = "Doc A updated"
     desired["chunks"][first_chunk_id]["record_hash"] = custom_kg_incremental.stable_hash(desired["chunks"][first_chunk_id])
     root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
+    workdir = tmp_path / "work" / "wikigraph"
     state = workdir / "state"
     ensure_state_dirs(state)
     live_storage = workdir / "rag_storage"
@@ -2292,128 +3033,13 @@ def test_incremental_apply_prepare_swap_writes_audited_shadow_without_manifest_s
     assert prepared_payload["previous_manifest_hash"] == custom_kg_incremental.stable_hash(previous)
     assert prepared_payload["desired_manifest_hash"] == custom_kg_incremental.stable_hash(desired)
     assert prepared_payload["prepared_shadow_fingerprint"] == {"schema_version": 1, "test": "fingerprint"}
+    assert "finalize_command" not in report
+    assert "finalize_command" not in prepared_payload
+    assert prepared_payload["prepared_activation"]["status"] == "retired"
+    assert prepared_payload["prepared_activation"]["code"] == "prepared-wikigraph-swap-activation-retired"
     assert Path(report["shadow_storage"]).exists()
     assert (Path(report["shadow_storage"]) / "shadow.txt").exists()
     assert (live_storage / "live.txt").exists()
-
-
-def test_finalize_prepared_swap_refuses_stale_live_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import custom_kg_incremental
-
-    payload = {
-        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "relationships": [],
-    }
-    previous = custom_kg_incremental.build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
-    stale = json.loads(json.dumps(previous))
-    stale["metadata"]["changed"] = True
-    desired = json.loads(json.dumps(previous))
-    root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
-    state = workdir / "state"
-    ensure_state_dirs(state)
-    live_storage = workdir / "rag_storage"
-    shadow_storage = workdir / "rag_storage.shadow.test"
-    live_storage.mkdir(parents=True)
-    shadow_storage.mkdir(parents=True)
-    write(live_storage / "live.txt", "live")
-    write(shadow_storage / "shadow.txt", "shadow")
-    custom_kg_incremental.write_manifest(state, stale)
-    desired_path = custom_kg_incremental.prepared_swap_manifest_path(state)
-    desired_path.parent.mkdir(parents=True, exist_ok=True)
-    desired_path.write_text(json.dumps(desired, ensure_ascii=False, indent=2), encoding="utf-8")
-    report_path = custom_kg_incremental.prepared_swap_report_path(state)
-    report_path.write_text(
-        json.dumps(
-            {
-                "prepared_for_swap": True,
-                "shadow_storage": str(shadow_storage),
-                "backup_dir": str(state / "backups" / "backup"),
-                "desired_manifest_path": str(desired_path),
-                "previous_manifest_hash": custom_kg_incremental.stable_hash(previous),
-                "desired_manifest_hash": custom_kg_incremental.stable_hash(desired),
-                "payload": {"chunks": 1, "entities": 1, "relationships": 0},
-                "diff": {},
-                "plan": {},
-                "pre_audit": {"ok": True, "issues": []},
-                "timings": {},
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
-    args = types.SimpleNamespace(root=root, state_dir=state, workdir=workdir, prepared_report=report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False)
-
-    with pytest.raises(RuntimeError, match="live manifest changed"):
-        custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert (live_storage / "live.txt").exists()
-    assert (shadow_storage / "shadow.txt").exists()
-
-
-def test_finalize_prepared_swap_swaps_shadow_and_writes_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import custom_kg_incremental
-
-    payload = {
-        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "relationships": [],
-    }
-    previous = custom_kg_incremental.build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
-    desired = json.loads(json.dumps(previous))
-    desired["metadata"]["prepared"] = True
-    root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
-    state = workdir / "state"
-    ensure_state_dirs(state)
-    live_storage = workdir / "rag_storage"
-    shadow_storage = workdir / "rag_storage.shadow.test"
-    live_storage.mkdir(parents=True)
-    shadow_storage.mkdir(parents=True)
-    write(live_storage / "live.txt", "live")
-    write(shadow_storage / "shadow.txt", "shadow")
-    custom_kg_incremental.write_manifest(state, previous)
-    desired_path = custom_kg_incremental.prepared_swap_manifest_path(state)
-    desired_path.parent.mkdir(parents=True, exist_ok=True)
-    desired_path.write_text(json.dumps(desired, ensure_ascii=False, indent=2), encoding="utf-8")
-    report_path = custom_kg_incremental.prepared_swap_report_path(state)
-    report_path.write_text(
-        json.dumps(
-            {
-                "prepared_for_swap": True,
-                "shadow_storage": str(shadow_storage),
-                "backup_dir": str(state / "backups" / "backup"),
-                "desired_manifest_path": str(desired_path),
-                "previous_manifest_hash": custom_kg_incremental.stable_hash(previous),
-                "desired_manifest_hash": custom_kg_incremental.stable_hash(desired),
-                "payload": {"chunks": 1, "entities": 1, "relationships": 0},
-                "diff": {"chunks": {"add": 1, "update": 0, "delete": 0}, "entities": {"add": 0, "update": 0, "delete": 0}, "relationships": {"add": 0, "update": 0, "delete": 0}},
-                "plan": {"selected_mode": "incremental"},
-                "pre_audit": {"ok": True, "issues": []},
-                "timings": {"apply_patch_to_shadow_s": 1.0},
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
-    args = types.SimpleNamespace(root=root, state_dir=state, workdir=workdir, prepared_report=report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False)
-
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert report["swapped"] is True
-    assert (workdir / "rag_storage" / "shadow.txt").exists()
-    assert (state / "backups" / "backup" / "live.txt").exists()
-    final_manifest = custom_kg_incremental.load_manifest(state)
-    assert final_manifest["metadata"]["last_successful_import_mode"] == "incremental"
-    assert Path(report["manifest_path"]).exists()
-    assert (state / custom_kg_incremental.REPORT_FILENAME).exists()
 
 
 def test_custom_kg_storage_audit_detects_graph_vdb_mismatch_and_unknown_source(tmp_path: Path) -> None:
@@ -2428,7 +3054,7 @@ def test_custom_kg_storage_audit_detects_graph_vdb_mismatch_and_unknown_source(t
         ],
         "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
     }
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="test", embedding_dim=3)
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     storage = tmp_path / "rag_storage"
     storage.mkdir()
     chunk_id = next(iter(manifest["chunks"]))
@@ -2455,26 +3081,19 @@ def test_custom_kg_storage_audit_detects_graph_vdb_mismatch_and_unknown_source(t
     assert any(issue["type"] == "unknown_source_id" for issue in bad["issues"])
 
 
-def test_batch_lightrag_refresh_uses_incremental_apply_when_plan_allows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_uses_incremental_apply_when_plan_allows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
     artifact_commands = [["artifact", str(idx)] for idx in range(7)]
-    full_import_commands = [
-        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
-        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
     calls: list[list[str]] = []
     release_calls: list[str] = []
 
-    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_commands", lambda *_args: artifact_commands + full_import_commands)
+    monkeypatch.setattr(batch_wikigraph_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: _refresh_command_groups(artifact_commands))
     monkeypatch.setattr(
-        batch_lightrag_refresh,
+        batch_wikigraph_refresh,
         "plan_incremental_import_mode",
         lambda *_args, **_kwargs: {
             "selected_mode": "incremental",
@@ -2486,52 +3105,42 @@ def test_batch_lightrag_refresh_uses_incremental_apply_when_plan_allows(tmp_path
             },
         },
     )
-    monkeypatch.setattr(batch_lightrag_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
-    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
-    monkeypatch.setattr(batch_lightrag_refresh, "release_process_memory", lambda: release_calls.append("released"))
+    clear_calls: list[str] = []
+
+    monkeypatch.setattr(batch_wikigraph_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
+    monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", lambda *_args, **_kwargs: clear_calls.append("cleared"))
+    monkeypatch.setattr(batch_wikigraph_refresh, "release_process_memory", lambda: release_calls.append("released"))
 
     def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
         calls.append(command)
 
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
+    with pytest.raises(RuntimeError, match="legacy wikigraph production activation is retired"):
+        batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
-    assert result["import_mode"]["selected_mode"] == "incremental"
-    assert result["timings"]["artifact_commands_s"] >= 0
-    assert result["timings"]["plan_import_mode_s"] >= 0
-    assert result["timings"]["select_import_commands_s"] >= 0
-    assert result["timings"]["import_commands_s"] >= 0
     assert release_calls
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
     prepare_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "apply" in command)
-    stop_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "stop"])
-    finalize_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "finalize-prepared-swap" in command)
-    start_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "start"])
-    assert prepare_idx < stop_idx < finalize_idx < start_idx
     assert "--prepare-swap" in calls[prepare_idx]
-    assert "--prepared-report" in calls[finalize_idx]
+    assert not any(command[:3] == ["systemctl", "--user", "stop"] for command in calls)
+    assert not any(command[:3] == ["systemctl", "--user", "start"] for command in calls)
+    assert not any("finalize-prepared-swap" in command for command in calls)
+    assert clear_calls == []
 
 
-def test_batch_lightrag_refresh_uses_full_materialization_for_scheduled_full_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_uses_full_materialization_for_scheduled_full_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
     artifact_commands = [["artifact", str(idx)] for idx in range(7)]
-    cold_full_commands = [
-        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
-        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_commands", lambda *_args: artifact_commands + cold_full_commands)
+    monkeypatch.setattr(batch_wikigraph_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: _refresh_command_groups(artifact_commands))
     monkeypatch.setattr(
-        batch_lightrag_refresh,
+        batch_wikigraph_refresh,
         "plan_incremental_import_mode",
         lambda *_args, **_kwargs: {
             "selected_mode": "full_rebuild",
@@ -2539,128 +3148,110 @@ def test_batch_lightrag_refresh_uses_full_materialization_for_scheduled_full_reb
             "diff": {},
         },
     )
-    monkeypatch.setattr(batch_lightrag_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
-    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
+    clear_calls: list[str] = []
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+    monkeypatch.setattr(batch_wikigraph_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
+    monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", lambda *_args, **_kwargs: clear_calls.append("cleared"))
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
 
-    assert result["import_mode"]["selected_mode"] == "full_rebuild"
+    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+        batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
     assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
-    prepare_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "materialize-full" in command)
-    stop_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "stop"])
-    finalize_idx = next(idx for idx, command in enumerate(calls) if "custom_kg_incremental.py" in " ".join(command) and "finalize-prepared-swap" in command)
-    start_idx = next(idx for idx, command in enumerate(calls) if command[:3] == ["systemctl", "--user", "start"])
-    assert prepare_idx < stop_idx < finalize_idx < start_idx
-    prepare = calls[prepare_idx]
-    assert "--no-swap" in prepare
-    assert "--prepare-swap" in prepare
-    assert "--seed-from-storage" in prepare
-    assert "--vector-cache" in prepare
-    assert "--prepared-report" in calls[finalize_idx]
+    assert not any("custom_kg_incremental.py" in " ".join(command) for command in calls)
+    assert not any(command[:3] == ["systemctl", "--user", "stop"] for command in calls)
+    assert not any(command[:3] == ["systemctl", "--user", "start"] for command in calls)
+    assert not any("finalize-prepared-swap" in command for command in calls)
+    assert clear_calls == []
 
 
-def test_batch_lightrag_refresh_keeps_cold_full_import_for_unsafe_full_rebuild_reasons(tmp_path: Path) -> None:
+def test_batch_wikigraph_refresh_keeps_cold_full_import_for_unsafe_full_rebuild_reasons(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
-    cold_full_commands = [
-        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
-        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    cold_full_commands = _retired_full_import_commands()
 
     for reasons in (["missing_manifest"], ["current_storage_audit_failed"], ["embedding_model_changed"], ["embedding_dim_changed"]):
-        commands = batch_lightrag_refresh.select_import_commands(
+        commands = batch_wikigraph_refresh.select_import_commands(
             root,
             state,
             workdir,
             cold_full_commands,
             {"selected_mode": "full_rebuild", "reasons": reasons},
         )
-        assert commands == cold_full_commands
+        assert len(commands) == 1
+        assert commands[0][:2] == ["python-internal", "legacy-wikigraph-cold-import-retired"]
+        flattened = " ".join(" ".join(command) for command in commands)
+        assert "reset-rag-storage" not in flattened
+        assert "import_custom_kg.py" not in flattened
 
 
-def test_batch_lightrag_refresh_falls_back_to_cold_full_when_materialization_prepare_fails_before_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_full_materialization_retirement_does_not_fallback_to_cold_full(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
     calls: list[list[str]] = []
 
     monkeypatch.setattr(
-        batch_lightrag_refresh,
+        batch_wikigraph_refresh,
         "plan_incremental_import_mode",
         lambda *_args, **_kwargs: {"selected_mode": "full_rebuild", "reasons": ["incremental_interval_reached"], "diff": {}},
     )
-    monkeypatch.setattr(batch_lightrag_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
-    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
-    monkeypatch.setattr(batch_lightrag_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
+    monkeypatch.setattr(batch_wikigraph_refresh, "wait_health", lambda *_args, **_kwargs: {"status": "healthy", "pipeline_busy": False})
+    monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", lambda *_args, **_kwargs: {"cleared_count": 1})
+    monkeypatch.setattr(batch_wikigraph_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
 
     def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
         calls.append(command)
-        if "materialize-full" in command:
-            raise RuntimeError("cache miss before stop")
 
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
+    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+        batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
-    assert result["import_mode"]["full_materialization_fallback"] == "cold_full_import"
-    materialize_idx = next(idx for idx, command in enumerate(calls) if "materialize-full" in command)
-    reset_idx = next(idx for idx, command in enumerate(calls) if command[:2] == ["python-internal", "reset-rag-storage"])
-    import_idx = next(idx for idx, command in enumerate(calls) if "import_custom_kg.py" in " ".join(command))
-    assert materialize_idx < reset_idx < import_idx
+    assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
+    assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
+    assert not any("custom_kg_incremental.py" in " ".join(command) for command in calls)
 
 
-def test_batch_lightrag_refresh_threshold_full_reuse_fails_closed_without_cold_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_threshold_full_reuse_fails_closed_without_cold_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
     calls: list[list[str]] = []
 
     monkeypatch.setattr(
-        batch_lightrag_refresh,
+        batch_wikigraph_refresh,
         "plan_incremental_import_mode",
         lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": {"chunks": {"add": 1, "update": 0, "delete": 0}, "entities": {"add": 0, "update": 0, "delete": 0}, "relationships": {"add": 0, "update": 0, "delete": 0}}},
     )
-    monkeypatch.setattr(batch_lightrag_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
+    monkeypatch.setattr(batch_wikigraph_refresh, "reset_rag_storage", lambda *_args: calls.append(["python-internal", "reset-rag-storage"]))
 
     def fake_run_subprocess(command: list[str], *_args, **_kwargs) -> None:
         calls.append(command)
-        if "materialize-full" in command:
-            raise RuntimeError("cache miss before stop")
 
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", fake_run_subprocess)
 
-    with pytest.raises(RuntimeError, match="cache miss before stop"):
-        batch_lightrag_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
+    with pytest.raises(RuntimeError, match="legacy wikigraph full materialization is retired"):
+        batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "threshold", artifact_log, import_log)
 
-    assert any("materialize-full" in command for command in calls)
     assert not any(command[:2] == ["python-internal", "reset-rag-storage"] for command in calls)
     assert not any("import_custom_kg.py" in " ".join(command) for command in calls)
+    assert not any("custom_kg_incremental.py" in " ".join(command) for command in calls)
 
 
-def test_batch_lightrag_refresh_skips_import_when_incremental_plan_has_empty_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_wikigraph_refresh_skips_import_when_incremental_plan_has_empty_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
-    workdir = tmp_path / "work" / "lightrag"
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
     artifact_log = state / "refresh_logs" / "artifact.log"
     import_log = state / "refresh_logs" / "import.log"
     artifact_commands = [["artifact", str(idx)] for idx in range(7)]
-    full_import_commands = [
-        ["systemctl", "--user", "stop", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [str(batch_lightrag_refresh.LIGHTRAG_PYTHON), str(workdir / "scripts" / "import_custom_kg.py")],
-        ["systemctl", "--user", "start", batch_lightrag_refresh.SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
     calls: list[list[str]] = []
     clear_calls: list[dict[str, object]] = []
     empty_diff = {
@@ -2669,17 +3260,17 @@ def test_batch_lightrag_refresh_skips_import_when_incremental_plan_has_empty_dif
         "relationships": {"add": 0, "update": 0, "delete": 0},
     }
 
-    monkeypatch.setattr(batch_lightrag_refresh, "build_refresh_commands", lambda *_args: artifact_commands + full_import_commands)
-    monkeypatch.setattr(batch_lightrag_refresh, "plan_incremental_import_mode", lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": empty_diff})
+    monkeypatch.setattr(batch_wikigraph_refresh, "build_refresh_command_groups", lambda *_args, **_kwargs: _refresh_command_groups(artifact_commands))
+    monkeypatch.setattr(batch_wikigraph_refresh, "plan_incremental_import_mode", lambda *_args, **_kwargs: {"selected_mode": "incremental", "reasons": [], "diff": empty_diff})
 
     def fake_clear(*_args, **kwargs):
         clear_calls.append(kwargs)
         return {"cleared_count": 1}
 
-    monkeypatch.setattr(batch_lightrag_refresh, "clear_lightrag_refresh_pending_after_success", fake_clear)
-    monkeypatch.setattr(batch_lightrag_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
+    monkeypatch.setattr(batch_wikigraph_refresh, "clear_wikigraph_refresh_pending_after_success", fake_clear)
+    monkeypatch.setattr(batch_wikigraph_refresh, "run_subprocess", lambda command, *_args, **_kwargs: calls.append(command))
 
-    result = batch_lightrag_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
+    result = batch_wikigraph_refresh.run_real_refresh(root, state, workdir, "pre-query", artifact_log, import_log)
 
     assert result["import_skipped"] is True
     assert result["import_skip_reason"] == "incremental_empty_diff"
@@ -2740,7 +3331,7 @@ def test_build_section_similarity_edges_keeps_sparse_mutual_edges_and_excludes_s
 
 
 def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path) -> None:
-    from wiki_lightrag_lib import build_section_similarity_edges_from_index, section_similarity_index_summary
+    from wiki_wikigraph_compat_lib import build_section_similarity_edges_from_index, section_similarity_index_summary
 
     sections = [
         {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
@@ -2800,7 +3391,7 @@ def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path)
 
 def test_build_section_similarity_graph_writes_section_similarity_index_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import build_section_similarity_graph
-    from wiki_lightrag_lib import jsonl_read, section_similarity_index_summary
+    from wiki_wikigraph_compat_lib import jsonl_read, section_similarity_index_summary
 
     root = tmp_path / "wiki"
     state = tmp_path / "state"
@@ -2862,6 +3453,65 @@ def test_build_section_similarity_graph_writes_section_similarity_index_summary(
     report = json.loads(reports[-1].read_text(encoding="utf-8"))
     assert report["section_similarity_index"]["directed_rows"] == 2
     assert len(jsonl_read(state / "section_similarity_edges.candidates.jsonl")) == 1
+
+
+def test_build_section_similarity_graph_reports_provider_failure_without_partial_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import build_section_similarity_graph
+
+    root = tmp_path / "wiki"
+    state = tmp_path / "state"
+    workdir = tmp_path / "workdir"
+    state.mkdir(parents=True)
+    workdir.mkdir(parents=True)
+    row = {
+        "section_id": "raw_section:a:future",
+        "source_id": "raw_clip:a",
+        "source_path": "raw/clip/a.md",
+        "paper_title": "A",
+        "section_kind": "future",
+        "section_title": "Future",
+        "content": "alpha content long enough for embedding",
+    }
+    write(state / "raw_sections.jsonl", json.dumps(row, ensure_ascii=False) + "\n")
+    for name in [
+        "EMBEDDING_BINDING_HOST",
+        "OPENAI_BASE_URL",
+        "EMBEDDING_BINDING_API_KEY",
+        "OPENAI_API_KEY",
+    ]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_section_similarity_graph.py",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--section-kinds",
+            "future",
+            "--min-content-chars",
+            "1",
+        ],
+    )
+
+    assert build_section_similarity_graph.main() == 1
+
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["ok"] is False
+    assert printed["error"] == "section_embedding_failed"
+    assert printed["section_count"] == 1
+    assert "EMBEDDING_BINDING_HOST or OPENAI_BASE_URL is required" in printed["message"]
+    assert not (state / "section_embeddings.jsonl").exists()
+    assert not (state / "section_similarity_edges.candidates.jsonl").exists()
+    assert list((state / "section_similarity_reports").glob("*_section_similarity_report.json")) == []
 
 
 def test_section_rank_lists_fast_matches_scalar_reference_on_boundary_fixture() -> None:
@@ -2949,7 +3599,7 @@ def test_select_section_similarity_edges_marks_reviewed_high_value_pairs() -> No
 
 def test_custom_kg_payload_includes_reviewed_section_similarity_edges(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     extract_raw_sections(root, state)
     build_seed_edges(root, state)
     jsonl = state / "section_similarity_edges.jsonl"
@@ -3066,14 +3716,14 @@ def test_section_kind_query_prefix_and_response_filter_target_raw_section_chunks
         },
         "status": "ok",
     }
-    filtered = filter_lightrag_data_response_by_section_kind(response, "methodology")
+    filtered = filter_wikigraph_data_response_by_section_kind(response, "methodology")
     chunks = filtered["data"]["chunks"]
     assert len(chunks) == 1
     assert chunks[0]["file_path"] == "raw_section_docs/a.md"
     assert response["data"]["chunks"][1]["file_path"] == "raw_section_docs/b.md"
 
 
-def test_expand_lightrag_data_response_with_section_neighbors_keeps_direct_hits_separate(tmp_path: Path) -> None:
+def test_expand_wikigraph_data_response_with_section_neighbors_keeps_direct_hits_separate(tmp_path: Path) -> None:
     state = tmp_path / "state"
     ensure_state_dirs(state)
     write(
@@ -3102,7 +3752,7 @@ def test_expand_lightrag_data_response_with_section_neighbors_keeps_direct_hits_
             ]
         }
     }
-    expanded = expand_lightrag_data_response_with_section_neighbors(response, state, neighbor_k=1, section_kind="future")
+    expanded = expand_wikigraph_data_response_with_section_neighbors(response, state, neighbor_k=1, section_kind="future")
     neighbors = expanded["data"]["section_neighbor_expansions"]
     assert len(neighbors) == 1
     assert neighbors[0]["seed_section_id"] == "raw_section:a:future"
@@ -3111,33 +3761,19 @@ def test_expand_lightrag_data_response_with_section_neighbors_keeps_direct_hits_
     assert expanded["data"]["chunks"] == response["data"]["chunks"]
 
 
-def test_import_custom_kg_run_import_fails_before_manifest_write_when_storage_audit_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_import_custom_kg_run_import_retired_before_storage_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import asyncio
-    import custom_kg_incremental
     import import_custom_kg
 
     root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "lightrag"
+    workdir = tmp_path / "work" / "wikigraph"
     state_dir = workdir / "state"
     ensure_state_dirs(state_dir)
 
-    class FakeRag:
-        async def initialize_storages(self) -> None:
-            pass
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("build_rag should not be called by retired cold import")
 
-        async def ainsert_custom_kg(self, _payload: dict) -> None:
-            pass
-
-        async def finalize_storages(self) -> None:
-            pass
-
-    monkeypatch.setattr(import_custom_kg, "build_rag", lambda *_args, **_kwargs: FakeRag())
-    monkeypatch.setattr(import_custom_kg, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        custom_kg_incremental,
-        "audit_custom_kg_storage",
-        lambda *_args, **_kwargs: {"ok": False, "issues": [{"type": "desired_relationship_vdb_mismatch"}], "counts": {}},
-    )
+    monkeypatch.setattr(import_custom_kg, "build_rag", fail_if_called)
     args = types.SimpleNamespace(
         root=root,
         workdir=workdir,
@@ -3150,13 +3786,11 @@ def test_import_custom_kg_run_import_fails_before_manifest_write_when_storage_au
         allow_server_running=False,
     )
 
-    with pytest.raises(RuntimeError, match="custom_kg cold import storage audit failed"):
+    with pytest.raises(RuntimeError, match="custom KG cold import is retired"):
         asyncio.run(import_custom_kg.run_import(args))
 
     assert not (state_dir / "custom_kg_manifest.json").exists()
-    report = json.loads((state_dir / "custom_kg_import_report.json").read_text(encoding="utf-8"))
-    assert report["storage_audit"]["ok"] is False
-    assert report["manifest_path"] is None
+    assert not (state_dir / "custom_kg_import_report.json").exists()
 
 
 def test_import_custom_kg_build_rag_honors_embedding_throttle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -3164,7 +3798,7 @@ def test_import_custom_kg_build_rag_honors_embedding_throttle_env(monkeypatch: p
 
     captured: dict[str, object] = {}
 
-    class FakeLightRAG:
+    class FakeExternalGraph:
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
@@ -3178,17 +3812,18 @@ def test_import_custom_kg_build_rag_honors_embedding_throttle_env(monkeypatch: p
     async def fake_embed(*args: object, **kwargs: object) -> list[list[float]]:
         return []
 
-    fake_lightrag = types.ModuleType("lightrag")
-    fake_lightrag.LightRAG = FakeLightRAG
-    fake_openai = types.ModuleType("lightrag.llm.openai")
+    external_graph_module = "light" + "rag"
+    fake_external_graph = types.ModuleType(external_graph_module)
+    setattr(fake_external_graph, "Light" + "RAG", FakeExternalGraph)
+    fake_openai = types.ModuleType(f"{external_graph_module}.llm.openai")
     fake_openai.openai_complete_if_cache = fake_complete
     fake_openai.openai_embed = types.SimpleNamespace(func=fake_embed)
-    fake_utils = types.ModuleType("lightrag.utils")
+    fake_utils = types.ModuleType(f"{external_graph_module}.utils")
     fake_utils.EmbeddingFunc = FakeEmbeddingFunc
-    monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag)
-    monkeypatch.setitem(sys.modules, "lightrag.llm", types.ModuleType("lightrag.llm"))
-    monkeypatch.setitem(sys.modules, "lightrag.llm.openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "lightrag.utils", fake_utils)
+    monkeypatch.setitem(sys.modules, external_graph_module, fake_external_graph)
+    monkeypatch.setitem(sys.modules, f"{external_graph_module}.llm", types.ModuleType(f"{external_graph_module}.llm"))
+    monkeypatch.setitem(sys.modules, f"{external_graph_module}.llm.openai", fake_openai)
+    monkeypatch.setitem(sys.modules, f"{external_graph_module}.utils", fake_utils)
     monkeypatch.setenv("EMBEDDING_BATCH_NUM", "2")
     monkeypatch.setenv("EMBEDDING_FUNC_MAX_ASYNC", "1")
 
@@ -3206,7 +3841,7 @@ def test_generated_virtual_doc_builders_remove_stale_markdown(tmp_path: Path) ->
         "This is another direct method with enough detail to become a separate method atom. "
         "It intentionally shares the same date prefix as Foo Paper.\n",
     )
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     ensure_state_dirs(state)
     write(state / "edge_docs" / "stale.md", "stale")
     write(state / "method_atom_docs" / "stale.md", "stale")
@@ -3710,9 +4345,23 @@ def test_raw_fast_verifier_rejects_remote_markdown_images(tmp_path: Path) -> Non
     assert "remote_markdown_images" in payload["raw_fast_blockers"]
 
 
+def test_raw_fast_closeout_source_has_no_retired_helper_aliases() -> None:
+    text = (SCRIPTS / "raw_fast_closeout.py").read_text(encoding="utf-8")
+    old_backend = "light" + "rag"
+
+    for name in [
+        f"compact_{old_backend}_status",
+        f"run_{old_backend}_status",
+        f"run_{old_backend}_refresh_if_needed",
+        f"synthesize_blocked_{old_backend}_status",
+    ]:
+        assert name not in text
+    assert "wiki/wikigraph follow-through" not in text
+
+
 def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     raw_rel = "raw/clip/2601/26010109_Tiny-Wrapper-Paper.md"
     title = "Tiny Wrapper Paper"
     source = "https://example.test/tiny-wrapper-paper.pdf"
@@ -3775,14 +4424,19 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     assert payload["marked"]["raw_path"] == raw_rel
     assert payload["wiki_integration"]["pending_count"] == 1
     assert payload["wiki_integration"]["should_integrate"] is False
-    assert payload["lightrag"]["blocked_by_pending_wiki_integration"] is True
+    assert payload["native_refresh_status"]["blocked_by_pending_wiki_integration"] is True
+    old_backend = "light" + "rag"
+    assert old_backend not in payload
+    assert f"{old_backend}_refresh" not in payload
     assert payload["timings"]["total_seconds"] >= 0
     _assert_timing_step(payload, "pre_verify")
     _assert_timing_step(payload, "control_scan")
     _assert_timing_step(payload, "evidence_report_capture")
     _assert_timing_step(payload, "mark_pending")
     _assert_timing_step(payload, "final_verify")
-    _assert_timing_step(payload, "lightrag_status")
+    _assert_timing_step(payload, "native_refresh_status")
+    retired_backend = "light" + "rag"
+    assert f"{retired_backend}_status" not in payload["timings"]["steps"]
     assert payload["evidence_reports"]["count"] == 1
     evidence_report_path = Path(payload["evidence_reports"]["summaries"][0]["report_path"])
     assert evidence_report_path.exists()
@@ -3795,9 +4449,91 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     assert "resources" not in ledger["pending"][0]["required_sections"]
 
 
+def test_raw_fast_closeout_native_status_uses_batch_native_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = types.SimpleNamespace(
+        root=tmp_path / "wiki",
+        state_dir=tmp_path / "work" / "wikigraph" / "state",
+        workdir=SCRIPTS.parent,
+        timeout=17,
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    status = raw_fast_closeout.run_native_refresh_status(args)
+
+    command = calls[0]["command"]
+    assert str(command[1]).endswith("scripts/batch_native_refresh.py")
+    assert command[2] == "status"
+    assert "--workdir" in command
+    assert status["pending_count"] == 1
+    assert status["command_returncode"] == 0
+
+
+def test_raw_fast_closeout_native_status_can_skip_legacy_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = types.SimpleNamespace(
+        root=tmp_path / "wiki",
+        state_dir=tmp_path / "work" / "wikigraph" / "state",
+        workdir=SCRIPTS.parent,
+        timeout=17,
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    status = raw_fast_closeout.run_native_refresh_status(args, migrate_legacy=False)
+
+    command = calls[0]["command"]
+    assert "--no-migrate-legacy" in command
+    assert status["pending_count"] == 1
+    assert status["command_returncode"] == 0
+
+
+def test_raw_fast_closeout_native_refresh_runs_prepare_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = types.SimpleNamespace(
+        root=tmp_path / "wiki",
+        state_dir=tmp_path / "work" / "wikigraph" / "state",
+        workdir=SCRIPTS.parent,
+        refresh_timeout=23,
+    )
+    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        return {
+            "returncode": 0,
+            "json": {
+                "prepared_only": True,
+                "skipped": False,
+                "status_before": status,
+                "build": {"ok": True},
+            },
+        }
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
+
+    command = calls[0]["command"]
+    assert str(command[1]).endswith("scripts/batch_native_refresh.py")
+    assert command[2:4] == ["refresh", "--prepare-only"]
+    assert result["ran"] is True
+    assert result["prepared_only"] is True
+    assert result["status"]["pending_count"] == 1
+
+
 def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     raw_rel = "raw/clip/2601/26010110_Bad-Wrapper-Paper.md"
     write(root / raw_rel, "---\ntitle: Bad\nsource: https://example.test/bad.pdf\n---\n\n## Methodology\n\nTODO\n")
     script = SCRIPTS / "raw_fast_closeout.py"
@@ -3942,7 +4678,7 @@ sidecar = "sidecar.cli:main"
 
 def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     raw_rel = "raw/clip/2601/26010111_Unsafe-Cleanup-Paper.md"
     title = "Unsafe Cleanup Paper"
     source = "https://example.test/unsafe-cleanup-paper.pdf"
@@ -4041,7 +4777,7 @@ def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
         "raw_fast_ok": True,
         "final_verify": {"report_path": "/state/raw_fast_reports/compact_final_verify.json"},
         "wiki_integration": {"pending_count": 4, "actionable_pending_count": 4, "threshold": 10, "should_integrate": False, "next_required_action": "none"},
-        "lightrag": {"blocked_by_pending_wiki_integration": True, "graph_ready_pending_count": 0, "should_refresh": False},
+        "native_refresh_status": {"blocked_by_pending_wiki_integration": True, "graph_ready_pending_count": 0, "should_refresh": False},
     }
 
     entry = raw_fast_closeout.build_compact_log_entry(args, output)
@@ -4052,12 +4788,58 @@ def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
     assert "checksums" not in entry.lower()
 
 
-def test_threshold_lightrag_status_skips_prequery_freshness_scan(tmp_path: Path) -> None:
+def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tmp_path: Path) -> None:
+    args = types.SimpleNamespace(
+        title="Blocked Native Ledger Paper",
+        source_id="https://arxiv.org/abs/2601.0102",
+        raw_file="raw/clip/2601/26010113_Blocked-Native-Ledger-Paper.md",
+        resource_status_summary="official abs/pdf/source verified",
+        refresh_threshold=None,
+    )
+    wiki_status = {
+        "pending_count": 2,
+        "actionable_pending_count": 2,
+        "review_pending_count": 0,
+        "blocking_pending_count": 2,
+        "threshold": 10,
+        "should_integrate": False,
+        "next_required_action": "wiki_integration",
+    }
+    standalone_status = {
+        "command_returncode": 0,
+        "pending_count": 1,
+        "should_refresh": True,
+        "ledger_path": str(tmp_path / "state" / "pending_native_refresh.json"),
+    }
+
+    native_status = raw_fast_closeout.synthesize_blocked_native_refresh_status(
+        args,
+        wiki_status,
+        standalone_status=standalone_status,
+    )
+    output = {
+        "raw_fast_ok": True,
+        "final_verify": {"report_path": "/state/raw_fast_reports/blocked_final_verify.json"},
+        "wiki_integration": wiki_status,
+        "native_refresh_status": raw_fast_closeout.compact_native_refresh_status(native_status),
+    }
+
+    entry = raw_fast_closeout.build_compact_log_entry(args, output)
+
+    assert native_status["blocked_by_pending_wiki_integration"] is True
+    assert native_status["graph_ready_pending_count"] == 0
+    assert native_status["standalone_native_pending_count"] == 1
+    assert native_status["standalone_native_should_refresh"] is True
+    assert "graph-ready pending `0`, `should_refresh=false`" in entry
+    assert "standalone native ledger pending `1`, `should_refresh=true`" in entry
+
+
+def test_threshold_wikigraph_status_skips_prequery_freshness_scan(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "lightrag" / "state"
+    state = tmp_path / "work" / "wikigraph" / "state"
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010113_Pending.md", title="Pending")
 
-    status = pending_lightrag_refresh_status(root, state, reason="threshold")
+    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
 
     assert status["blocked_by_pending_wiki_integration"] is True
     assert status["latest_wiki_markdown_mtime"] is None

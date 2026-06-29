@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-from wiki_lightrag_lib import common_paths_parser, extract_raw_sections, print_json
+from wiki_native_lib import common_paths_parser, extract_raw_sections, print_json
 
 
 def main() -> int:
-    parser = common_paths_parser("Extract section-level raw-note virtual docs for LightRAG retrieval")
+    parser = common_paths_parser("Extract section-level raw-note virtual docs for native retrieval")
     args = parser.parse_args()
     result = extract_raw_sections(args.root, args.state_dir)
     print_json(result)

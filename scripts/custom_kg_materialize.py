@@ -56,7 +56,7 @@ def materialize_file_storage_from_manifest(
     resolved_vectors: dict[str, dict[str, dict[str, Any]]],
     storage_dir: Path,
 ) -> dict[str, Any]:
-    """Write a fresh LightRAG file-backend storage directory from manifest records.
+    """Write a fresh wikigraph file-backend storage directory from manifest records.
 
     All vectors must already be present in ``resolved_vectors``. Missing vectors
     fail closed so callers can run an embedding fill phase or cold fallback

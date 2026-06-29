@@ -2,11 +2,11 @@
 import json
 from pathlib import Path
 
-from wiki_lightrag_lib import common_paths_parser, ensure_state_dirs, print_json
+from wiki_native_lib import common_paths_parser, ensure_state_dirs, print_json
 
 
 def main() -> int:
-    parser = common_paths_parser("Review pending llm-wiki LightRAG connection candidates")
+    parser = common_paths_parser("Review pending llm-wiki native graph connection candidates")
     parser.add_argument("--list", choices=["pending", "accepted", "rejected", "merged", "stale"], default="pending")
     parser.add_argument("--top", type=int, default=20)
     args = parser.parse_args()

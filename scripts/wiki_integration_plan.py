@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
     ensure_state_dirs,

@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Small runtime/env helpers shared by LightRAG maintenance scripts."""
+"""Small runtime/env helpers shared by native llm-wiki maintenance scripts."""
 
 from __future__ import annotations
 
 import os
 import socket
 from pathlib import Path
+
+__all__ = [
+    "env_bool",
+    "env_float",
+    "env_int",
+    "load_env_file",
+    "port_open",
+    "redact_summary",
+]
 
 _SECRET_KEY_TOKENS = ("key", "token", "secret", "password")
 _TRUE_VALUES = {"1", "true", "yes", "on"}

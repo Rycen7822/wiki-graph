@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe incremental custom_kg maintenance for the llm-wiki LightRAG workspace.
+"""Safe incremental custom_kg maintenance for the llm-wiki wikigraph workspace.
 
 This module is deliberately conservative: it derives a complete desired manifest
 from the existing deterministic custom_kg payload, diffs that complete manifest
@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import hashlib
 import html
+import importlib
 import importlib.metadata
 import json
 import os
@@ -26,14 +27,28 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from lightrag_runtime_env import env_int, load_env_file, port_open
+from native_runtime_env import env_int, load_env_file, port_open
+from custom_kg_vector_fill import (
+    DEFAULT_EMBEDDING_PROFILE,
+    EMBEDDING_PROFILES,
+    embed_texts_openai_compatible as _native_embed_texts_openai_compatible,
+    embedding_profile_env,
+    embedding_profile_report,
+    fill_missing_manifest_vectors as _native_fill_missing_manifest_vectors,
+)
+from wiki_wikigraph_compat_names import (
+    retired_graph_env_name,
+    retired_graph_module_name,
+    retired_graph_package_name,
+    retired_graph_tool_python_path,
+)
 
-try:  # Keep tests usable in the repo Python even when LightRAG is not importable.
+try:  # Keep tests usable in the repo Python even when the external graph package is not importable.
     import networkx as nx
-except Exception:  # pragma: no cover - audit CLI depends on networkx/LightRAG env
+except Exception:  # pragma: no cover - audit CLI depends on networkx/external graph env
     nx = None  # type: ignore[assignment]
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
     DEFAULT_WORKDIR,
@@ -46,7 +61,7 @@ from wiki_lightrag_lib import (
 
 GRAPH_FIELD_SEP = "<SEP>"
 MANIFEST_SCHEMA_VERSION = 1
-RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "lightrag-pair-sorted-endpoints:v1"
+RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "wikigraph-pair-sorted-endpoints:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
 REPORT_FILENAME = "custom_kg_import_report.json"
 PREPARED_SWAP_DIRNAME = "prepared_swaps"
@@ -54,6 +69,11 @@ PREPARED_SWAP_REPORT_FILENAME = "custom_kg_prepared_swap.json"
 PREPARED_SWAP_MANIFEST_FILENAME = "custom_kg_prepared_manifest.json"
 DEFAULT_FULL_REBUILD_INTERVAL = 5
 PREPARED_SHADOW_FINGERPRINT_SCHEMA_VERSION = 1
+PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_CODE = "prepared-wikigraph-swap-activation-retired"
+PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE = (
+    "prepared wikigraph storage activation is retired; use batch_native_refresh.py refresh --cutover "
+    "or a dedicated audited migration slice instead of mutating live rag_storage"
+)
 STORAGE_AUDIT_CONTRACT_VERSION = "audit_custom_kg_storage:v1"
 CUSTOM_KG_STORAGE_AUDIT_FILES = {
     "graph": "graph_chunk_entity_relation.graphml",
@@ -64,16 +84,25 @@ CUSTOM_KG_STORAGE_AUDIT_FILES = {
     "entity_chunks": "kv_store_entity_chunks.json",
     "relation_chunks": "kv_store_relation_chunks.json",
 }
-EMBEDDING_PROFILES = {
-    "conservative": {"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"},
-    "shadow-medium": {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"},
-    "operator-fast": {"EMBEDDING_FUNC_MAX_ASYNC": "4", "EMBEDDING_BATCH_NUM": "32", "MAX_PARALLEL_INSERT": "2"},
-}
-DEFAULT_EMBEDDING_PROFILE = "conservative"
-DEFAULT_LIGHTRAG_PYTHON = Path(os.environ.get("LIGHTRAG_PYTHON", "/home/xu/.local/share/uv/tools/lightrag-hku/bin/python"))
+_EXTERNAL_GRAPH_PACKAGE = retired_graph_package_name()
+DEFAULT_WIKIGRAPH_TOOL_PYTHON = Path(
+    os.environ.get(
+        "WIKIGRAPH_TOOL_PYTHON",
+        os.environ.get(retired_graph_env_name("PYTHON"), retired_graph_tool_python_path()),
+    )
+)
 _CONTROL_CHAR_PATTERN_ALL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 _PLACEHOLDER_DOCUMENT_SOURCES = {"", "unknown", "unknown_source", "none", "null"}
+
+
+def prepared_wikigraph_swap_activation_retired_metadata() -> dict[str, str]:
+    return {
+        "status": "retired",
+        "code": PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_CODE,
+        "message": PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE,
+        "native_cutover_hint": "batch_native_refresh.py refresh --cutover",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -81,35 +110,13 @@ _PLACEHOLDER_DOCUMENT_SOURCES = {"", "unknown", "unknown_source", "none", "null"
 
 
 def compute_mdhash_id(content: str, prefix: str = "") -> str:
-    """Match LightRAG v1.5.0 ``compute_mdhash_id`` without importing LightRAG."""
+    """Match the external graph package ``compute_mdhash_id`` without importing it."""
 
     try:
         digest = hashlib.md5(str(content).encode("utf-8")).hexdigest()
     except UnicodeEncodeError:
         digest = hashlib.md5(str(content).encode("utf-8", errors="replace")).hexdigest()
     return prefix + digest
-
-
-def embedding_profile_env(profile: str | None = None) -> dict[str, str]:
-    name = profile or DEFAULT_EMBEDDING_PROFILE
-    if name not in EMBEDDING_PROFILES:
-        known = ", ".join(sorted(EMBEDDING_PROFILES))
-        raise ValueError(f"unknown embedding profile {name!r}; expected one of: {known}")
-    return dict(EMBEDDING_PROFILES[name])
-
-
-def embedding_profile_report(profile: str | None = None) -> dict[str, Any]:
-    name = profile or DEFAULT_EMBEDDING_PROFILE
-    env = embedding_profile_env(name)
-    return {
-        "name": name,
-        "env": env,
-        "batch_size": int(env["EMBEDDING_BATCH_NUM"]),
-        "concurrency": {
-            "embedding_func_max_async": int(env["EMBEDDING_FUNC_MAX_ASYNC"]),
-            "max_parallel_insert": int(env["MAX_PARALLEL_INSERT"]),
-        },
-    }
 
 
 def entity_vdb_id(entity_name: str) -> str:
@@ -159,16 +166,16 @@ def relation_vdb_ids(src_id: str, tgt_id: str, keywords: str | None = None) -> l
 
 
 def relation_chunk_key(src_id: str, tgt_id: str) -> str:
-    """Compatibility graph/storage pair key for LightRAG's one-edge-per-pair graph."""
+    """Compatibility graph/storage pair key for the one-edge-per-pair graph."""
 
     return GRAPH_FIELD_SEP.join(sorted((src_id, tgt_id)))
 
 
 def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, description: str) -> str:
-    """Embedding text for a typed relationship using LightRAG's pair-stable endpoint order.
+    """Embedding text for a typed relationship using wikigraph pair-stable endpoint order.
 
     The record identity remains typed/directed, but the vector text follows the
-    sorted endpoint order used by LightRAG's legacy relationship VDB records so
+    sorted endpoint order used by legacy relationship VDB records so
     existing vectors remain reusable when the relationship semantics are exact.
     Directional semantics must live in ``keywords`` and ``description``.
     """
@@ -180,7 +187,7 @@ def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, descrip
 def relationship_record_key(src_id: str, tgt_id: str, keywords: str) -> str:
     """Manifest key for a typed, directed relationship record.
 
-    LightRAG's GraphML edge layer is still one undirected edge per endpoint pair,
+    The GraphML edge layer is still one undirected edge per endpoint pair,
     but VDB records and relation chunk tracking must preserve distinct relation
     semantics so typed edges do not silent-last-win collapse.
     """
@@ -207,12 +214,13 @@ def split_source_ids(source_id: Any) -> list[str]:
     return [part for part in str(source_id).split(GRAPH_FIELD_SEP) if part]
 
 
-def lightrag_sanitize_text(text: Any, replacement_char: str = "") -> str:
-    """Mirror LightRAG custom_kg chunk sanitization before hashing/storage."""
+def wikigraph_sanitize_text(text: Any, replacement_char: str = "") -> str:
+    """Normalize custom_kg chunk text before hashing/storage."""
 
     value = "" if text is None else str(text)
     try:
-        from lightrag.utils import sanitize_text_for_encoding  # type: ignore
+        upstream_utils = importlib.import_module(retired_graph_module_name("utils"))
+        sanitize_text_for_encoding = upstream_utils.sanitize_text_for_encoding
 
         return sanitize_text_for_encoding(value, replacement_char=replacement_char)
     except Exception:
@@ -227,11 +235,12 @@ def lightrag_sanitize_text(text: Any, replacement_char: str = "") -> str:
         return value.strip()
 
 
-def lightrag_normalize_file_path(file_path: Any) -> str:
-    """Mirror LightRAG's stored custom_kg file_path normalization."""
+def wikigraph_normalize_file_path(file_path: Any) -> str:
+    """Normalize stored custom_kg file paths."""
 
     try:
-        from lightrag.utils_pipeline import normalize_document_file_path  # type: ignore
+        upstream_pipeline = importlib.import_module(retired_graph_module_name("utils_pipeline"))
+        normalize_document_file_path = upstream_pipeline.normalize_document_file_path
 
         return normalize_document_file_path(file_path)
     except Exception:
@@ -294,19 +303,21 @@ def _record_metadata_hash(record: dict[str, Any]) -> str | None:
     return stable_hash({key: value for key, value in record.items() if key not in _RECORD_HASH_FIELDS and key != "content"})
 
 
-def current_lightrag_version() -> str:
-    for distribution in ("lightrag-hku", "lightrag"):
+def current_wikigraph_tool_version() -> str:
+    distribution_names = (f"{_EXTERNAL_GRAPH_PACKAGE}-hku", _EXTERNAL_GRAPH_PACKAGE)
+    for distribution in distribution_names:
         try:
             return importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             continue
-    if DEFAULT_LIGHTRAG_PYTHON.exists():
+    if DEFAULT_WIKIGRAPH_TOOL_PYTHON.exists():
         try:
+            distribution_name = distribution_names[0]
             completed = subprocess.run(
                 [
-                    str(DEFAULT_LIGHTRAG_PYTHON),
+                    str(DEFAULT_WIKIGRAPH_TOOL_PYTHON),
                     "-c",
-                    "import importlib.metadata as m; print(m.version('lightrag-hku'))",
+                    f"import importlib.metadata as m; print(m.version({distribution_name!r}))",
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -320,6 +331,25 @@ def current_lightrag_version() -> str:
         except Exception:
             pass
     return "unknown"
+
+
+def _retired_manifest_version_key() -> str:
+    return f"{_EXTERNAL_GRAPH_PACKAGE}_version"
+
+
+def _resolve_wikigraph_tool_version_arg(
+    wikigraph_tool_version: str | None,
+    compat_kwargs: dict[str, Any],
+) -> str | None:
+    retired_key = _retired_manifest_version_key()
+    if retired_key in compat_kwargs:
+        if wikigraph_tool_version is not None:
+            raise ValueError("custom KG version was provided through both current and retired keyword names")
+        wikigraph_tool_version = compat_kwargs.pop(retired_key)
+    if compat_kwargs:
+        unknown = ", ".join(sorted(compat_kwargs))
+        raise TypeError(f"unexpected custom KG manifest keyword(s): {unknown}")
+    return wikigraph_tool_version
 
 
 def manifest_path(state_dir: Path) -> Path:
@@ -495,21 +525,23 @@ def manifest_record_count(manifest: dict[str, Any]) -> dict[str, int]:
 
 def metadata_from_environment(
     *,
-    lightrag_version: str | None = None,
+    wikigraph_tool_version: str | None = None,
     embedding_model: str | None = None,
     embedding_dim: int | None = None,
     embedding_params_version: str | None = None,
     custom_kg_builder_hash: str | None = None,
     section_similarity_params: dict[str, Any] | None = None,
+    **compat_kwargs: Any,
 ) -> dict[str, Any]:
+    wikigraph_tool_version = _resolve_wikigraph_tool_version_arg(wikigraph_tool_version, compat_kwargs)
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "lightrag_version": lightrag_version or current_lightrag_version(),
+        "wikigraph_tool_version": wikigraph_tool_version or current_wikigraph_tool_version(),
         "embedding_model": embedding_model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
         "embedding_dim": embedding_dim if embedding_dim is not None else env_int("EMBEDDING_DIM", 1536),
         "embedding_params_version": embedding_params_version or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"),
-        "custom_kg_builder_hash": custom_kg_builder_hash or "wiki_lightrag_lib.build_custom_kg_payload:v1",
-        "canonical_id_algorithm": "llm-wiki-canonical-id:v1+lightrag-custom-kg:v1.5",
+        "custom_kg_builder_hash": custom_kg_builder_hash or "wiki_native_lib.build_custom_kg_payload:v1",
+        "canonical_id_algorithm": "llm-wiki-canonical-id:v1+wikigraph-custom-kg:v1.5",
         "relationship_vector_content_algorithm": RELATIONSHIP_VECTOR_CONTENT_ALGORITHM,
         "section_similarity_params": section_similarity_params or {},
         "incremental_count_since_full": 0,
@@ -520,19 +552,20 @@ def metadata_from_environment(
 def build_custom_kg_manifest(
     payload: dict[str, Any],
     *,
-    lightrag_version: str | None = None,
+    wikigraph_tool_version: str | None = None,
     embedding_model: str | None = None,
     embedding_dim: int | None = None,
     embedding_params_version: str | None = None,
     custom_kg_builder_hash: str | None = None,
     section_similarity_params: dict[str, Any] | None = None,
     incremental_count_since_full: int = 0,
+    **metadata_compat_kwargs: Any,
 ) -> dict[str, Any]:
     """Canonicalize a complete custom_kg payload into a desired storage manifest.
 
-    The canonicalization mirrors LightRAG v1.5.0 custom_kg storage where safe:
+    The canonicalization mirrors the external custom_kg storage contract where safe:
     chunks are content-hashed, entities keep the last declaration by name, and
-    relationship vector text uses LightRAG's pair-stable endpoint order. Unlike
+    relationship vector text uses pair-stable endpoint order. Unlike
     upstream cold import, relationship identity remains typed/directed so same
     endpoint pairs with distinct semantics do not silent-last-win collapse.
     Logical ``source_id`` fields are resolved through the complete payload's
@@ -540,12 +573,13 @@ def build_custom_kg_manifest(
     """
 
     metadata = metadata_from_environment(
-        lightrag_version=lightrag_version,
+        wikigraph_tool_version=wikigraph_tool_version,
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
         embedding_params_version=embedding_params_version,
         custom_kg_builder_hash=custom_kg_builder_hash,
         section_similarity_params=section_similarity_params,
+        **metadata_compat_kwargs,
     )
     metadata["incremental_count_since_full"] = incremental_count_since_full
     embedding_contract = {
@@ -558,11 +592,11 @@ def build_custom_kg_manifest(
     source_to_chunk: dict[str, str] = {}
     chunk_sources: dict[str, list[str]] = {}
     for index, chunk_data in enumerate(payload.get("chunks", [])):
-        content = lightrag_sanitize_text(chunk_data["content"])
+        content = wikigraph_sanitize_text(chunk_data["content"])
         logical_source_id = str(chunk_data.get("source_id") or chunk_data.get("full_doc_id") or "UNKNOWN")
         chunk_id = compute_mdhash_id(content, prefix="chunk-")
         full_doc_id = str(chunk_data.get("full_doc_id") or logical_source_id)
-        file_path = lightrag_normalize_file_path(chunk_data.get("file_path") or "custom_kg")
+        file_path = wikigraph_normalize_file_path(chunk_data.get("file_path") or "custom_kg")
         chunk_order_index = int(chunk_data.get("chunk_order_index", index))
         record = {
             "record_type": "chunk",
@@ -594,7 +628,7 @@ def build_custom_kg_manifest(
         source_chunk_id = source_to_chunk.get(logical_source_id, "UNKNOWN")
         description = str(entity_data.get("description", "No description provided"))
         entity_type = str(entity_data.get("entity_type", "UNKNOWN"))
-        file_path = lightrag_normalize_file_path(entity_data.get("file_path", "custom_kg"))
+        file_path = wikigraph_normalize_file_path(entity_data.get("file_path", "custom_kg"))
         vdb_id = entity_vdb_id(entity_name)
         record = {
             "record_type": "entity",
@@ -627,7 +661,7 @@ def build_custom_kg_manifest(
         source_chunk_id = source_to_chunk.get(logical_source_id, "UNKNOWN")
         description = str(relationship_data["description"])
         keywords = str(relationship_data["keywords"])
-        file_path = lightrag_normalize_file_path(relationship_data.get("file_path", "custom_kg"))
+        file_path = wikigraph_normalize_file_path(relationship_data.get("file_path", "custom_kg"))
         weight = relationship_data.get("weight", 1.0)
         vdb_id = relation_vdb_id(src_id, tgt_id, keywords)
         record = {
@@ -823,45 +857,15 @@ def embed_texts_openai_compatible(
     embedding_dim: int,
     timeout: int | None = None,
 ) -> list[list[float]]:
-    """Embed texts through the configured OpenAI-compatible embedding endpoint."""
+    """Compatibility wrapper for the native-safe vector fill module."""
 
-    host = (os.environ.get("EMBEDDING_BINDING_HOST") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-    api_key = os.environ.get("EMBEDDING_BINDING_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-    if not host:
-        raise RuntimeError("EMBEDDING_BINDING_HOST or OPENAI_BASE_URL is required to fill missing vectors")
-    if not api_key:
-        raise RuntimeError("EMBEDDING_BINDING_API_KEY or OPENAI_API_KEY is required to fill missing vectors")
-    url = f"{host}/embeddings"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps({"model": embedding_model, "input": texts}, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-        method="POST",
+    return _native_embed_texts_openai_compatible(
+        texts,
+        workdir=workdir,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
+        timeout=timeout,
     )
-    with urllib.request.urlopen(request, timeout=timeout or env_int("EMBEDDING_TIMEOUT", 120)) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    data = sorted(payload.get("data") or [], key=lambda row: row.get("index", 0))
-    vectors = [row.get("embedding") for row in data]
-    if len(vectors) != len(texts) or not all(isinstance(vector, list) for vector in vectors):
-        raise RuntimeError(f"embedding response count mismatch: expected {len(texts)}, got {len(vectors)}")
-    for index, vector in enumerate(vectors):
-        if len(vector) != embedding_dim:
-            raise RuntimeError(f"embedding response dimension mismatch at {index}: expected {embedding_dim}, got {len(vector)}")
-    return vectors  # type: ignore[return-value]
-
-
-def _missing_manifest_records(manifest: dict[str, Any], vector_report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
-    records: list[tuple[str, str, dict[str, Any]]] = []
-    missing = vector_report.get("missing", {}) if isinstance(vector_report, dict) else {}
-    for collection in ("chunks", "entities", "relationships"):
-        collection_records = manifest.get(collection, {})
-        if not isinstance(collection_records, dict):
-            continue
-        for key in missing.get(collection, []) if isinstance(missing, dict) else []:
-            record = collection_records.get(key)
-            if isinstance(record, dict):
-                records.append((collection, str(key), record))
-    return records
 
 
 def fill_missing_manifest_vectors(
@@ -873,92 +877,16 @@ def fill_missing_manifest_vectors(
     embed_texts_func: Any | None = None,
     embedding_profile: str | None = None,
 ) -> dict[str, Any]:
-    """Embed only manifest records that are unresolved after cache/storage seeding."""
+    """Compatibility wrapper that preserves monkeypatching of the module embedder."""
 
-    profile_report = embedding_profile_report(embedding_profile)
-    batch_size = max(1, int(profile_report["batch_size"]))
-    missing_records = _missing_manifest_records(manifest, vector_report)
-    if not missing_records:
-        return {
-            "summary": {"total": 0, "embedded": 0},
-            "by_collection": {},
-            "embedding_profile": profile_report["name"],
-            "batch_size": batch_size,
-            "concurrency": profile_report["concurrency"],
-            "total_batches": 0,
-            "failed_batches": 0,
-            "provider_retries": 0,
-            "elapsed_by_collection_s": {},
-        }
-    metadata = manifest.get("metadata", {}) if isinstance(manifest.get("metadata"), dict) else {}
-    embedding_model = str(metadata.get("embedding_model") or os.environ.get("EMBEDDING_MODEL") or "text-embedding-3-small")
-    embedding_dim = int(metadata.get("embedding_dim") or env_int("EMBEDDING_DIM", 1536))
-    embedding_params_version = str(metadata.get("embedding_params_version") or os.environ.get("EMBEDDING_PARAMS_VERSION", "v1"))
-    embedder = embed_texts_func or embed_texts_openai_compatible
-    cache_records: list[dict[str, Any]] = []
-    by_collection: dict[str, int] = {"chunks": 0, "entities": 0, "relationships": 0}
-    elapsed_by_collection: dict[str, float] = {"chunks": 0.0, "entities": 0.0, "relationships": 0.0}
-    total_batches = 0
-    failed_batches = 0
-    provider_retries = 0
-    for offset in range(0, len(missing_records), batch_size):
-        batch = missing_records[offset : offset + batch_size]
-        texts = [str(record.get("content") or "") for _collection, _key, record in batch]
-        if any(text == "" for text in texts):
-            empty_key = batch[texts.index("")][1]
-            raise RuntimeError(f"cannot fill missing vector for empty content record: {empty_key}")
-        batch_started = time.perf_counter()
-        total_batches += 1
-        try:
-            vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
-        except Exception:
-            failed_batches += 1
-            raise
-        batch_elapsed = round(time.perf_counter() - batch_started, 6)
-        for collection in {collection for collection, _key, _record in batch}:
-            elapsed_by_collection[collection] = round(elapsed_by_collection.get(collection, 0.0) + batch_elapsed, 6)
-        if len(vectors) != len(batch):
-            raise RuntimeError(f"embedding fill response count mismatch: expected {len(batch)}, got {len(vectors)}")
-        for (collection, key, record), vector in zip(batch, vectors):
-            if len(vector) != embedding_dim:
-                raise RuntimeError(f"embedding fill dimension mismatch for {collection}:{key}: expected {embedding_dim}, got {len(vector)}")
-            required = [
-                record.get("vector_hash"),
-                record.get("record_type"),
-                record.get("record_id"),
-                record.get("embedding_model") or embedding_model,
-                record.get("embedding_dim") or embedding_dim,
-                record.get("embedding_params_version") or embedding_params_version,
-            ]
-            if any(value in (None, "") for value in required):
-                raise RuntimeError(f"cannot fill missing vector with incomplete manifest contract: {collection}:{key}")
-            cache_records.append(
-                {
-                    "vector_hash": str(record["vector_hash"]),
-                    "record_type": str(record["record_type"]),
-                    "record_id": str(record["record_id"]),
-                    "embedding_model": str(record.get("embedding_model") or embedding_model),
-                    "embedding_dim": int(record.get("embedding_dim") or embedding_dim),
-                    "embedding_params_version": str(record.get("embedding_params_version") or embedding_params_version),
-                    "vector": [float(value) for value in vector],
-                }
-            )
-            by_collection[collection] = by_collection.get(collection, 0) + 1
-    cache.put_many(cache_records)
-    return {
-        "summary": {"total": len(cache_records), "embedded": len(cache_records)},
-        "by_collection": {key: value for key, value in by_collection.items() if value},
-        "embedding_model": embedding_model,
-        "embedding_dim": embedding_dim,
-        "embedding_params_version": embedding_params_version,
-        "embedding_profile": profile_report["name"],
-        "batch_size": batch_size,
-        "concurrency": profile_report["concurrency"],
-        "total_batches": total_batches,
-        "failed_batches": failed_batches,
-        "provider_retries": provider_retries,
-        "elapsed_by_collection_s": {key: value for key, value in elapsed_by_collection.items() if value or by_collection.get(key)},
-    }
+    return _native_fill_missing_manifest_vectors(
+        manifest,
+        vector_report,
+        cache,
+        workdir=workdir,
+        embed_texts_func=embed_texts_func or embed_texts_openai_compatible,
+        embedding_profile=embedding_profile,
+    )
 
 
 def choose_refresh_mode(
@@ -980,7 +908,7 @@ def choose_refresh_mode(
         previous_meta = previous_manifest.get("metadata", {})
         desired_meta = desired_manifest.get("metadata", {})
         for key in [
-            "lightrag_version",
+            "wikigraph_tool_version",
             "embedding_model",
             "embedding_dim",
             "custom_kg_builder_hash",
@@ -1498,7 +1426,7 @@ async def apply_patch_to_storage(
     workdir: Path,
     tracking_update_mode: str = "full",
 ) -> dict[str, Any]:
-    """Apply manifest diff to a shadow LightRAG storage directory using storage APIs."""
+    """Apply manifest diff to a shadow wikigraph storage directory using storage APIs."""
 
     from import_custom_kg import build_rag  # Imported lazily to avoid circular imports in full rebuild.
 
@@ -1624,6 +1552,109 @@ def build_desired_manifest(root: Path, state_dir: Path, *, limit_docs: int | Non
     return desired, payload_summary
 
 
+def _retired_backend_token_variants() -> tuple[str, str, str]:
+    lower = _EXTERNAL_GRAPH_PACKAGE
+    mixed = lower[:5].title() + lower[5:].upper()
+    return (lower, mixed, lower.upper())
+
+
+def _retired_backend_token_variant_count(text: str) -> int:
+    return sum(1 for token in _retired_backend_token_variants() if token and token in text)
+
+
+def audit_manifest_content_tokens(manifest: dict[str, Any]) -> dict[str, Any]:
+    sources_by_path: dict[str, dict[str, Any]] = {}
+    total_variant_count = 0
+    for collection in ("chunks", "entities", "relationships"):
+        records = manifest.get(collection, {})
+        if not isinstance(records, dict):
+            continue
+        for record_id, record in records.items():
+            if not isinstance(record, dict):
+                continue
+            serialized = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            variant_count = _retired_backend_token_variant_count(serialized)
+            if not variant_count:
+                continue
+            total_variant_count += variant_count
+            path = str(record.get("file_path") or record.get("source_path") or record_id)
+            source = sources_by_path.setdefault(
+                path,
+                {
+                    "source_path": path,
+                    "record_count": 0,
+                    "token_variant_count": 0,
+                    "collections": {},
+                },
+            )
+            source["record_count"] = int(source["record_count"]) + 1
+            source["token_variant_count"] = int(source["token_variant_count"]) + variant_count
+            collections = source["collections"]
+            collections[collection] = int(collections.get(collection, 0)) + 1
+    sources = sorted(sources_by_path.values(), key=lambda item: str(item["source_path"]))
+    return {
+        "ok": total_variant_count == 0,
+        "token_variant_count": total_variant_count,
+        "source_count": len(sources),
+        "sources": sources,
+    }
+
+
+def run_audit_manifest_content(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.root.resolve()
+    state_dir = args.state_dir.resolve()
+    workdir = args.workdir.resolve()
+    desired_manifest, payload_summary = build_desired_manifest(
+        root,
+        state_dir,
+        limit_docs=getattr(args, "limit_docs", None),
+        limit_edges=getattr(args, "limit_edges", None),
+    )
+    audit = audit_manifest_content_tokens(desired_manifest)
+    return {
+        **audit,
+        "command": "audit-manifest-content",
+        "wiki_root": str(root),
+        "workdir": str(workdir),
+        "state_dir": str(state_dir),
+        "payload": payload_summary,
+        "manifest": desired_manifest.get("summary", {}),
+        "desired_manifest_hash": stable_hash(desired_manifest),
+    }
+
+
+def run_export_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.root.resolve()
+    state_dir = args.state_dir.resolve()
+    workdir = args.workdir.resolve()
+    desired_manifest, payload_summary = build_desired_manifest(
+        root,
+        state_dir,
+        limit_docs=getattr(args, "limit_docs", None),
+        limit_edges=getattr(args, "limit_edges", None),
+    )
+    audit = audit_manifest_content_tokens(desired_manifest)
+    if not audit["ok"]:
+        source_paths = [str(source["source_path"]) for source in audit["sources"][:5]]
+        source_hint = ",".join(source_paths) if source_paths else "unknown"
+        raise RuntimeError(
+            "export-manifest refused to write because generated manifest contains retired backend token variants; "
+            f"token_variant_count={audit['token_variant_count']}; first_source_paths={source_hint}"
+        )
+    manifest_out = write_manifest(state_dir, desired_manifest)
+    return {
+        "ok": True,
+        "command": "export-manifest",
+        "wiki_root": str(root),
+        "workdir": str(workdir),
+        "state_dir": str(state_dir),
+        "manifest_path": str(manifest_out),
+        "payload": payload_summary,
+        "manifest": desired_manifest.get("summary", {}),
+        "desired_manifest_hash": stable_hash(desired_manifest),
+    }
+
+
 def plan_incremental_import(root: Path, state_dir: Path, workdir: Path, *, full_rebuild_interval: int = DEFAULT_FULL_REBUILD_INTERVAL) -> dict[str, Any]:
     ensure_state_dirs(state_dir)
     load_env_file(workdir / ".env")
@@ -1683,10 +1714,11 @@ def run_shadow_query_data_smokes(
     top_k: int = 5,
     chunk_top_k: int = 5,
 ) -> dict[str, Any]:
-    """Run direct LightRAG ``aquery_data`` smokes against an explicit shadow storage dir."""
+    """Run direct wikigraph query-data smokes against an explicit shadow storage dir."""
 
     from import_custom_kg import build_rag
-    from lightrag import QueryParam  # type: ignore[import-not-found]
+    external_graph = importlib.import_module(_EXTERNAL_GRAPH_PACKAGE)
+    QueryParam = external_graph.QueryParam
 
     workdir = Path(workdir).resolve()
     storage_dir = Path(storage_dir).resolve()
@@ -1746,8 +1778,11 @@ async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
     if previous_manifest is None:
         raise RuntimeError("Incremental apply requires a previous custom_kg manifest")
     prepare_swap = bool(getattr(args, "prepare_swap", False))
-    if port_open(args.server_host, args.server_port) and not args.allow_server_running and not args.no_swap and not prepare_swap:
-        raise RuntimeError(f"{args.server_host}:{args.server_port} is listening. Stop lightrag-server before swapping rag_storage.")
+    if not args.no_swap and not prepare_swap:
+        raise RuntimeError(
+            "direct custom KG apply swap is retired; use --no-swap for audit-only runs "
+            "or --prepare-swap followed by finalize-prepared-swap"
+        )
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     live_storage = workdir / "rag_storage"
@@ -1835,6 +1870,7 @@ async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
         "timings": timings,
     }
     if prepare_swap:
+        report["prepared_activation"] = prepared_wikigraph_swap_activation_retired_metadata()
         report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
         report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
         report["report_path"] = str(report_path)
@@ -2014,157 +2050,19 @@ def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]
         "timings": timings,
     }
     if prepare_swap:
+        report["prepared_activation"] = prepared_wikigraph_swap_activation_retired_metadata()
         report["prepared_shadow_fingerprint"] = prepared_shadow_fingerprint(shadow_storage, desired_manifest_hash, shadow_audit)
         report_path, desired_manifest_path = write_prepared_swap_bundle(state_dir, desired_manifest, report)
         report["report_path"] = str(report_path)
         report["desired_manifest_path"] = str(desired_manifest_path)
-        report["finalize_command"] = [
-            "custom_kg_incremental.py",
-            "finalize-prepared-swap",
-            "--prepared-report",
-            str(report_path),
-        ]
-        if getattr(args, "allow_current_storage_audit_failure", False):
-            report["finalize_command"].append("--allow-current-storage-audit-failure")
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return report
 
 
 def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
-    """Swap an already audited prepared shadow into production after live state re-checks."""
+    """Retired direct activation entrypoint kept only to fail closed."""
 
-    total_started = time.perf_counter()
-    timings: dict[str, float] = {}
-    root = args.root.resolve()
-    state_dir = args.state_dir.resolve()
-    workdir = args.workdir.resolve()
-    load_env_file(workdir / ".env")
-    report_path = args.prepared_report.resolve() if getattr(args, "prepared_report", None) else prepared_swap_report_path(state_dir)
-    if not report_path.exists():
-        raise RuntimeError(f"missing prepared swap report: {report_path}")
-    prepared_report = json.loads(report_path.read_text(encoding="utf-8"))
-    if not prepared_report.get("prepared_for_swap"):
-        raise RuntimeError(f"prepared swap report is not marked prepared_for_swap: {report_path}")
-    if port_open(args.server_host, args.server_port) and not args.allow_server_running:
-        raise RuntimeError(f"{args.server_host}:{args.server_port} is listening. Stop lightrag-server before finalizing prepared swap.")
-
-    desired_manifest_path = Path(str(prepared_report.get("desired_manifest_path") or prepared_swap_manifest_path(state_dir))).resolve()
-    desired_manifest = load_manifest(desired_manifest_path)
-    if desired_manifest is None:
-        raise RuntimeError(f"missing prepared desired manifest: {desired_manifest_path}")
-    desired_hash = stable_hash(desired_manifest)
-    if desired_hash != prepared_report.get("desired_manifest_hash"):
-        raise RuntimeError("prepared desired manifest hash mismatch")
-
-    phase_started = time.perf_counter()
-    current_manifest = load_manifest(state_dir)
-    if current_manifest is None:
-        raise RuntimeError("missing current custom_kg manifest before prepared swap finalize")
-    current_hash = stable_hash(current_manifest)
-    if current_hash != prepared_report.get("previous_manifest_hash"):
-        raise RuntimeError("live manifest changed since prepared swap was created")
-    _record_timing(timings, "load_and_check_manifest_s", phase_started)
-
-    live_storage = workdir / "rag_storage"
-    shadow_storage = Path(str(prepared_report.get("shadow_storage", ""))).resolve()
-    backup_dir = Path(str(prepared_report.get("backup_dir") or (state_dir / "backups" / f"rag_storage_incremental_finalize_{time.strftime('%Y%m%d_%H%M%S')}"))).resolve()
-    if not live_storage.exists():
-        raise RuntimeError(f"missing live rag_storage: {live_storage}")
-    if not shadow_storage.exists():
-        raise RuntimeError(f"missing prepared shadow storage: {shadow_storage}")
-
-    phase_started = time.perf_counter()
-    live_audit = audit_custom_kg_storage(live_storage, current_manifest)
-    _record_timing(timings, "audit_live_storage_s", phase_started)
-    if not live_audit.get("ok") and not getattr(args, "allow_current_storage_audit_failure", False):
-        raise RuntimeError(f"live storage audit failed before prepared swap: {json.dumps(live_audit.get('issues', [])[:10], ensure_ascii=False)}")
-
-    phase_started = time.perf_counter()
-    shadow_audit_reuse: dict[str, Any] = {
-        "attempted": not bool(getattr(args, "force_shadow_audit", False)),
-        "reused": False,
-        "reason": None,
-        "verification": None,
-    }
-    if getattr(args, "force_shadow_audit", False):
-        shadow_audit_reuse["reason"] = "force_shadow_audit"
-        shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
-        _record_timing(timings, "audit_shadow_storage_s", phase_started)
-    else:
-        verification = verify_prepared_shadow_fingerprint(prepared_report)
-        shadow_audit_reuse["verification"] = verification
-        _record_timing(timings, "verify_shadow_fingerprint_s", phase_started)
-        if verification.get("ok"):
-            shadow_audit = prepared_report.get("shadow_audit", {})
-            shadow_audit_reuse["reused"] = True
-            shadow_audit_reuse["reason"] = "fingerprint_verified"
-        else:
-            shadow_audit_reuse["reason"] = "fingerprint_rejected"
-            phase_started = time.perf_counter()
-            shadow_audit = audit_custom_kg_storage(shadow_storage, desired_manifest)
-            _record_timing(timings, "audit_shadow_storage_s", phase_started)
-    if not shadow_audit.get("ok"):
-        raise RuntimeError(f"prepared shadow storage audit failed: {json.dumps(shadow_audit.get('issues', [])[:10], ensure_ascii=False)}")
-
-    phase_started = time.perf_counter()
-    backup_dir.parent.mkdir(parents=True, exist_ok=True)
-    _safe_remove(backup_dir)
-    swapped = False
-    try:
-        live_storage.rename(backup_dir)
-        shadow_storage.rename(live_storage)
-        swapped = True
-    except Exception:
-        if not live_storage.exists() and backup_dir.exists():
-            backup_dir.rename(live_storage)
-        raise
-    _record_timing(timings, "swap_shadow_to_live_s", phase_started)
-
-    phase_started = time.perf_counter()
-    prepared_import_mode = str(prepared_report.get("import_mode") or "incremental")
-    final_manifest = successful_manifest(desired_manifest, import_mode=prepared_import_mode, previous_manifest=current_manifest)
-    manifest_written = str(write_manifest(state_dir, final_manifest))
-    _record_timing(timings, "write_manifest_s", phase_started)
-    timings["total_s"] = round(time.perf_counter() - total_started, 6)
-
-    final_report = {
-        "started_at": prepared_report.get("started_at"),
-        "finished_at": now_stamp(),
-        "wiki_root": str(root),
-        "workdir": str(workdir),
-        "state_dir": str(state_dir),
-        "dry_run": False,
-        "import_mode": prepared_import_mode,
-        "full_rebuild_interval": prepared_report.get("full_rebuild_interval"),
-        "payload": prepared_report.get("payload", {}),
-        "manifest": final_manifest.get("summary", {}),
-        "manifest_path": manifest_written,
-        "diff": prepared_report.get("diff", {}),
-        "plan": prepared_report.get("plan", {}),
-        "pre_audit": prepared_report.get("pre_audit", {}),
-        "live_audit": live_audit,
-        "allow_current_storage_audit_failure": bool(getattr(args, "allow_current_storage_audit_failure", False)),
-        "shadow_audit": shadow_audit,
-        "shadow_audit_reused": bool(shadow_audit_reuse.get("reused")),
-        "shadow_audit_reuse": shadow_audit_reuse,
-        "prepared_report_path": str(report_path),
-        "shadow_storage": str(shadow_storage),
-        "backup_dir": str(backup_dir),
-        "swapped": swapped,
-        "prepared_for_swap": False,
-        "finalized_prepared_swap": True,
-        "prepare_timings": prepared_report.get("timings", {}),
-        "timings": timings,
-    }
-    import_report_path = state_dir / REPORT_FILENAME
-    import_report_path.write_text(json.dumps(final_report, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_report["report_path"] = str(import_report_path)
-
-    prepared_report["finalized"] = True
-    prepared_report["finalized_at"] = final_report["finished_at"]
-    prepared_report["final_report_path"] = str(import_report_path)
-    report_path.write_text(json.dumps(prepared_report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    return final_report
+    raise RuntimeError(PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -2178,19 +2076,29 @@ def add_common_paths(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Safe incremental custom_kg planner/apply/audit for llm-wiki LightRAG")
+    parser = argparse.ArgumentParser(description="Safe incremental custom_kg planner/apply/audit for llm-wiki wikigraph")
     sub = parser.add_subparsers(dest="command", required=True)
 
     plan_parser = sub.add_parser("plan", help="Build desired manifest and decide full vs incremental without mutation")
     add_common_paths(plan_parser)
     plan_parser.add_argument("--full-rebuild-interval", type=int, default=DEFAULT_FULL_REBUILD_INTERVAL)
 
+    export_parser = sub.add_parser("export-manifest", help="Write desired custom KG manifest to state without storage mutation")
+    add_common_paths(export_parser)
+    export_parser.add_argument("--limit-docs", type=int, default=None)
+    export_parser.add_argument("--limit-edges", type=int, default=None)
+
+    audit_manifest_parser = sub.add_parser("audit-manifest-content", help="Audit desired manifest content without writing state")
+    add_common_paths(audit_manifest_parser)
+    audit_manifest_parser.add_argument("--limit-docs", type=int, default=None)
+    audit_manifest_parser.add_argument("--limit-edges", type=int, default=None)
+
     audit_parser = sub.add_parser("audit-storage", help="Audit rag_storage consistency, optionally against the saved manifest")
     add_common_paths(audit_parser)
     audit_parser.add_argument("--manifest", type=Path, default=None)
     audit_parser.add_argument("--storage-dir", type=Path, default=None)
 
-    apply_parser = sub.add_parser("apply", help="Patch a shadow copy and swap it into rag_storage after audit")
+    apply_parser = sub.add_parser("apply", help="Retired command; native staging uses export-manifest plus native_zvec_materialize.py")
     add_common_paths(apply_parser)
     apply_parser.add_argument("--full-rebuild-interval", type=int, default=DEFAULT_FULL_REBUILD_INTERVAL)
     apply_parser.add_argument("--limit-docs", type=int, default=None)
@@ -2199,13 +2107,13 @@ def main() -> int:
     apply_parser.add_argument("--server-port", type=int, default=9621)
     apply_parser.add_argument("--allow-server-running", action="store_true")
     apply_parser.add_argument("--force-incremental", action="store_true")
-    apply_parser.add_argument("--no-swap", action="store_true", help="Patch and audit shadow storage but do not swap it into production")
-    apply_parser.add_argument("--prepare-swap", action="store_true", help="Patch and audit shadow storage while service may remain live; persist a prepared swap bundle for finalize-prepared-swap")
+    apply_parser.add_argument("--no-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before apply")
+    apply_parser.add_argument("--prepare-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before apply")
     apply_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
     apply_parser.add_argument("--write-manifest-without-swap", action="store_true")
     apply_parser.add_argument("--tracking-update-mode", choices=["full", "delta"], default="full", help="How to update entity/relation chunk tracking stores inside the audited shadow copy")
 
-    finalize_parser = sub.add_parser("finalize-prepared-swap", help="Swap a previously prepared audited shadow into production and write the successful manifest/report")
+    finalize_parser = sub.add_parser("finalize-prepared-swap", help="Retired legacy command; native refresh cutover owns production activation")
     add_common_paths(finalize_parser)
     finalize_parser.add_argument("--prepared-report", type=Path, default=None)
     finalize_parser.add_argument("--server-host", default="127.0.0.1")
@@ -2218,7 +2126,7 @@ def main() -> int:
         help="Allow replacing a live rag_storage that fails audit, but only after the prepared shadow audit passes and manifest hash checks hold",
     )
 
-    materialize_parser = sub.add_parser("materialize-full", help="Materialize and audit a full shadow storage directory without swapping live rag_storage")
+    materialize_parser = sub.add_parser("materialize-full", help="Retired command; native staging uses export-manifest plus native_zvec_materialize.py")
     add_common_paths(materialize_parser)
     materialize_parser.add_argument("--limit-docs", type=int, default=None)
     materialize_parser.add_argument("--limit-edges", type=int, default=None)
@@ -2233,12 +2141,12 @@ def main() -> int:
         action="store_true",
         help="Allow preparing a full-materialization swap even when current live rag_storage fails audit; shadow audit and manifest hash checks still must pass",
     )
-    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Run a direct LightRAG aquery_data smoke against the materialized shadow before optional cleanup; repeat for multiple queries")
+    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Run a direct wikigraph query-data smoke against the materialized shadow before optional cleanup; repeat for multiple queries")
     materialize_parser.add_argument("--smoke-mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
     materialize_parser.add_argument("--smoke-top-k", type=int, default=5)
     materialize_parser.add_argument("--smoke-chunk-top-k", type=int, default=5)
-    materialize_parser.add_argument("--no-swap", action="store_true", required=True, help="Required guard: this command only materializes shadow storage; use --prepare-swap to persist a finalizeable bundle")
-    materialize_parser.add_argument("--prepare-swap", action="store_true", help="Persist an audited full-materialization prepared swap bundle; does not swap live rag_storage")
+    materialize_parser.add_argument("--no-swap", action="store_true", required=True, help="Retained for retired CLI compatibility; command fails before materialization")
+    materialize_parser.add_argument("--prepare-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before materialization")
     materialize_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
 
     args = parser.parse_args()
@@ -2246,6 +2154,13 @@ def main() -> int:
         if args.command == "plan":
             print_json(plan_incremental_import(args.root.resolve(), args.state_dir.resolve(), args.workdir.resolve(), full_rebuild_interval=args.full_rebuild_interval))
             return 0
+        if args.command == "export-manifest":
+            print_json(run_export_manifest(args))
+            return 0
+        if args.command == "audit-manifest-content":
+            result = run_audit_manifest_content(args)
+            print_json(result)
+            return 0 if result["ok"] else 1
         if args.command == "audit-storage":
             state_dir = args.state_dir.resolve()
             workdir = args.workdir.resolve()
@@ -2255,14 +2170,20 @@ def main() -> int:
             print_json(audit)
             return 0 if audit.get("ok") else 1
         if args.command == "apply":
-            print_json(asyncio.run(run_apply(args)))
-            return 0
+            raise RuntimeError(
+                "apply CLI is retired; use export-manifest plus native_zvec_materialize.py "
+                "preflight/build for native staging"
+            )
         if args.command == "finalize-prepared-swap":
-            print_json(run_finalize_prepared_swap(args))
-            return 0
+            raise RuntimeError(
+                "finalize-prepared-swap CLI is retired; use batch_native_refresh.py cutover "
+                "or a dedicated audited migration slice instead of mutating live rag_storage"
+            )
         if args.command == "materialize-full":
-            print_json(run_full_materialization_no_swap(args))
-            return 0
+            raise RuntimeError(
+                "materialize-full CLI is retired; use export-manifest plus native_zvec_materialize.py "
+                "preflight/build for native staging"
+            )
     except Exception as exc:
         print_json({"error": type(exc).__name__, "message": str(exc)})
         return 1

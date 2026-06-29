@@ -1,5 +1,14 @@
-import datetime as dt, json, re
-from pathlib import Path; from typing import Any
+#!/usr/bin/env python3
+"""Native wiki validation helpers."""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+from pathlib import Path
+from typing import Any
+
 
 def secret_hits(path: Path, text: str) -> list[str]:
     hits = []
@@ -8,6 +17,7 @@ def secret_hits(path: Path, text: str) -> list[str]:
         hits.append(f"{path.as_posix()}:{match.start()}: {match.group(1)}=[REDACTED]")
     return hits
 
+
 def validate_wiki(
     root: Path,
     state_dir: Path,
@@ -15,7 +25,8 @@ def validate_wiki(
     full: bool = False,
     write_report: bool = False,
 ) -> dict[str, Any]:
-    import wiki_lightrag_lib as lib
+    import wiki_native_lib as lib
+
     root = root.resolve()
     errors: list[str] = []
     warnings: list[str] = []
@@ -112,11 +123,11 @@ def validate_wiki(
         "missing_source_ref_examples": missing_sources[:20],
         "raw_filename_drift": len(raw_filename_drift),
         "raw_filename_drift_examples": raw_filename_drift[:20],
-        "lightrag_unresolved_references": 0,
+        "native_unresolved_references": 0,
         "wiki_root_machine_pollution": len(pollution),
         "wiki_root_machine_pollution_paths": [p.as_posix() for p in pollution],
-        "lightrag_state_dir": str(state_dir.resolve()),
-        "lightrag_workdir": str(workdir.resolve()) if workdir else None,
+        "native_state_dir": str(state_dir.resolve()),
+        "native_workdir": str(workdir.resolve()) if workdir else None,
         "warnings": warnings[:200],
         "errors": errors,
     }

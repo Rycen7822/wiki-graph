@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build sidecar raw-section embedding similarity candidates for llm-wiki.
 
-Phase 1 writes only external LightRAG state artifacts. It does not import semantic
+Phase 1 writes only external llm-wiki state artifacts. It does not import semantic
 neighbor edges into custom_kg; use a separate reviewed Phase 2 for that.
 """
 
@@ -15,8 +15,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from lightrag_runtime_env import load_env_file, redact_summary
-from wiki_lightrag_lib import (
+from native_runtime_env import load_env_file, redact_summary
+from wiki_native_lib import (
     RAW_NOTE_CONTRACT_SECTION_KINDS,
     build_section_similarity_edges,
     common_paths_parser,
@@ -205,7 +205,25 @@ def main() -> int:
 
     config = embedding_config(args.workdir)
     embedding_path = args.state_dir / "section_embeddings.jsonl"
-    embedding_rows, embedding_stats = build_embedding_rows(rows, config, embedding_path, reuse_cache=not args.no_reuse_cache)
+    try:
+        embedding_rows, embedding_stats = build_embedding_rows(rows, config, embedding_path, reuse_cache=not args.no_reuse_cache)
+    except Exception as exc:
+        print_json(
+            {
+                "ok": False,
+                "error": "section_embedding_failed",
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+                "root": str(args.root.resolve()),
+                "state_dir": str(args.state_dir.resolve()),
+                "workdir": str(args.workdir.resolve()),
+                "raw_sections_path": raw_sections_path.as_posix(),
+                "embedding_path": embedding_path.as_posix(),
+                "section_count": len(rows),
+                "embedding_env": config["env"],
+            }
+        )
+        return 1
     jsonl_write(embedding_path, embedding_rows)
     embeddings = {str(row["section_id"]): row["embedding"] for row in embedding_rows}
     del embedding_rows

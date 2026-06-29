@@ -4,7 +4,7 @@
 The wrapper intentionally keeps the canonical raw-note verifier in the llm-wiki
 Hermes skill. It orchestrates the existing verifier and ledgers so agents do not
 forget pre-mark verification, pending marking, cleanup proof, or threshold-gated
-wiki/LightRAG follow-through.
+wiki/native graph follow-through.
 """
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
-DEFAULT_WORKDIR = Path("/home/xu/project/wiki/lightrag")
-DEFAULT_STATE_DIR = DEFAULT_WORKDIR / "state"
-DEFAULT_VERIFIER = Path("/home/xu/.hermes/skills/research/llm-wiki/scripts/raw_fast_note_verify.py")
+DEFAULT_WORKDIR = Path("/home/xu/project/wiki/wiki-graph")
+DEFAULT_ROOT = DEFAULT_WORKDIR / "wiki_test"
+DEFAULT_STATE_DIR = DEFAULT_WORKDIR / "tmp" / "wiki_test_state"
+DEFAULT_VERIFIER = DEFAULT_WORKDIR / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 DEFAULT_REQUIRED_SECTIONS = [
     "summary",
     "abstract",
@@ -364,12 +364,17 @@ def compact_auto_integrate(auto: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def compact_lightrag_status(status: dict[str, Any]) -> dict[str, Any]:
+def compact_native_refresh_status(status: dict[str, Any]) -> dict[str, Any]:
     return {
         key: status.get(key)
         for key in [
             "pending_count",
             "graph_ready_pending_count",
+            "standalone_native_pending_count",
+            "standalone_native_should_refresh",
+            "standalone_native_ledger_path",
+            "standalone_native_command_returncode",
+            "standalone_native_error",
             "raw_fast_pending_wiki_integration_count",
             "raw_fast_actionable_wiki_integration_count",
             "raw_fast_review_wiki_integration_count",
@@ -437,52 +442,71 @@ def run_wiki_status(args: argparse.Namespace) -> dict[str, Any]:
     return result.get("json") if isinstance(result.get("json"), dict) else {"error": "status_json_missing", "returncode": result.get("returncode")}
 
 
-def run_lightrag_status(args: argparse.Namespace) -> dict[str, Any]:
-    script = args.workdir / "scripts" / "batch_lightrag_refresh.py"
-    command = [sys.executable, str(script), "status", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir), "--reason", "threshold"]
-    if args.refresh_threshold is not None:
-        command.extend(["--threshold", str(args.refresh_threshold)])
+def run_native_refresh_status(args: argparse.Namespace, *, migrate_legacy: bool = True) -> dict[str, Any]:
+    script = args.workdir / "scripts" / "batch_native_refresh.py"
+    command = [sys.executable, str(script), "status", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir)]
+    if not migrate_legacy:
+        command.append("--no-migrate-legacy")
     result = run_json(command, cwd=args.workdir, timeout=args.timeout)
     payload = result.get("json") if isinstance(result.get("json"), dict) else {"error": "status_json_missing", "returncode": result.get("returncode")}
     payload["command_returncode"] = result.get("returncode")
     return payload
 
 
-def run_lightrag_refresh_if_needed(args: argparse.Namespace, status: dict[str, Any]) -> dict[str, Any]:
-    compact_status = compact_lightrag_status(status)
+def run_native_refresh_if_needed(args: argparse.Namespace, status: dict[str, Any]) -> dict[str, Any]:
+    compact_status = compact_native_refresh_status(status)
     if status.get("command_returncode") not in (None, 0):
-        return {"ok": False, "ran": False, "returncode": status.get("command_returncode"), "error": status.get("error") or "lightrag_status_failed", **compact_status}
+        return {"ok": False, "ran": False, "returncode": status.get("command_returncode"), "error": status.get("error") or "native_refresh_status_failed", **compact_status}
     if status.get("blocked_by_pending_wiki_integration") or not status.get("should_refresh"):
         return {"ok": True, "ran": False, "skipped": True, "skip_reason": "not_runnable_or_not_required", **compact_status}
-    script = args.workdir / "scripts" / "batch_lightrag_refresh.py"
-    command = [sys.executable, str(script), "refresh", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir), "--reason", "threshold"]
-    if args.refresh_threshold is not None:
-        command.extend(["--threshold", str(args.refresh_threshold)])
+    script = args.workdir / "scripts" / "batch_native_refresh.py"
+    command = [sys.executable, str(script), "refresh", "--prepare-only", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir)]
     result = run_json(command, cwd=args.workdir, timeout=args.refresh_timeout)
     payload = result.get("json") if isinstance(result.get("json"), dict) else {}
     refresh_status = payload.get("status") or payload.get("status_before") or status
     ok = result.get("returncode") == 0 and not payload.get("error")
+    build = payload.get("build") if isinstance(payload.get("build"), dict) else {}
     return {
         "ok": ok,
-        "ran": bool(payload.get("would_run")) and ok,
+        "ran": ok and not bool(payload.get("skipped")),
         "returncode": result.get("returncode"),
-        "status": compact_lightrag_status(refresh_status if isinstance(refresh_status, dict) else status),
+        "status": compact_native_refresh_status(refresh_status if isinstance(refresh_status, dict) else status),
         "skipped": payload.get("skipped"),
-        "would_run": payload.get("would_run"),
-        "dry_run": payload.get("dry_run"),
-        "artifact_log": payload.get("artifact_log"),
-        "import_log": payload.get("import_log"),
+        "prepared_only": payload.get("prepared_only"),
+        "build_ok": build.get("ok"),
         "error": payload.get("error") or result.get("error"),
         "message": payload.get("message") or result.get("message"),
         "stderr_tail": result.get("stderr_tail") or None,
     }
 
 
-def synthesize_blocked_lightrag_status(args: argparse.Namespace, wiki_status: dict[str, Any]) -> dict[str, Any]:
-    """Return threshold LightRAG status implied by raw-fast pending wiki integration.
+def compact_standalone_native_refresh_status(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(status, dict) or not status:
+        return {}
+    compact: dict[str, Any] = {
+        "standalone_native_command_returncode": status.get("command_returncode"),
+    }
+    if "pending_count" in status:
+        compact["standalone_native_pending_count"] = status.get("pending_count")
+    if "should_refresh" in status:
+        compact["standalone_native_should_refresh"] = status.get("should_refresh")
+    if "ledger_path" in status:
+        compact["standalone_native_ledger_path"] = status.get("ledger_path")
+    if status.get("error"):
+        compact["standalone_native_error"] = status.get("error")
+    return compact
+
+
+def synthesize_blocked_native_refresh_status(
+    args: argparse.Namespace,
+    wiki_status: dict[str, Any],
+    *,
+    standalone_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return threshold native refresh status implied by raw-fast pending wiki integration.
 
     When actionable/review raw-fast notes are still pending wiki integration,
-    LightRAG refresh cannot run. Calling `batch_lightrag_refresh.py status` in
+    native refresh cannot run. Calling `batch_native_refresh.py status` in
     that state repeats a whole-wiki freshness scan only to report the same
     blocker, so closeout can synthesize the compact blocked status.
     """
@@ -493,10 +517,10 @@ def synthesize_blocked_lightrag_status(args: argparse.Namespace, wiki_status: di
         return {}
     blocked_reasons: list[str] = []
     if actionable:
-        blocked_reasons.append("pending_wiki_integration_before_lightrag_refresh")
+        blocked_reasons.append("pending_wiki_integration_before_native_refresh")
     if review:
         blocked_reasons.append("pending_wiki_integration_needs_manual_review")
-    return {
+    status = {
         "reason": "threshold",
         "should_refresh": False,
         "would_refresh_if_unblocked": False,
@@ -518,6 +542,8 @@ def synthesize_blocked_lightrag_status(args: argparse.Namespace, wiki_status: di
         "skip_reason": "blocked_by_pending_wiki_integration_from_wiki_status",
         "command_returncode": 0,
     }
+    status.update(compact_standalone_native_refresh_status(standalone_status))
+    return status
 
 
 def short_text(value: str, limit: int = 220) -> str:
@@ -535,14 +561,20 @@ def build_compact_log_entry(args: argparse.Namespace, output: dict[str, Any]) ->
     resource_sentence = resource if resource.endswith((".", "!", "?", "。", "！", "？")) else f"{resource}."
     final_verify = output.get("final_verify") if isinstance(output.get("final_verify"), dict) else {}
     wiki = output.get("wiki_integration") if isinstance(output.get("wiki_integration"), dict) else {}
-    lightrag = output.get("lightrag") if isinstance(output.get("lightrag"), dict) else {}
+    native_refresh = output.get("native_refresh_status") if isinstance(output.get("native_refresh_status"), dict) else {}
     report_path = final_verify.get("report_path") or output.get("report_path") or ""
+    standalone_native = ""
+    if "standalone_native_pending_count" in native_refresh or "standalone_native_should_refresh" in native_refresh:
+        standalone_native = (
+            f"; standalone native ledger pending `{native_refresh.get('standalone_native_pending_count')}`, "
+            f"`should_refresh={str(bool(native_refresh.get('standalone_native_should_refresh'))).lower()}`"
+        )
     lines = [
         f"## [{stamp}] raw-fast ingest | {title}",
         "",
         f"- Saved `{args.raw_file}` from `{source}`; closeout `raw_fast_ok={str(bool(output.get('raw_fast_ok'))).lower()}`; final report `{report_path}`.",
         f"- Resource status: {resource_sentence}",
-        f"- Queue: wiki pending/actionable `{wiki.get('pending_count')}/{wiki.get('actionable_pending_count')}` of threshold `{wiki.get('threshold')}`, `should_integrate={str(bool(wiki.get('should_integrate'))).lower()}`, next `{wiki.get('next_required_action')}`; LightRAG `blocked_by_pending_wiki_integration={str(bool(lightrag.get('blocked_by_pending_wiki_integration'))).lower()}`, graph-ready pending `{lightrag.get('graph_ready_pending_count')}`, `should_refresh={str(bool(lightrag.get('should_refresh'))).lower()}`.",
+        f"- Queue: wiki pending/actionable `{wiki.get('pending_count')}/{wiki.get('actionable_pending_count')}` of threshold `{wiki.get('threshold')}`, `should_integrate={str(bool(wiki.get('should_integrate'))).lower()}`, next `{wiki.get('next_required_action')}`; native graph `blocked_by_pending_wiki_integration={str(bool(native_refresh.get('blocked_by_pending_wiki_integration'))).lower()}`, graph-ready pending `{native_refresh.get('graph_ready_pending_count')}`, `should_refresh={str(bool(native_refresh.get('should_refresh'))).lower()}`{standalone_native}.",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -577,7 +609,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tmp", action="append", default=[], type=Path)
     parser.add_argument("--allow-non-tmp-cleanup", action="store_true", help="Permit cleanup outside /tmp after protection checks; default refuses non-/tmp paths")
     parser.add_argument("--threshold", type=int, default=None, help="Override pending wiki-integration threshold")
-    parser.add_argument("--refresh-threshold", type=int, default=None, help="Override LightRAG graph refresh threshold")
+    parser.add_argument("--refresh-threshold", type=int, default=None, help="Compatibility option retained for legacy callers; native refresh status has no threshold")
     parser.add_argument("--auto-integrate", action="store_true", help="Launch wiki integration automatically when threshold says it should run")
     parser.add_argument("--auto-integrate-dry-run", action="store_true")
     parser.add_argument("--integration-command", default=None)
@@ -644,14 +676,37 @@ def main() -> int:
         )
 
     wiki_status = timings.record("wiki_status", run_wiki_status, args)
-    synthesized_lightrag = synthesize_blocked_lightrag_status(args, wiki_status)
-    if synthesized_lightrag:
-        lightrag_status = timings.record("lightrag_status", lambda: synthesized_lightrag)
+    synthesized_native = synthesize_blocked_native_refresh_status(args, wiki_status)
+    if synthesized_native:
+        standalone_native_status = timings.record("standalone_native_refresh_status", run_native_refresh_status, args, migrate_legacy=False)
+        native_refresh_status = timings.record(
+            "native_refresh_status",
+            synthesize_blocked_native_refresh_status,
+            args,
+            wiki_status,
+            standalone_status=standalone_native_status,
+        )
     else:
-        lightrag_status = timings.record("lightrag_status", run_lightrag_status, args)
-    lightrag = timings.record("lightrag_refresh", run_lightrag_refresh_if_needed, args, lightrag_status)
-    if not lightrag.get("ok", True):
-        return fail("lightrag_refresh", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "marked": marked_payload.get("marked"), "cleanup": cleanup, "final_verify": final_verify, "wiki_integration": compact_wiki_status(wiki_status), "lightrag": compact_lightrag_status(lightrag_status), "lightrag_refresh": lightrag}, int(lightrag.get("returncode") or 1), timings)
+        native_refresh_status = timings.record("native_refresh_status", run_native_refresh_status, args)
+    native_refresh = timings.record("native_refresh", run_native_refresh_if_needed, args, native_refresh_status)
+    compact_native_status = compact_native_refresh_status(native_refresh_status)
+    if not native_refresh.get("ok", True):
+        return fail(
+            "native_refresh",
+            {
+                "raw_fast_ok": False,
+                "pre_verify": pre_verify,
+                "control_scan": scan,
+                "marked": marked_payload.get("marked"),
+                "cleanup": cleanup,
+                "final_verify": final_verify,
+                "wiki_integration": compact_wiki_status(wiki_status),
+                "native_refresh_status": compact_native_status,
+                "native_refresh": native_refresh,
+            },
+            int(native_refresh.get("returncode") or 1),
+            timings,
+        )
 
     output = {
         "ok": True,
@@ -666,8 +721,8 @@ def main() -> int:
         "evidence_reports": evidence_reports,
         "final_verify": final_verify,
         "wiki_integration": compact_wiki_status(wiki_status),
-        "lightrag": compact_lightrag_status(lightrag_status),
-        "lightrag_refresh": lightrag,
+        "native_refresh_status": compact_native_status,
+        "native_refresh": native_refresh,
         "timings": timings.snapshot(),
     }
     if args.append_log:
