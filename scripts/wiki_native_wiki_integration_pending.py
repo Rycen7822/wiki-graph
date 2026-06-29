@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,13 +15,28 @@ DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD = 10
 WIKI_INTEGRATION_ACTIONABLE_STATUSES = {"raw_saved"}
 WIKI_INTEGRATION_REVIEW_STATUSES = {"needs_review"}
 WIKI_INTEGRATION_TERMINAL_STATUSES = {"failed", "skipped_duplicate"}
-_RETIRED_MARKED_PENDING_KEY = re.compile(r"^last_marked_(?!graph_pending(?:_count)?$)[A-Za-z0-9_]+_pending(?:_count)?$")
+PENDING_WIKI_INTEGRATION_LEDGER_FIELDS = {
+    "version",
+    "threshold",
+    "last_successful_integration_at",
+    "last_successful_integration_raw_count",
+    "last_integrated_paths",
+    "pending",
+    "dirty",
+    "last_failed_integration",
+    "last_pending_update_at",
+    "current_raw_count_at_last_pending_update",
+    "last_integration_reason",
+    "last_cleared_pending",
+    "last_cleared_pending_count",
+    "last_remaining_pending_count",
+}
 
 
 def normalize_pending_wiki_integration_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
-    """Drop retired downstream-backend marker keys while preserving current schema fields."""
+    """Keep only the current pending-wiki-integration ledger schema fields."""
 
-    return {key: value for key, value in ledger.items() if not _RETIRED_MARKED_PENDING_KEY.match(str(key))}
+    return {key: value for key, value in ledger.items() if str(key) in PENDING_WIKI_INTEGRATION_LEDGER_FIELDS}
 
 
 def pending_wiki_integration_ledger_path(state_dir: Path) -> Path:

@@ -1,4 +1,4 @@
-"""Wikigraph refresh pending ledger helpers."""
+"""Read-only diagnostics for the retired wikigraph refresh pending ledger."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from wiki_native_wiki_integration_pending import pending_wiki_integration_status
 
 PENDING_WIKIGRAPH_REFRESH_LEDGER = "pending_wikigraph_refresh.json"
 DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD = 10
+WIKIGRAPH_REFRESH_LEDGER_WRITE_RETIRED_MESSAGE = (
+    "wikigraph refresh pending ledger writes are retired after native zvec production cutover; "
+    "use batch_native_refresh.py status/refresh and pending_native_refresh.json"
+)
 
 
 def pending_wikigraph_refresh_ledger_path(state_dir: Path) -> Path:
@@ -55,12 +59,7 @@ def load_wikigraph_refresh_ledger(state_dir: Path, threshold: int | None = None)
 
 
 def save_wikigraph_refresh_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
-    ensure_state_dirs(state_dir)
-    path = pending_wikigraph_refresh_ledger_path(state_dir)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-    return path
+    raise RuntimeError(WIKIGRAPH_REFRESH_LEDGER_WRITE_RETIRED_MESSAGE)
 
 
 def wikigraph_refresh_import_summary(import_report_path: Path) -> dict[str, Any]:
@@ -116,35 +115,7 @@ def mark_wikigraph_refresh_pending(
     expected_sections: list[str] | None = None,
     threshold: int | None = None,
 ) -> dict[str, Any]:
-    ledger = load_wikigraph_refresh_ledger(state_dir, threshold=threshold)
-    effective_threshold = int(
-        threshold if threshold is not None else (ledger.get("threshold") or DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD)
-    )
-    ledger["threshold"] = effective_threshold
-    entry = {
-        "raw_path": raw_path,
-        "title": title or (Path(raw_path).stem if raw_path else ""),
-        "event_type": event_type,
-        "added_at": now_stamp(),
-        "changed_surfaces": changed_surfaces or ["raw", "compiled", "meta", "log"],
-        "expected_sections": expected_sections or [],
-    }
-    pending = list(ledger.get("pending") or [])
-    replaced = False
-    if raw_path:
-        for index, old in enumerate(pending):
-            if isinstance(old, dict) and old.get("raw_path") == raw_path:
-                pending[index] = {**old, **entry}
-                replaced = True
-                break
-    if not replaced:
-        pending.append(entry)
-    ledger["pending"] = pending
-    ledger["dirty"] = True
-    ledger["last_pending_update_at"] = entry["added_at"]
-    ledger["current_raw_count_at_last_pending_update"] = len(raw_clip_files(root))
-    save_wikigraph_refresh_ledger(state_dir, ledger)
-    return entry
+    raise RuntimeError(WIKIGRAPH_REFRESH_LEDGER_WRITE_RETIRED_MESSAGE)
 
 
 def pending_wikigraph_refresh_status(
@@ -242,35 +213,8 @@ def clear_wikigraph_refresh_pending_after_success(
     import_report_path: Path | None = None,
     reason: str = "refresh",
 ) -> dict[str, Any]:
-    ledger = load_wikigraph_refresh_ledger(state_dir)
-    pending = list(ledger.get("pending") or [])
-    report_path = import_report_path or (state_dir / "custom_kg_import_report.json")
-    import_summary = wikigraph_refresh_import_summary(report_path)
-    cleared_at = now_stamp()
-    ledger["last_successful_refresh_at"] = import_summary.get("finished_at") or cleared_at
-    ledger["last_successful_raw_count"] = len(raw_clip_files(root))
-    ledger["last_successful_import_payload"] = import_summary.get("payload") or {}
-    ledger["last_successful_import_report"] = import_summary.get("report_path")
-    ledger["last_refresh_reason"] = reason
-    ledger["last_cleared_pending"] = pending
-    ledger["last_cleared_pending_count"] = len(pending)
-    ledger["pending"] = []
-    ledger["dirty"] = False
-    ledger["last_failed_refresh"] = None
-    save_wikigraph_refresh_ledger(state_dir, ledger)
-    return {
-        "cleared_count": len(pending),
-        "last_successful_refresh_at": ledger["last_successful_refresh_at"],
-        "last_successful_raw_count": ledger["last_successful_raw_count"],
-        "last_successful_import_payload": ledger["last_successful_import_payload"],
-        "ledger_path": str(pending_wikigraph_refresh_ledger_path(state_dir)),
-    }
+    raise RuntimeError(WIKIGRAPH_REFRESH_LEDGER_WRITE_RETIRED_MESSAGE)
 
 
 def record_wikigraph_refresh_failure(state_dir: Path, reason: str, log_path: str = "", message: str = "") -> dict[str, Any]:
-    ledger = load_wikigraph_refresh_ledger(state_dir)
-    failure = {"at": now_stamp(), "reason": reason, "log_path": log_path, "message": message}
-    ledger["last_failed_refresh"] = failure
-    ledger["dirty"] = True
-    save_wikigraph_refresh_ledger(state_dir, ledger)
-    return failure
+    raise RuntimeError(WIKIGRAPH_REFRESH_LEDGER_WRITE_RETIRED_MESSAGE)
