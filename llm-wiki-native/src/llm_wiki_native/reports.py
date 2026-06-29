@@ -19,7 +19,7 @@ _QUERY_ROW_REQUIRED = {
 _SHADOW_REPORT_REQUIRED = {
     "schema_version",
     "query_suite",
-    "lightrag",
+    "baseline",
     "native",
     "trace_paths",
     "promotion_blockers",
@@ -55,13 +55,13 @@ def validate_query_suite_row(row: dict) -> None:
 
 
 def validate_shadow_report(report: dict) -> None:
-    """Validate a LightRAG-vs-native shadow benchmark report shell."""
+    """Validate a baseline-vs-native shadow benchmark report shell."""
 
     _require_keys(report, _SHADOW_REPORT_REQUIRED, "report")
     if int(report.get("schema_version", -1)) != NATIVE_SCHEMA_VERSION:
         raise ValueError(f"report.schema_version must be {NATIVE_SCHEMA_VERSION}")
-    if not isinstance(report.get("lightrag"), dict):
-        raise ValueError("report.lightrag must be an object")
+    if not isinstance(report.get("baseline"), dict):
+        raise ValueError("report.baseline must be an object")
     if not isinstance(report.get("native"), dict):
         raise ValueError("report.native must be an object")
     _require_list(report, "trace_paths", "report")
@@ -91,13 +91,13 @@ def _collect_entities(response: dict[str, Any]) -> set[str]:
 
 def compare_shadow_response(
     query_id: str,
-    lightrag_response: dict[str, Any],
+    baseline_response: dict[str, Any],
     native_response: dict[str, Any],
     *,
     must_include_paths: list[str] | None = None,
     must_include_entities: list[str] | None = None,
 ) -> dict[str, Any]:
-    lightrag_paths = _collect_paths(lightrag_response)
+    baseline_paths = _collect_paths(baseline_response)
     native_paths = _collect_paths(native_response)
     native_entities = _collect_entities(native_response)
     blockers: list[str] = []
@@ -111,8 +111,8 @@ def compare_shadow_response(
         "query_id": query_id,
         "ok": not blockers,
         "blockers": blockers,
-        "lightrag_paths": sorted(lightrag_paths),
+        "baseline_paths": sorted(baseline_paths),
         "native_paths": sorted(native_paths),
-        "path_overlap": sorted(lightrag_paths & native_paths),
+        "path_overlap": sorted(baseline_paths & native_paths),
         "native_entities": sorted(native_entities),
     }

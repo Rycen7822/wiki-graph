@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
-from wiki_lightrag_lib import common_paths_parser, generated_docs_from_state, print_json, sync_docs_to_lightrag
+from __future__ import annotations
+
+from wiki_native_lib import common_paths_parser, print_json
 
 
-def main() -> int:
-    parser = common_paths_parser("Sync generated edge, MethodAtom, and raw-section docs into LightRAG")
+def unsupported_document_sync_payload(script_name: str) -> dict[str, object]:
+    return {
+        "ok": False,
+        "error": "unsupported_native_document_sync",
+        "script": script_name,
+        "operation": "document_sync",
+        "unsupported_endpoint": "/documents/texts",
+        "message": "Legacy document ingestion is disabled during native-zvec migration.",
+        "native_refresh": {
+            "command": "scripts/batch_native_refresh.py refresh --prepare-only",
+            "cutover_command": "scripts/batch_native_refresh.py refresh --cutover",
+            "status_command": "scripts/batch_native_refresh.py status",
+        },
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = common_paths_parser("Unsupported legacy generated-doc sync entrypoint")
     parser.add_argument("--kind", choices=["all", "edge", "method_atom", "raw_section"], default="all")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -11,23 +29,9 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--no-wait", action="store_true")
     parser.add_argument("--timeout", type=int, default=900)
-    args = parser.parse_args()
-    docs = generated_docs_from_state(args.state_dir, args.kind)
-    if args.limit:
-        docs = docs[: args.limit]
-    result = sync_docs_to_lightrag(
-        docs,
-        args.state_dir,
-        args.server,
-        args.workdir,
-        full=args.full,
-        force=args.force,
-        batch_size=args.batch_size,
-        wait=not args.no_wait,
-        timeout_s=args.timeout,
-    )
-    print_json(result)
-    return 0 if not result.get("errors") else 1
+    parser.parse_args(argv)
+    print_json(unsupported_document_sync_payload("sync_virtual_docs.py"))
+    return 1
 
 
 if __name__ == "__main__":

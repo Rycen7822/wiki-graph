@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from llm_wiki_native.build import MissingNativeVectorsError
 from llm_wiki_native.cli import build_workspace_from_state, main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 
@@ -103,15 +105,121 @@ def test_build_workspace_from_state_materializes_manifest_and_edges_without_acti
     assert [item["neighbor_id"] for item in db.neighbors("native-test", "doc:a")] == ["doc:b", "tag:x"]
 
 
+def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -> None:
+    state = _sample_state(tmp_path)
+    db_path = tmp_path / "native.sqlite"
+    zvec_path = tmp_path / "native.zvec"
+
+    class Stats:
+        attempted = 4
+        inserted = 4
+        failed = 0
+
+    class Smoke:
+        checked = 4
+        passed = 4
+        failures = []
+
+    class Workspace:
+        def __init__(self) -> None:
+            self.records = []
+            self.flushed = False
+            self.sample_doc_ids = []
+
+        def bulk_insert(self, records):
+            self.records = list(records)
+            return Stats()
+
+        def flush_optimize_close(self) -> None:
+            self.flushed = True
+
+        def self_nearest_smoke(self, sample_doc_ids):
+            self.sample_doc_ids = list(sample_doc_ids)
+            return Smoke()
+
+    created = {}
+
+    def factory(path: Path, embedding_dim: int) -> Workspace:
+        created["path"] = path
+        created["embedding_dim"] = embedding_dim
+        created["workspace"] = Workspace()
+        return created["workspace"]
+
+    report = build_workspace_from_state(
+        state,
+        db_path,
+        "native-test",
+        zvec_path=zvec_path,
+        zvec_workspace_factory=factory,
+    )
+
+    assert created["path"] == zvec_path
+    assert created["embedding_dim"] == 2
+    assert [(record.record_type, record.record_id) for record in created["workspace"].records] == [
+        ("chunk", "chunk-a"),
+        ("entity", "doc:a"),
+        ("relationship", "doc:a<SEP>tag:x"),
+        ("section", "raw_section:doc-a:method"),
+    ]
+    assert report["zvec"] == {
+        "path": str(zvec_path),
+        "embedding_dim": 2,
+        "record_count": 4,
+        "insert_stats": {"attempted": 4, "inserted": 4, "failed": 0},
+        "self_nearest": {"checked": 4, "failures": [], "ok": True, "passed": 4},
+        "self_nearest_top1_ok": True,
+    }
+    assert created["workspace"].flushed is True
+    assert len(created["workspace"].sample_doc_ids) == 4
+    assert all(":" not in doc_id and "/" not in doc_id for doc_id in created["workspace"].sample_doc_ids)
+
+
+def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_path) -> None:
+    state = _sample_state(tmp_path)
+    db_path = tmp_path / "native.sqlite"
+    zvec_path = tmp_path / "native_zvec" / "workspaces" / "native-test" / "zvec_records"
+    prepared_path = tmp_path / "native_zvec" / "prepared_workspace.json"
+
+    class Stats:
+        attempted = 4
+        inserted = 4
+        failed = 0
+
+    class Workspace:
+        def bulk_insert(self, records):
+            return Stats()
+
+    report = build_workspace_from_state(
+        state,
+        db_path,
+        "native-test",
+        zvec_path=zvec_path,
+        prepared_workspace_path=prepared_path,
+        zvec_workspace_factory=lambda _path, _dim: Workspace(),
+    )
+
+    pointer = json.loads(prepared_path.read_text(encoding="utf-8"))
+    assert report["prepared_workspace"] == str(prepared_path)
+    assert pointer["schema_version"] == 1
+    assert pointer["workspace_id"] == "native-test"
+    assert pointer["status"] == "prepared"
+    assert pointer["sqlite_path"] == str(db_path)
+    assert pointer["zvec_path"] == str(zvec_path)
+    assert pointer["source_manifest_hash"] == report["source_manifest_hash"]
+    assert pointer["counts"] == report["counts"]
+    assert pointer["zvec"] == report["zvec"]
+
+
 def test_build_workspace_from_state_fails_closed_when_vectors_are_missing(tmp_path) -> None:
     state = _sample_state(tmp_path, with_vectors=False)
+    db_path = tmp_path / "native.sqlite"
 
-    try:
-        build_workspace_from_state(state, tmp_path / "native.sqlite", "native-test")
-    except ValueError as exc:
-        assert "vector" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("build_workspace_from_state should require complete vector coverage")
+    with pytest.raises(MissingNativeVectorsError) as exc:
+        build_workspace_from_state(state, db_path, "native-test")
+
+    assert db_path.exists() is False
+    assert exc.value.report["total_missing"] == 4
+    assert exc.value.report["by_type"] == {"chunk": 1, "entity": 1, "relationship": 1, "section": 1}
 
 
 def test_cli_main_builds_workspace_and_prints_json_report(tmp_path, capsys) -> None:

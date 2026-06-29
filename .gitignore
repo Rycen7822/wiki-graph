@@ -1,6 +1,8 @@
 # Local progress notes / scratch
 note.md
+CODEX_STATE.md
 worknotes/
+README.md
 
 # Python/test caches
 __pycache__/
@@ -9,3 +11,15 @@ __pycache__/
 
 # Local temp artifacts
 .tmp_*/
+tmp/wiki_test_state/
+wiki_test/
+
+# Local reference checkouts
+reference/
+
+# Codex project-local agents
+.agents/
+.codex
+
+# Local env file
+.env

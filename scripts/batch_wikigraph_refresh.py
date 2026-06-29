@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Latency-aware pending ledger and batch LightRAG refresh runner for llm-wiki.
+"""Latency-aware pending ledger and batch wikigraph refresh runner for llm-wiki.
 
-The default workflow is deliberately conservative: mark Markdown/wiki changes as pending, refresh only when the pending threshold is reached or before LightRAG-heavy queries, and keep all state under the external LightRAG workdir/state tree rather than the human wiki root.
+The default workflow is deliberately conservative: mark Markdown/wiki changes as pending, refresh only when the pending threshold is reached or before graph-heavy queries, and keep all state under the external wikigraph workdir/state tree rather than the human wiki root.
 """
 
 from __future__ import annotations
@@ -17,19 +17,21 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from wiki_lightrag_lib import (
-    DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD,
+from wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
     DEFAULT_WORKDIR,
-    clear_lightrag_refresh_pending_after_success,
     ensure_state_dirs,
-    mark_lightrag_refresh_pending,
     now_stamp,
-    pending_lightrag_refresh_status,
     print_json,
-    record_lightrag_refresh_failure,
     release_process_memory,
+)
+from wiki_wikigraph_refresh_pending import (
+    DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD,
+    clear_wikigraph_refresh_pending_after_success,
+    mark_wikigraph_refresh_pending,
+    pending_wikigraph_refresh_status,
+    record_wikigraph_refresh_failure,
 )
 from custom_kg_incremental import (
     DEFAULT_EMBEDDING_PROFILE,
@@ -37,16 +39,56 @@ from custom_kg_incremental import (
     EMBEDDING_PROFILES,
     embedding_profile_env,
     plan_incremental_import,
-    prepared_swap_report_path,
+)
+from wiki_wikigraph_compat_names import (
+    retired_graph_package_name,
+    retired_graph_service_name,
+    retired_graph_tool_python_path,
 )
 
-LIGHTRAG_PYTHON = Path("/home/xu/.local/share/uv/tools/lightrag-hku/bin/python")
-SERVICE_NAME = "lightrag-server.service"
+_RETIRED_BACKEND = retired_graph_package_name()
+WIKIGRAPH_LEGACY_TOOL_PYTHON = Path(retired_graph_tool_python_path())
+LEGACY_WIKIGRAPH_SERVICE_NAME = retired_graph_service_name()
 MATERIALIZABLE_FULL_REBUILD_REASONS = {"incremental_interval_reached"}
+LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE = "legacy-wikigraph-activation-retired"
+LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE = (
+    "legacy wikigraph production activation is retired; use batch_native_refresh.py refresh --cutover "
+    "or a dedicated audited migration slice instead of mutating live rag_storage"
+)
+LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE = "legacy-wikigraph-cold-import-retired"
+LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE = (
+    "legacy wikigraph cold full import is retired; use batch_native_refresh.py refresh --prepare-only "
+    "or an explicit native cutover slice instead of resetting live rag_storage"
+)
+LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE = "legacy-wikigraph-full-materialization-retired"
+LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE = (
+    "legacy wikigraph full materialization is retired; use batch_native_refresh.py refresh --prepare-only "
+    "or an explicit native staging slice instead of building old-side file storage"
+)
+
+
+class RetiredWikigraphActivationError(RuntimeError):
+    pass
 
 
 def script_path(workdir: Path, name: str) -> str:
     return str(workdir / "scripts" / name)
+
+
+def retired_wikigraph_activation_command() -> list[str]:
+    return ["python-internal", LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE, LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE]
+
+
+def retired_wikigraph_cold_import_command() -> list[str]:
+    return ["python-internal", LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE, LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE]
+
+
+def retired_wikigraph_full_materialization_command() -> list[str]:
+    return [
+        "python-internal",
+        LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE,
+        LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE,
+    ]
 
 
 def build_refresh_command_groups(root: Path, state_dir: Path, workdir: Path, reuse_validation_report: Path | None = None) -> dict[str, list[list[str]]]:
@@ -90,22 +132,7 @@ def build_refresh_command_groups(root: Path, state_dir: Path, workdir: Path, reu
         ],
         [py, script_path(workdir, "select_section_similarity_edges.py"), "--root", str(root), "--state-dir", str(state_dir), "--workdir", str(workdir)],
     ]
-    full_import = [
-        ["systemctl", "--user", "stop", SERVICE_NAME],
-        ["python-internal", "reset-rag-storage", str(workdir / "rag_storage"), str(workdir / "inputs")],
-        [
-            str(LIGHTRAG_PYTHON),
-            script_path(workdir, "import_custom_kg.py"),
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state_dir),
-            "--workdir",
-            str(workdir),
-        ],
-        ["systemctl", "--user", "start", SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
+    full_import = [retired_wikigraph_cold_import_command()]
     return {"artifact": artifact, "full_import": full_import}
 
 
@@ -115,10 +142,9 @@ def build_refresh_commands(root: Path, state_dir: Path, workdir: Path, reuse_val
 
 
 def build_incremental_import_commands(root: Path, state_dir: Path, workdir: Path) -> list[list[str]]:
-    prepared_report = prepared_swap_report_path(state_dir)
     return [
         [
-            str(LIGHTRAG_PYTHON),
+            str(WIKIGRAPH_LEGACY_TOOL_PYTHON),
             script_path(workdir, "custom_kg_incremental.py"),
             "apply",
             "--root",
@@ -131,70 +157,14 @@ def build_incremental_import_commands(root: Path, state_dir: Path, workdir: Path
             str(DEFAULT_FULL_REBUILD_INTERVAL),
             "--prepare-swap",
         ],
-        ["systemctl", "--user", "stop", SERVICE_NAME],
-        [
-            str(LIGHTRAG_PYTHON),
-            script_path(workdir, "custom_kg_incremental.py"),
-            "finalize-prepared-swap",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state_dir),
-            "--workdir",
-            str(workdir),
-            "--prepared-report",
-            str(prepared_report),
-        ],
-        ["systemctl", "--user", "start", SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
+        retired_wikigraph_activation_command(),
     ]
 
 
 def build_full_materialization_import_commands(root: Path, state_dir: Path, workdir: Path, embedding_profile: str | None = None) -> list[list[str]]:
     embedding_profile = embedding_profile or DEFAULT_EMBEDDING_PROFILE
     embedding_profile_env(embedding_profile)
-    prepared_report = prepared_swap_report_path(state_dir)
-    return [
-        [
-            str(LIGHTRAG_PYTHON),
-            script_path(workdir, "custom_kg_incremental.py"),
-            "materialize-full",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state_dir),
-            "--workdir",
-            str(workdir),
-            "--vector-cache",
-            str(state_dir / "vector_cache.sqlite"),
-            "--seed-from-storage",
-            "--seed-storage-dir",
-            str(workdir / "rag_storage"),
-            "--fill-missing-vectors",
-            "--embedding-profile",
-            embedding_profile,
-            "--allow-current-storage-audit-failure",
-            "--no-swap",
-            "--prepare-swap",
-        ],
-        ["systemctl", "--user", "stop", SERVICE_NAME],
-        [
-            str(LIGHTRAG_PYTHON),
-            script_path(workdir, "custom_kg_incremental.py"),
-            "finalize-prepared-swap",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state_dir),
-            "--workdir",
-            str(workdir),
-            "--prepared-report",
-            str(prepared_report),
-            "--allow-current-storage-audit-failure",
-        ],
-        ["systemctl", "--user", "start", SERVICE_NAME],
-        ["python-internal", "health", "http://127.0.0.1:9621/health"],
-    ]
+    return [retired_wikigraph_full_materialization_command()]
 
 
 def forced_full_rebuild_reuses_vector_cache(import_mode: dict[str, Any]) -> bool:
@@ -281,7 +251,7 @@ def select_import_commands(root: Path, state_dir: Path, workdir: Path, full_impo
         return build_incremental_import_commands(root, state_dir, workdir)
     if should_use_full_materialization(import_mode):
         return build_full_materialization_import_commands(root, state_dir, workdir, embedding_profile=embedding_profile)
-    return full_import_commands
+    return [retired_wikigraph_cold_import_command()]
 
 
 def append_log(log_path: Path, message: str) -> None:
@@ -323,7 +293,7 @@ def wait_health(url: str, log_path: Path, attempts: int = 12, delay_s: float = 5
             last_error = repr(exc)
             append_log(log_path, f"[health:{attempt}] {last_error}\n")
         time.sleep(delay_s)
-    raise RuntimeError(f"LightRAG health check did not become healthy: {last_error}")
+    raise RuntimeError(f"wikigraph health check did not become healthy: {last_error}")
 
 
 def run_real_refresh(
@@ -369,7 +339,7 @@ def run_real_refresh(
     if should_skip_incremental_import(import_mode):
         append_log(import_log, f"[batch-refresh] import skipped {now_stamp()} reason=incremental_empty_diff\n")
         timings["import_commands_s"] = 0.0
-        clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
+        clear = clear_wikigraph_refresh_pending_after_success(root, state_dir, reason=reason)
         return {
             "artifact_log": str(artifact_log),
             "import_log": str(import_log),
@@ -389,53 +359,52 @@ def run_real_refresh(
             for command in commands:
                 if command[:2] == ["python-internal", "reset-rag-storage"]:
                     reset_rag_storage(workdir, import_log)
+                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_CODE]:
+                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_ACTIVATION_RETIRED_MESSAGE
+                    raise RetiredWikigraphActivationError(message)
+                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_CODE]:
+                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_COLD_IMPORT_RETIRED_MESSAGE
+                    raise RetiredWikigraphActivationError(message)
+                elif command[:2] == ["python-internal", LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_CODE]:
+                    message = command[2] if len(command) > 2 else LEGACY_WIKIGRAPH_FULL_MATERIALIZATION_RETIRED_MESSAGE
+                    raise RetiredWikigraphActivationError(message)
                 elif command[:2] == ["python-internal", "health"]:
                     health = wait_health(command[2], import_log)
                 else:
                     env = os.environ.copy()
-                    if command and command[0] == str(LIGHTRAG_PYTHON):
+                    if command and command[0] == str(WIKIGRAPH_LEGACY_TOOL_PYTHON):
                         env.update(profile_env)
                     run_subprocess(command, import_log, env=env, timeout=None)
-                    if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == SERVICE_NAME:
+                    if command[:3] == ["systemctl", "--user", "stop"] and command[-1] == LEGACY_WIKIGRAPH_SERVICE_NAME:
                         service_stopped = True
-                    if command[:3] == ["systemctl", "--user", "start"] and command[-1] == SERVICE_NAME:
+                    if command[:3] == ["systemctl", "--user", "start"] and command[-1] == LEGACY_WIKIGRAPH_SERVICE_NAME:
                         service_started = True
         except Exception as exc:
-            setattr(exc, "_lightrag_service_stopped", service_stopped)
+            setattr(exc, "_wikigraph_service_stopped", service_stopped)
             if service_stopped and not service_started:
-                start_command = ["systemctl", "--user", "start", SERVICE_NAME]
+                start_command = ["systemctl", "--user", "start", LEGACY_WIKIGRAPH_SERVICE_NAME]
                 append_log(import_log, f"[batch-refresh] recovery start after failure: {type(exc).__name__}: {exc}\n")
                 try:
                     run_subprocess(start_command, import_log, timeout=180)
                     service_started = True
                 except Exception as recovery_exc:  # pragma: no cover - defensive recovery path
                     append_log(import_log, f"[batch-refresh] recovery start failed: {type(recovery_exc).__name__}: {recovery_exc}\n")
-                    raise RuntimeError(f"{exc}; additionally failed to restart {SERVICE_NAME}: {recovery_exc}") from exc
+                    raise RuntimeError(f"{exc}; additionally failed to restart {LEGACY_WIKIGRAPH_SERVICE_NAME}: {recovery_exc}") from exc
             raise
         return health, service_stopped, service_started
 
     import_started = time.perf_counter()
     try:
         health, _service_stopped, _service_started = _run_import_commands(import_commands)
+    except RetiredWikigraphActivationError:
+        raise
     except Exception as exc:
-        if should_use_full_materialization(import_mode) and not bool(getattr(exc, "_lightrag_service_stopped", False)):
-            if forced_full_rebuild_reuses_vector_cache(import_mode):
-                append_log(
-                    import_log,
-                    f"[batch-refresh] full materialization failed before service stop; refusing cold full import because force_full_rebuild+reuse_vector_cache is fail-closed: {type(exc).__name__}: {exc}\n",
-                )
-                raise
-            append_log(import_log, f"[batch-refresh] full materialization failed before service stop; falling back to cold full import: {type(exc).__name__}: {exc}\n")
-            fallback_mode = dict(import_mode)
-            fallback_mode["full_materialization_fallback"] = "cold_full_import"
-            fallback_mode["fallback_reason"] = f"{type(exc).__name__}: {exc}"
-            import_mode = fallback_mode
-            health, _service_stopped, _service_started = _run_import_commands(full_import_commands)
-        else:
-            raise
+        if should_use_full_materialization(import_mode) and not bool(getattr(exc, "_wikigraph_service_stopped", False)):
+            append_log(import_log, f"[batch-refresh] full materialization failed before service stop; legacy cold full import fallback is retired: {type(exc).__name__}: {exc}\n")
+        raise
     timings["import_commands_s"] = round(time.perf_counter() - import_started, 6)
     append_log(import_log, f"[batch-refresh] import done {now_stamp()} mode={import_mode.get('selected_mode')}\n")
-    clear = clear_lightrag_refresh_pending_after_success(root, state_dir, reason=reason)
+    clear = clear_wikigraph_refresh_pending_after_success(root, state_dir, reason=reason)
     return {"artifact_log": str(artifact_log), "import_log": str(import_log), "health": health, "clear": clear, "import_mode": import_mode, "embedding_profile": embedding_profile, "timings": timings}
 
 
@@ -446,7 +415,7 @@ def add_common_paths(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage pending llm-wiki LightRAG batch refreshes")
+    parser = argparse.ArgumentParser(description="Manage pending llm-wiki wikigraph batch refreshes")
     sub = parser.add_subparsers(dest="command", required=True)
 
     status_parser = sub.add_parser("status", help="Show pending-refresh state and freshness decision")
@@ -461,7 +430,7 @@ def main() -> int:
     mark_parser.add_argument("--event-type", default="new_raw_note")
     mark_parser.add_argument("--changed-surface", action="append", default=[])
     mark_parser.add_argument("--expected-section", action="append", default=[])
-    mark_parser.add_argument("--threshold", type=int, default=None, help=f"Set/override graph-refresh batch threshold for this ledger (default {DEFAULT_PENDING_LIGHTRAG_REFRESH_THRESHOLD} for new ledgers)")
+    mark_parser.add_argument("--threshold", type=int, default=None, help=f"Set/override graph-refresh batch threshold for this ledger (default {DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD} for new ledgers)")
 
     should_parser = sub.add_parser("should-refresh", help="Return whether a refresh should run for this reason")
     add_common_paths(should_parser)
@@ -477,7 +446,7 @@ def main() -> int:
     refresh_parser.add_argument("--force", action="store_true")
     refresh_parser.add_argument("--force-full-rebuild", action="store_true", help="Force the import phase to use a full rebuild mode instead of the planner-selected incremental mode")
     refresh_parser.add_argument("--reuse-vector-cache", action="store_true", help="With --force-full-rebuild, use cache-only full materialization seeded from live storage instead of cold re-embedding")
-    refresh_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for LightRAG Python child commands; default stays conservative")
+    refresh_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for wikigraph Python child commands; default stays conservative")
     refresh_parser.add_argument("--reuse-validation-report", type=Path, default=None, help="Pass an explicit reusable validation report to the artifact validation command; validate_wiki.py still performs fail-closed freshness checks")
 
     clear_parser = sub.add_parser("clear-success", help="Clear pending ledger after an externally completed successful refresh")
@@ -491,10 +460,10 @@ def main() -> int:
     workdir = args.workdir.resolve()
 
     if args.command == "status":
-        print_json(pending_lightrag_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold))
+        print_json(pending_wikigraph_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold))
         return 0
     if args.command == "mark-pending":
-        entry = mark_lightrag_refresh_pending(
+        entry = mark_wikigraph_refresh_pending(
             state_dir,
             root,
             raw_path=args.raw_path,
@@ -504,11 +473,11 @@ def main() -> int:
             expected_sections=args.expected_section or None,
             threshold=args.threshold,
         )
-        status = pending_lightrag_refresh_status(root, state_dir, reason="threshold", threshold=args.threshold)
+        status = pending_wikigraph_refresh_status(root, state_dir, reason="threshold", threshold=args.threshold)
         print_json({"marked": entry, **status})
         return 0
     if args.command == "should-refresh":
-        status = pending_lightrag_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold)
+        status = pending_wikigraph_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold)
         print_json(status)
         if args.exit_code:
             if status.get("blocked_by_pending_wiki_integration"):
@@ -517,16 +486,16 @@ def main() -> int:
                 return 10
         return 0
     if args.command == "clear-success":
-        print_json(clear_lightrag_refresh_pending_after_success(root, state_dir, import_report_path=args.import_report, reason=args.reason))
+        print_json(clear_wikigraph_refresh_pending_after_success(root, state_dir, import_report_path=args.import_report, reason=args.reason))
         return 0
     if args.command == "refresh":
-        status = pending_lightrag_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold)
+        status = pending_wikigraph_refresh_status(root, state_dir, reason=args.reason, threshold=args.threshold)
         force_blocked = bool(args.force and status.get("blocked_by_pending_wiki_integration"))
         should_run = bool((status["should_refresh"] or args.force) and not status.get("blocked_by_pending_wiki_integration"))
         stamp = time.strftime("%Y%m%d_%H%M%S")
         log_dir = state_dir / "refresh_logs"
-        artifact_log = log_dir / f"{stamp}_batch_lightrag_refresh_artifacts.log"
-        import_log = log_dir / f"{stamp}_batch_lightrag_refresh_import.log"
+        artifact_log = log_dir / f"{stamp}_batch_wikigraph_refresh_artifacts.log"
+        import_log = log_dir / f"{stamp}_batch_wikigraph_refresh_import.log"
         reuse_validation_report = args.reuse_validation_report.resolve() if args.reuse_validation_report else None
         command_groups = build_refresh_command_groups(root, state_dir, workdir, reuse_validation_report=reuse_validation_report)
         commands = command_groups["artifact"] + command_groups["full_import"]
@@ -568,7 +537,7 @@ def main() -> int:
                 embedding_profile=args.embedding_profile,
             )
         except Exception as exc:
-            failure = record_lightrag_refresh_failure(state_dir, reason=args.reason, log_path=str(import_log), message=str(exc))
+            failure = record_wikigraph_refresh_failure(state_dir, reason=args.reason, log_path=str(import_log), message=str(exc))
             print_json({"error": type(exc).__name__, "message": str(exc), "failure": failure, "artifact_log": str(artifact_log), "import_log": str(import_log)})
             return 1
         print_json({"dry_run": False, "would_run": True, "status_before": status, **result})

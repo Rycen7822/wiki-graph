@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
-from wiki_lightrag_lib import common_paths_parser, now_stamp, print_json, read_text
+from wiki_native_lib import common_paths_parser, now_stamp, print_json, read_text
 
 
 def main() -> int:

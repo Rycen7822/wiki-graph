@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     common_paths_parser,
     ensure_state_dirs,
     jsonl_read,

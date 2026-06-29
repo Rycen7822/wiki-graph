@@ -416,7 +416,7 @@ def seed_vector_cache_from_storage(
     *,
     previous_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Seed ``cache`` from explicit vector fields in LightRAG file-backend VDB JSON.
+    """Seed ``cache`` from explicit vector fields in wikigraph file-backend VDB JSON.
 
     When ``previous_manifest`` is provided, a storage vector may only satisfy a
     desired record whose vector hash matches the previous successful manifest.

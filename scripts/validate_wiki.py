@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     common_paths_parser,
     print_json,
     validate_wiki,
@@ -54,7 +54,7 @@ def load_reusable_validation_report(path: Path, root: Path, state_dir: Path, wor
 
 
 def main() -> int:
-    parser = common_paths_parser("Validate llm-wiki before/after LightRAG sync")
+    parser = common_paths_parser("Validate llm-wiki before/after native refresh")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--write-report", action="store_true")
     parser.add_argument("--allow-errors", action="store_true")

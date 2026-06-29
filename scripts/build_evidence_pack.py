@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deprecated alias for ``wiki_search.py --save-evidence-pack``."""
 
-from wiki_lightrag_lib import common_paths_parser, print_json
+from wiki_native_lib import common_paths_parser, print_json
 from wiki_search import run_query
 
 

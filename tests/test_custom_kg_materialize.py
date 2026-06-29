@@ -12,6 +12,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import custom_kg_incremental  # noqa: E402
+import custom_kg_vector_fill  # noqa: E402
 from custom_kg_incremental import audit_custom_kg_storage, build_custom_kg_manifest  # noqa: E402
 from custom_kg_materialize import materialize_file_storage_from_manifest  # noqa: E402
 from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage  # noqa: E402
@@ -38,6 +39,91 @@ def _assert_compact_vector_cache_report(report: dict) -> None:
     assert '"resolved"' not in serialized
     assert '"vector"' not in serialized
     assert '"vector": [' not in serialized
+
+
+def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "work"
+    root = tmp_path / "wiki"
+
+    monkeypatch.setattr(
+        custom_kg_incremental,
+        "build_desired_manifest",
+        lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
+    )
+
+    report = custom_kg_incremental.run_export_manifest(
+        types.SimpleNamespace(root=root, state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
+    )
+
+    manifest_path = state_dir / "custom_kg_manifest.json"
+    assert report["ok"] is True
+    assert report["command"] == "export-manifest"
+    assert report["manifest_path"] == str(manifest_path)
+    assert custom_kg_incremental.load_manifest(state_dir) == manifest
+    assert not workdir.exists()
+    assert not (state_dir / "prepared_swap").exists()
+
+
+def test_run_export_manifest_refuses_retired_token_content_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    first_chunk = next(iter(manifest["chunks"].values()))
+    first_chunk["content"] = "retired backend mention: " + ("Light" + "RAG")
+    state_dir = tmp_path / "state"
+
+    monkeypatch.setattr(
+        custom_kg_incremental,
+        "build_desired_manifest",
+        lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
+    )
+
+    with pytest.raises(RuntimeError, match="first_source_paths=a.md") as exc_info:
+        custom_kg_incremental.run_export_manifest(
+            types.SimpleNamespace(
+                root=tmp_path / "wiki",
+                state_dir=state_dir,
+                workdir=tmp_path / "work",
+                limit_docs=None,
+                limit_edges=None,
+            )
+        )
+
+    assert ("Light" + "RAG") not in str(exc_info.value)
+    assert not (state_dir / "custom_kg_manifest.json").exists()
+    assert not state_dir.exists()
+
+
+def test_run_audit_manifest_content_reports_sources_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    first_chunk = next(iter(manifest["chunks"].values()))
+    first_chunk["content"] = "retired backend mention: " + ("Light" + "RAG")
+    first_entity = next(iter(manifest["entities"].values()))
+    first_entity["description"] = "another retired backend mention: " + ("light" + "rag")
+    first_entity["file_path"] = "b.md"
+    state_dir = tmp_path / "state"
+    workdir = tmp_path / "work"
+
+    monkeypatch.setattr(
+        custom_kg_incremental,
+        "build_desired_manifest",
+        lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
+    )
+
+    report = custom_kg_incremental.run_audit_manifest_content(
+        types.SimpleNamespace(root=tmp_path / "wiki", state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
+    )
+
+    assert report["ok"] is False
+    assert report["command"] == "audit-manifest-content"
+    assert report["token_variant_count"] == 2
+    assert report["source_count"] == 2
+    assert report["sources"] == [
+        {"source_path": "a.md", "record_count": 1, "token_variant_count": 1, "collections": {"chunks": 1}},
+        {"source_path": "b.md", "record_count": 1, "token_variant_count": 1, "collections": {"entities": 1}},
+    ]
+    assert not state_dir.exists()
+    assert not workdir.exists()
 
 
 def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
@@ -98,7 +184,7 @@ def _write_prepared_swap_report(
 
 
 def _prepared_finalize_fixture(tmp_path: Path, *, backup_name: str = "prepared-backup") -> types.SimpleNamespace:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -180,13 +266,106 @@ def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_pat
     assert report["elapsed_by_collection_s"]["chunks"] >= 0
 
 
+def test_openai_compatible_vector_fill_provider_loads_workdir_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "EMBEDDING_BINDING=openai",
+                "EMBEDDING_BINDING_HOST=https://embedding.local/v1",
+                "EMBEDDING_BINDING_API_KEY=secret",
+                "EMBEDDING_MODEL=BAAI/bge-m3",
+                "EMBEDDING_DIM=2",
+                "EMBEDDING_TIMEOUT=17",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for name in ("EMBEDDING_BINDING_HOST", "EMBEDDING_BINDING_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"index": 0, "embedding": [0.1, 0.2]}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append({"request": request, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(custom_kg_vector_fill.urllib.request, "urlopen", fake_urlopen)
+
+    vectors = custom_kg_vector_fill.embed_texts_openai_compatible(
+        ["Doc A content"],
+        workdir=tmp_path,
+        embedding_model="BAAI/bge-m3",
+        embedding_dim=2,
+    )
+
+    assert vectors == [[0.1, 0.2]]
+    assert calls[0]["timeout"] == 17
+    assert calls[0]["request"].full_url == "https://embedding.local/v1/embeddings"
+    assert calls[0]["request"].headers["Authorization"] == "Bearer secret"
+    assert json.loads(calls[0]["request"].data.decode("utf-8")) == {"model": "BAAI/bge-m3", "input": ["Doc A content"]}
+
+
+def test_fill_missing_manifest_vectors_reports_redacted_embedding_env(tmp_path) -> None:
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "EMBEDDING_BINDING=openai",
+                "EMBEDDING_BINDING_HOST=https://embedding.local/v1",
+                "EMBEDDING_BINDING_API_KEY=secret",
+                "EMBEDDING_MODEL=BAAI/bge-m3",
+                "EMBEDDING_DIM=2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "metadata": {},
+        "chunks": {
+            "chunk:a": {
+                "record_type": "chunk",
+                "record_id": "chunk:a",
+                "vector_hash": "hash-a",
+                "content": "Doc A content",
+                "embedding_params_version": "v1",
+            }
+        },
+        "entities": {},
+        "relationships": {},
+    }
+    vector_report = {"missing": {"chunks": ["chunk:a"], "entities": [], "relationships": []}}
+    cache = VectorCache(tmp_path / "cache.sqlite")
+
+    report = custom_kg_vector_fill.fill_missing_manifest_vectors(
+        manifest,
+        vector_report,
+        cache,
+        workdir=tmp_path,
+        embed_texts_func=lambda texts, **_kwargs: [[0.1, 0.2]],
+    )
+
+    assert report["embedding_model"] == "BAAI/bge-m3"
+    assert report["embedding_dim"] == 2
+    assert report["embedding_env"]["EMBEDDING_BINDING_API_KEY"] == "[REDACTED]"
+    assert report["embedding_env"]["EMBEDDING_BINDING_HOST"] == "https://embedding.local/v1"
+    assert "secret" not in json.dumps(report, ensure_ascii=False)
+
+
 def test_manifest_and_materialization_preserve_same_endpoint_typed_relationships(tmp_path) -> None:
     payload = _payload()
     payload["relationships"] = [
         {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links to topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
         {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic cites doc", "keywords": "SOURCED_BY", "source_id": "doc:a", "weight": 0.8, "file_path": "a.md"},
     ]
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
 
     assert len(manifest["relationships"]) == 2
     assert {record["keywords"] for record in manifest["relationships"].values()} == {"WIKILINKS_TO", "SOURCED_BY"}
@@ -233,7 +412,7 @@ def test_materialized_audit_accepts_aggregated_graph_sources_for_same_pair_typed
             {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic cites Doc A from Doc B context", "keywords": "SOURCED_BY", "source_id": "doc:b", "weight": 0.8, "file_path": "b.md"},
         ],
     }
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
     ordinal = 1
     for collection in ("chunks", "entities", "relationships"):
@@ -270,7 +449,7 @@ def test_relationship_vector_content_uses_pair_sorted_endpoint_order() -> None:
         }
     ]
 
-    manifest = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     relationship = next(iter(manifest["relationships"].values()))
 
     assert relationship["src_id"] == "topic:z"
@@ -291,7 +470,7 @@ def test_full_materialization_blocker_ignores_legacy_relationship_endpoint_order
             "file_path": "a.md",
         }
     ]
-    desired = build_custom_kg_manifest(payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     previous = copy.deepcopy(desired)
     key, previous_relationship = next(iter(previous["relationships"].items()))
     previous_relationship["content"] = "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
@@ -310,7 +489,7 @@ def test_full_materialization_blocker_ignores_legacy_relationship_endpoint_order
 
 
 def test_materialize_file_storage_from_all_hit_vector_cache_passes_audit(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
     ordinal = 1
     for collection in ("chunks", "entities", "relationships"):
@@ -343,7 +522,7 @@ def test_materialize_file_storage_from_all_hit_vector_cache_passes_audit(tmp_pat
 
 
 def test_materialize_file_storage_writes_nanovectordb_matrix_buffer(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
     for collection in ("chunks", "entities", "relationships"):
         for idx, record in enumerate(manifest[collection].values(), start=1):
@@ -368,7 +547,7 @@ def test_materialize_file_storage_writes_nanovectordb_matrix_buffer(tmp_path) ->
 
 
 def test_seed_vector_cache_from_materialized_file_storage_roundtrips_all_vectors(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     source_cache = VectorCache(tmp_path / "source_cache.sqlite")
     ordinal = 1
     for collection in ("chunks", "entities", "relationships"):
@@ -395,7 +574,7 @@ def test_seed_vector_cache_from_materialized_file_storage_roundtrips_all_vectors
 
 
 def test_materialize_file_storage_fails_closed_when_vectors_are_missing(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
 
     try:
         materialize_file_storage_from_manifest(manifest, {"chunks": {}, "entities": {}, "relationships": {}}, tmp_path / "shadow_storage")
@@ -406,10 +585,10 @@ def test_materialize_file_storage_fails_closed_when_vectors_are_missing(tmp_path
 
 
 def test_run_full_materialization_no_swap_blocks_cache_only_when_diff_needs_new_vectors(monkeypatch, tmp_path) -> None:
-    previous = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    previous = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     desired_payload = _payload()
     desired_payload["entities"].append({"entity_name": "topic:new", "entity_type": "TOPIC", "description": "New topic", "source_id": "doc:a", "file_path": "a.md"})
-    desired = build_custom_kg_manifest(desired_payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired = build_custom_kg_manifest(desired_payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -453,10 +632,10 @@ def test_run_full_materialization_no_swap_blocks_cache_only_when_diff_needs_new_
 
 
 def test_run_full_materialization_no_swap_fills_true_adds_after_cache_only_blocker(monkeypatch, tmp_path) -> None:
-    previous = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    previous = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     desired_payload = _payload()
     desired_payload["entities"].append({"entity_name": "topic:new", "entity_type": "TOPIC", "description": "New topic", "source_id": "doc:a", "file_path": "a.md"})
-    desired = build_custom_kg_manifest(desired_payload, lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired = build_custom_kg_manifest(desired_payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -517,7 +696,7 @@ def test_run_full_materialization_no_swap_fills_true_adds_after_cache_only_block
 
 
 def test_run_full_materialization_no_swap_fills_missing_vectors_when_enabled(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -575,7 +754,7 @@ def test_run_full_materialization_no_swap_fills_missing_vectors_when_enabled(mon
 
 
 def test_run_full_materialization_no_swap_builds_audited_shadow(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -620,7 +799,7 @@ def test_run_full_materialization_no_swap_builds_audited_shadow(monkeypatch, tmp
 
 
 def test_run_full_materialization_prepare_swap_writes_bundle_without_live_swap(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -680,13 +859,17 @@ def test_run_full_materialization_prepare_swap_writes_bundle_without_live_swap(m
     assert persisted["previous_manifest_hash"] == custom_kg_incremental.stable_hash(manifest)
     assert persisted["desired_manifest_hash"] == custom_kg_incremental.stable_hash(manifest)
     assert persisted["desired_manifest_path"] == str(prepared_manifest)
+    assert "finalize_command" not in report
+    assert "finalize_command" not in persisted
+    assert persisted["prepared_activation"]["status"] == "retired"
+    assert persisted["prepared_activation"]["code"] == "prepared-wikigraph-swap-activation-retired"
     _assert_compact_vector_cache_report(report)
     _assert_compact_vector_cache_report(persisted)
     assert prepared_report.stat().st_size < 20_000
 
 
 def test_run_full_materialization_prepare_swap_can_repair_current_storage_audit_failure(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -735,75 +918,32 @@ def test_run_full_materialization_prepare_swap_can_repair_current_storage_audit_
     assert report["shadow_audit"]["ok"] is True
 
 
-def test_finalize_prepared_swap_can_replace_current_storage_that_fails_audit(tmp_path, monkeypatch) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    previous = json.loads(json.dumps(manifest))
-    desired = json.loads(json.dumps(manifest))
-    state_dir = tmp_path / "state"
-    workdir = tmp_path / "workdir"
-    root = tmp_path / "wiki"
-    live_storage = workdir / "rag_storage"
-    shadow_storage = tmp_path / "prepared_shadow"
-    backup_dir = state_dir / "backups" / "bad-live-backup"
-    state_dir.mkdir()
-    workdir.mkdir()
-    root.mkdir()
-    live_storage.mkdir()
-    shadow_storage.mkdir()
-    (live_storage / "bad.txt").write_text("bad", encoding="utf-8")
-    (shadow_storage / "shadow.txt").write_text("shadow", encoding="utf-8")
-    custom_kg_incremental.write_manifest(state_dir, previous)
-    prepared_manifest = custom_kg_incremental.prepared_swap_manifest_path(state_dir)
-    prepared_manifest.parent.mkdir(parents=True, exist_ok=True)
-    prepared_manifest.write_text(json.dumps(desired), encoding="utf-8")
-    prepared_report = custom_kg_incremental.prepared_swap_report_path(state_dir)
-    prepared_report.write_text(
-        json.dumps(
-            {
-                "started_at": "2026-06-26 00:00",
-                "prepared_for_swap": True,
-                "import_mode": "full_materialization",
-                "previous_manifest_hash": custom_kg_incremental.stable_hash(previous),
-                "desired_manifest_hash": custom_kg_incremental.stable_hash(desired),
-                "desired_manifest_path": str(prepared_manifest),
-                "shadow_storage": str(shadow_storage),
-                "backup_dir": str(backup_dir),
-                "payload": {},
-                "manifest": desired.get("summary", {}),
-                "shadow_audit": {"ok": True, "issues": [], "counts": {}},
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_run_finalize_prepared_swap_is_retired_without_mutating_live_storage(tmp_path, monkeypatch) -> None:
+    fixture = _prepared_finalize_fixture(tmp_path, backup_name="retired-backup")
     monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-
-    def fake_audit(storage_dir, *_args, **_kwargs):
-        if Path(storage_dir) == live_storage:
-            return {"ok": False, "issues": [{"type": "known_bad_live"}], "counts": {}}
-        return {"ok": True, "issues": [], "counts": {}}
-
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
+    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
     args = types.SimpleNamespace(
-        root=root,
-        state_dir=state_dir,
-        workdir=workdir,
-        prepared_report=prepared_report,
+        root=fixture.root,
+        state_dir=fixture.state_dir,
+        workdir=fixture.workdir,
+        prepared_report=fixture.report_path,
         server_host="127.0.0.1",
         server_port=9621,
         allow_server_running=False,
         allow_current_storage_audit_failure=True,
+        force_shadow_audit=False,
     )
 
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
+    with pytest.raises(RuntimeError, match="prepared wikigraph storage activation is retired"):
+        custom_kg_incremental.run_finalize_prepared_swap(args)
 
-    assert report["swapped"] is True
-    assert report["live_audit"]["ok"] is False
-    assert (workdir / "rag_storage" / "shadow.txt").exists()
-    assert (backup_dir / "bad.txt").exists()
+    assert (fixture.live_storage / "live.txt").exists()
+    assert fixture.shadow_storage.exists()
+    assert not fixture.backup_dir.exists()
 
 
 def test_run_full_materialization_no_swap_can_smoke_query_shadow(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     cache = VectorCache(tmp_path / "cache.sqlite")
     ordinal = 1
     for collection in ("chunks", "entities", "relationships"):
@@ -872,7 +1012,7 @@ def test_run_full_materialization_no_swap_can_smoke_query_shadow(monkeypatch, tm
 
 
 def test_prepared_shadow_fingerprint_verifies_and_rejects_modified_storage_file(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     storage_dir = tmp_path / "prepared_shadow"
     _materialize_manifest_storage(manifest, storage_dir, tmp_path / "cache.sqlite")
     audit = audit_custom_kg_storage(storage_dir, manifest)
@@ -897,7 +1037,7 @@ def test_prepared_shadow_fingerprint_verifies_and_rejects_modified_storage_file(
 
 
 def test_prepared_shadow_fingerprint_rejects_desired_manifest_hash_mismatch(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     storage_dir = tmp_path / "prepared_shadow"
     _materialize_manifest_storage(manifest, storage_dir, tmp_path / "cache.sqlite")
     audit = audit_custom_kg_storage(storage_dir, manifest)
@@ -923,7 +1063,7 @@ def test_prepared_shadow_fingerprint_rejects_desired_manifest_hash_mismatch(tmp_
 
 
 def test_prepare_swap_report_contains_prepared_shadow_fingerprint(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     state_dir = tmp_path / "state"
     workdir = tmp_path / "workdir"
     root = tmp_path / "wiki"
@@ -962,72 +1102,11 @@ def test_prepare_swap_report_contains_prepared_shadow_fingerprint(monkeypatch, t
     assert custom_kg_incremental.verify_prepared_shadow_fingerprint(persisted)["ok"] is True
 
 
-def test_finalize_prepared_swap_reuses_verified_shadow_audit_but_keeps_live_audit(monkeypatch, tmp_path) -> None:
-    fixture = _prepared_finalize_fixture(tmp_path, backup_name="reuse-backup")
-    calls: list[Path] = []
-
-    def fake_audit(storage_dir, _manifest, **_kwargs):
-        calls.append(Path(storage_dir).resolve())
-        return {"ok": True, "issues": [], "counts": {}}
-
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
-    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=False)
-
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert calls == [fixture.live_storage.resolve()]
-    assert report["shadow_audit_reused"] is True
-    assert report["shadow_audit_reuse"]["reason"] == "fingerprint_verified"
-    assert report["live_audit"]["ok"] is True
-    assert report["shadow_audit"] == fixture.shadow_audit
-
-
-def test_finalize_prepared_swap_reruns_shadow_audit_when_fingerprint_changes(monkeypatch, tmp_path) -> None:
-    fixture = _prepared_finalize_fixture(tmp_path, backup_name="fallback-backup")
-    vdb_chunks = fixture.shadow_storage / "vdb_chunks.json"
-    vdb_chunks.write_text(vdb_chunks.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    calls: list[Path] = []
-
-    def fake_audit(storage_dir, _manifest, **_kwargs):
-        calls.append(Path(storage_dir).resolve())
-        return {"ok": True, "issues": [], "counts": {"path": Path(storage_dir).name}}
-
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
-    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=False)
-
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert calls == [fixture.live_storage.resolve(), fixture.shadow_storage.resolve()]
-    assert report["shadow_audit_reused"] is False
-    assert "changed_file:vdb_chunks.json" in report["shadow_audit_reuse"]["verification"]["reasons"]
-
-
-def test_finalize_prepared_swap_force_shadow_audit_uses_old_path(monkeypatch, tmp_path) -> None:
-    fixture = _prepared_finalize_fixture(tmp_path, backup_name="forced-backup")
-    calls: list[Path] = []
-
-    def fake_audit(storage_dir, _manifest, **_kwargs):
-        calls.append(Path(storage_dir).resolve())
-        return {"ok": True, "issues": [], "counts": {}}
-
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", fake_audit)
-    args = types.SimpleNamespace(root=fixture.root, state_dir=fixture.state_dir, workdir=fixture.workdir, prepared_report=fixture.report_path, server_host="127.0.0.1", server_port=9621, allow_server_running=False, force_shadow_audit=True)
-
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert calls == [fixture.live_storage.resolve(), fixture.shadow_storage.resolve()]
-    assert report["shadow_audit_reused"] is False
-    assert report["shadow_audit_reuse"]["reason"] == "force_shadow_audit"
-
-
-def test_custom_kg_incremental_materialize_full_cli_accepts_embedding_profile(monkeypatch, tmp_path, capsys) -> None:
+def test_custom_kg_incremental_materialize_full_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
     called = {}
 
     def fake_runner(args):
-        called["embedding_profile"] = args.embedding_profile
+        called["materialize_full"] = True
         return {"ok": True, "import_mode": "full_materialization", "embedding_profile": args.embedding_profile}
 
     monkeypatch.setattr(custom_kg_incremental, "run_full_materialization_no_swap", fake_runner)
@@ -1046,151 +1125,175 @@ def test_custom_kg_incremental_materialize_full_cli_accepts_embedding_profile(mo
             "--no-swap",
             "--embedding-profile",
             "shadow-medium",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 0
-    out = json.loads(capsys.readouterr().out)
-    assert called["embedding_profile"] == "shadow-medium"
-    assert out["embedding_profile"] == "shadow-medium"
-
-
-def test_custom_kg_incremental_materialize_full_cli_routes_to_no_swap_runner(monkeypatch, tmp_path, capsys) -> None:
-    called = {}
-
-    def fake_runner(args):
-        called["no_swap"] = args.no_swap
-        called["vector_cache"] = args.vector_cache
-        called["storage_dir"] = args.storage_dir
-        return {"ok": True, "import_mode": "full_materialization", "swapped": False}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_full_materialization_no_swap", fake_runner)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "materialize-full",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--vector-cache",
-            str(tmp_path / "state" / "vector_cache.sqlite"),
-            "--storage-dir",
-            str(tmp_path / "shadow"),
-            "--no-swap",
-            "--delete-shadow-on-no-swap",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["import_mode"] == "full_materialization"
-    assert out["swapped"] is False
-    assert called["no_swap"] is True
-    assert called["vector_cache"].name == "vector_cache.sqlite"
-    assert called["storage_dir"].name == "shadow"
-
-
-def test_custom_kg_incremental_materialize_full_cli_accepts_prepare_swap(monkeypatch, tmp_path, capsys) -> None:
-    called = {}
-
-    def fake_runner(args):
-        called["prepare_swap"] = args.prepare_swap
-        called["delete_shadow_on_no_swap"] = args.delete_shadow_on_no_swap
-        called["allow_current_storage_audit_failure"] = args.allow_current_storage_audit_failure
-        return {"ok": True, "import_mode": "full_materialization", "swapped": False, "prepared_for_swap": args.prepare_swap}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_full_materialization_no_swap", fake_runner)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "materialize-full",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--no-swap",
             "--prepare-swap",
             "--allow-current-storage-audit-failure",
         ],
     )
 
-    assert custom_kg_incremental.main() == 0
+    assert custom_kg_incremental.main() == 1
     out = json.loads(capsys.readouterr().out)
-    assert out["prepared_for_swap"] is True
-    assert called == {
-        "prepare_swap": True,
-        "delete_shadow_on_no_swap": False,
-        "allow_current_storage_audit_failure": True,
-    }
+    assert out["error"] == "RuntimeError"
+    assert "materialize-full CLI is retired" in out["message"]
+    assert called == {}
 
 
-def test_finalize_prepared_swap_preserves_full_materialization_mode_and_resets_counter(tmp_path, monkeypatch) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    previous = json.loads(json.dumps(manifest))
-    previous["metadata"]["incremental_count_since_full"] = 5
-    desired = json.loads(json.dumps(manifest))
-    state_dir = tmp_path / "state"
-    workdir = tmp_path / "workdir"
-    root = tmp_path / "wiki"
-    live_storage = workdir / "rag_storage"
-    shadow_storage = tmp_path / "prepared_shadow"
-    backup_dir = state_dir / "backups" / "full-materialization-backup"
-    state_dir.mkdir()
-    workdir.mkdir()
-    root.mkdir()
-    live_storage.mkdir()
-    shadow_storage.mkdir()
-    (live_storage / "live.txt").write_text("live", encoding="utf-8")
-    (shadow_storage / "shadow.txt").write_text("shadow", encoding="utf-8")
-    custom_kg_incremental.write_manifest(state_dir, previous)
-    prepared_manifest = custom_kg_incremental.prepared_swap_manifest_path(state_dir)
-    prepared_manifest.parent.mkdir(parents=True, exist_ok=True)
-    prepared_manifest.write_text(json.dumps(desired), encoding="utf-8")
-    prepared_report = custom_kg_incremental.prepared_swap_report_path(state_dir)
-    prepared_report.write_text(
-        json.dumps(
+def test_custom_kg_incremental_export_manifest_cli_routes_to_export_runner(monkeypatch, tmp_path, capsys) -> None:
+    captured = {}
+
+    def fake_runner(args):
+        captured.update(
             {
-                "started_at": "2026-06-26 00:00",
-                "prepared_for_swap": True,
-                "import_mode": "full_materialization",
-                "previous_manifest_hash": custom_kg_incremental.stable_hash(previous),
-                "desired_manifest_hash": custom_kg_incremental.stable_hash(desired),
-                "desired_manifest_path": str(prepared_manifest),
-                "shadow_storage": str(shadow_storage),
-                "backup_dir": str(backup_dir),
-                "payload": {},
-                "manifest": desired.get("summary", {}),
-                "shadow_audit": {"ok": True, "issues": [], "counts": {}},
+                "root": args.root,
+                "state_dir": args.state_dir,
+                "workdir": args.workdir,
+                "limit_docs": args.limit_docs,
+                "limit_edges": args.limit_edges,
             }
-        ),
-        encoding="utf-8",
+        )
+        return {"ok": True, "command": "export-manifest", "manifest_path": str(tmp_path / "state" / "custom_kg_manifest.json")}
+
+    monkeypatch.setattr(custom_kg_incremental, "run_export_manifest", fake_runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "custom_kg_incremental.py",
+            "export-manifest",
+            "--root",
+            str(tmp_path / "wiki"),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--limit-docs",
+            "2",
+            "--limit-edges",
+            "3",
+        ],
     )
-    monkeypatch.setattr(custom_kg_incremental, "port_open", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(custom_kg_incremental, "audit_custom_kg_storage", lambda *_args, **_kwargs: {"ok": True, "issues": [], "counts": {}})
-    args = types.SimpleNamespace(root=root, state_dir=state_dir, workdir=workdir, prepared_report=prepared_report, server_host="127.0.0.1", server_port=9621, allow_server_running=False)
 
-    report = custom_kg_incremental.run_finalize_prepared_swap(args)
+    assert custom_kg_incremental.main() == 0
+    assert captured == {
+        "root": tmp_path / "wiki",
+        "state_dir": tmp_path / "state",
+        "workdir": tmp_path / "work",
+        "limit_docs": 2,
+        "limit_edges": 3,
+    }
+    assert json.loads(capsys.readouterr().out)["command"] == "export-manifest"
 
-    final_manifest = custom_kg_incremental.load_manifest(state_dir)
-    assert report["swapped"] is True
-    assert report["import_mode"] == "full_materialization"
-    assert final_manifest["metadata"]["last_successful_import_mode"] == "full_materialization"
-    assert final_manifest["metadata"]["incremental_count_since_full"] == 0
-    assert (workdir / "rag_storage" / "shadow.txt").exists()
-    assert (backup_dir / "live.txt").exists()
+
+def test_custom_kg_incremental_audit_manifest_content_cli_routes_to_audit_runner(monkeypatch, tmp_path, capsys) -> None:
+    captured = {}
+
+    def fake_runner(args):
+        captured.update(
+            {
+                "root": args.root,
+                "state_dir": args.state_dir,
+                "workdir": args.workdir,
+                "limit_docs": args.limit_docs,
+                "limit_edges": args.limit_edges,
+            }
+        )
+        return {"ok": False, "command": "audit-manifest-content", "token_variant_count": 1, "sources": []}
+
+    monkeypatch.setattr(custom_kg_incremental, "run_audit_manifest_content", fake_runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "custom_kg_incremental.py",
+            "audit-manifest-content",
+            "--root",
+            str(tmp_path / "wiki"),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--limit-docs",
+            "2",
+            "--limit-edges",
+            "3",
+        ],
+    )
+
+    assert custom_kg_incremental.main() == 1
+    assert captured == {
+        "root": tmp_path / "wiki",
+        "state_dir": tmp_path / "state",
+        "workdir": tmp_path / "work",
+        "limit_docs": 2,
+        "limit_edges": 3,
+    }
+    assert json.loads(capsys.readouterr().out)["command"] == "audit-manifest-content"
+
+
+def test_custom_kg_incremental_apply_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
+    called = {}
+
+    async def fake_apply(_args):
+        called["apply"] = True
+        return {"swapped": True}
+
+    monkeypatch.setattr(custom_kg_incremental, "run_apply", fake_apply)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "custom_kg_incremental.py",
+            "apply",
+            "--root",
+            str(tmp_path / "wiki"),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--no-swap",
+        ],
+    )
+
+    assert custom_kg_incremental.main() == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == "RuntimeError"
+    assert "apply CLI is retired" in out["message"]
+    assert called == {}
+
+
+def test_custom_kg_incremental_finalize_prepared_swap_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
+    called = {}
+
+    def fake_finalize(_args):
+        called["finalize"] = True
+        return {"swapped": True}
+
+    monkeypatch.setattr(custom_kg_incremental, "run_finalize_prepared_swap", fake_finalize)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "custom_kg_incremental.py",
+            "finalize-prepared-swap",
+            "--root",
+            str(tmp_path / "wiki"),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--prepared-report",
+            str(tmp_path / "state" / "prepared.json"),
+        ],
+    )
+
+    assert custom_kg_incremental.main() == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == "RuntimeError"
+    assert "finalize-prepared-swap CLI is retired" in out["message"]
+    assert called == {}
 
 
 def test_run_full_materialization_no_swap_can_seed_cache_from_explicit_storage(monkeypatch, tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), lightrag_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     seed_storage = tmp_path / "seed_storage"
     source_cache = VectorCache(tmp_path / "source_cache.sqlite")
     ordinal = 1

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from wiki_lightrag_lib import build_seed_edges, common_paths_parser, print_json
+from wiki_native_lib import build_seed_edges, common_paths_parser, print_json
 
 
 def main() -> int:

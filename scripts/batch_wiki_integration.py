@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from wiki_lightrag_lib import (
+from wiki_native_lib import (
     DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
@@ -24,6 +24,9 @@ from wiki_lightrag_lib import (
     print_json,
     record_pending_wiki_integration_failure,
 )
+
+
+DEFAULT_NATIVE_WORKDIR = Path(__file__).resolve().parents[1]
 
 
 def add_common_paths(parser: argparse.ArgumentParser) -> None:
@@ -37,7 +40,10 @@ def _tail_text(text: str, max_chars: int = 8000) -> str:
     return text[-max_chars:]
 
 
-def build_auto_integration_prompt(root: Path, state_dir: Path, status: dict[str, Any], reason: str) -> str:
+def build_auto_integration_prompt(root: Path, state_dir: Path, status: dict[str, Any], reason: str, workdir: Path | None = None) -> str:
+    native_workdir = workdir or DEFAULT_NATIVE_WORKDIR
+    wiki_integration_script = native_workdir / "scripts" / "batch_wiki_integration.py"
+    native_refresh_script = native_workdir / "scripts" / "batch_native_refresh.py"
     pending = status.get("actionable_pending") or []
     pending_lines = []
     for idx, item in enumerate(pending, 1):
@@ -53,7 +59,7 @@ Task: perform the batch wiki integration for the pending raw-fast notes, then cl
 
 Context:
 - Wiki root: `{root}`
-- LightRAG workdir: `/home/xu/project/wiki/lightrag`
+- Native refresh workdir: `{native_workdir}`
 - State dir: `{state_dir}`
 - Pending ledger: `{state_dir / 'pending_wiki_integration.json'}`
 - Trigger reason: `{reason}`
@@ -69,14 +75,14 @@ Required workflow:
 4. Batch-update the Markdown/wiki layer: `_meta/raw-clip-map.md`, `_meta/topic-map.md`, relevant compiled pages where the notes meet page/update thresholds, `index.md` if compiled pages were added/removed, and `log.md` with one batch entry. Do not mechanically create one compiled page per raw note.
 5. Run the appropriate wiki validation checks. Do not put generated machine artifacts under the human wiki root.
 6. Only after validation passes, run:
-   `python /home/xu/project/wiki/lightrag/scripts/batch_wiki_integration.py clear-success --root {root} --state-dir {state_dir} --reason {reason}`
-   This carries integrated raw notes into the LightRAG graph pending ledger.
-7. Run `python /home/xu/project/wiki/lightrag/scripts/batch_lightrag_refresh.py refresh --root {root} --state-dir {state_dir} --workdir /home/xu/project/wiki/lightrag --reason pre-query --dry-run` and report whether graph refresh is now pending or should run.
+   `python {wiki_integration_script} clear-success --root {root} --state-dir {state_dir} --reason {reason}`
+   This carries integrated raw notes into the native graph pending ledger.
+7. Run `python {native_refresh_script} status --root {root} --state-dir {state_dir} --workdir {native_workdir}` and report whether native graph refresh is now pending.
 
 Important constraints:
 - Do not ask the user questions; make reasonable conservative integration choices.
 - Do not clear pending items before wiki/meta/log edits and validation are complete.
-- Do not run a full LightRAG refresh unless explicitly required by the current prompt; a dry-run/status check is enough for this auto-integration closeout.
+- Do not run a full native refresh unless explicitly required by the current prompt; a status check is enough for this auto-integration closeout.
 - Do not expose secrets or tokens. If any appear in sources or logs, redact as `[REDACTED]`.
 """
 
@@ -207,7 +213,12 @@ def main() -> int:
     add_common_paths(clear_parser)
     clear_parser.add_argument("--reason", default="external-success")
     clear_parser.add_argument("--integrated-path", action="append", default=[])
-    clear_parser.add_argument("--no-mark-lightrag-pending", action="store_true", help="Clear only; do not carry integrated raw notes into the LightRAG graph pending ledger")
+    clear_parser.add_argument(
+        "--no-mark-native-pending",
+        dest="no_mark_native_pending",
+        action="store_true",
+        help="Clear only; do not carry integrated raw notes into the native graph pending ledger",
+    )
 
     args = parser.parse_args()
     root = args.root.resolve()
@@ -266,7 +277,7 @@ def main() -> int:
                 return 11
         return 0
     if args.command == "clear-success":
-        print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason, mark_lightrag_pending=not args.no_mark_lightrag_pending))
+        print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason, mark_native_pending=not args.no_mark_native_pending))
         return 0
     return 2
 
