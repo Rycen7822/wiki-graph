@@ -185,7 +185,7 @@ def test_build_schema_matches_plan_numeric_filters_and_hnsw(monkeypatch) -> None
 
 
 def test_pyproject_declares_zvec_phase1_dependency() -> None:
-    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    pyproject = Path(__file__).resolve().parents[1] / "llm-wiki-native" / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
     assert "zvec>=0.5.1,<0.6" in data["project"]["dependencies"]

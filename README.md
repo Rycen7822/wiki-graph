@@ -117,10 +117,10 @@ python3 -m pytest \
   -q
 ```
 
-Run native package tests with its source directory on `PYTHONPATH`:
+Run the unified test suite from the repository-root `tests/` directory, with the native package source directory on `PYTHONPATH`:
 
 ```bash
-PYTHONPATH=llm-wiki-native/src python3 -m pytest llm-wiki-native/tests -q
+PYTHONPATH=llm-wiki-native/src python3 -m pytest tests -q
 ```
 
 Run syntax and whitespace checks before committing:
