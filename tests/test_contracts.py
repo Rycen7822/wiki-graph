@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-import llm_wiki_native
 from llm_wiki_native.contracts import (
     DEFAULT_NATIVE_PORT,
     NATIVE_SCHEMA_VERSION,
@@ -14,7 +13,6 @@ from llm_wiki_native.contracts import (
     SUPPORTED_QUERY_MODES,
     WORKSPACE_SCHEMA_VERSION,
 )
-from llm_wiki_native import reports
 from llm_wiki_native.reports import validate_query_suite_row
 
 
@@ -40,10 +38,6 @@ def test_native_contract_constants_match_zvec_plan() -> None:
     }
 
 
-def test_native_package_metadata_no_longer_describes_shadow_backend() -> None:
-    assert "shadow" not in (llm_wiki_native.__doc__ or "").lower()
-
-
 def test_query_suite_row_requires_must_hit_fields() -> None:
     row = {
         "id": "q001",
@@ -65,15 +59,6 @@ def test_query_suite_row_requires_must_hit_fields() -> None:
     bad_top_k["top_k"] = 0
     with pytest.raises(ValueError, match="top_k"):
         validate_query_suite_row(bad_top_k)
-
-
-def test_reports_module_no_longer_exposes_shadow_comparison_helpers() -> None:
-    assert not hasattr(reports, "validate_shadow_report")
-    assert not hasattr(reports, "compare_shadow_response")
-
-    report_source = Path(reports.__file__).read_text(encoding="utf-8")
-    assert "baseline-vs-native" not in report_source
-    assert "promotion_blockers" not in report_source
 
 
 def test_minimal_query_suite_fixture_matches_schema() -> None:

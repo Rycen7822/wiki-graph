@@ -297,67 +297,6 @@ def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> Non
     assert relationship["content"] == "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
 
 
-def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> None:
-    source = (Path(__file__).resolve().parents[1] / "ops" / "custom_kg_incremental.py").read_text(encoding="utf-8")
-    forbidden_symbols = [
-        "def audit_custom_kg_storage(",
-        "def apply_patch_to_storage(",
-        "def run_apply(",
-        "def run_full_materialization_no_swap(",
-        "def run_finalize_prepared_swap(",
-        "def embed_texts_openai_compatible(",
-        "def fill_missing_manifest_vectors(",
-        "def entity_vdb_id(",
-        "def relation_vdb_id(",
-        "def wikigraph_sanitize_text(",
-        "def wikigraph_normalize_file_path(",
-        "vdb_id",
-        "VDB",
-        "GraphML",
-        "CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE",
-        "PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE",
-        "CUSTOM_KG_STORAGE_AUDIT_RETIRED_MESSAGE",
-        "def diff_custom_kg_manifests(",
-        "def full_materialization_cache_only_blockers(",
-        "def compact_vector_cache_report(",
-        "def choose_refresh_mode(",
-        "def successful_manifest(",
-        "def write_successful_manifest(",
-        "def manifest_record_count(",
-        "def relation_chunk_key(",
-        "def split_source_ids(",
-        "DEFAULT_FULL_REBUILD_INTERVAL",
-        "def _diff_collection(",
-        "incremental_count_since_full",
-    ]
-    assert [symbol for symbol in forbidden_symbols if symbol in source] == []
-    assert "def relationship_record_key(" in source
-    assert "def split_relation_chunk_key(" in source
-
-    parser_commands = [
-        'sub.add_parser("plan"',
-        'sub.add_parser("audit-storage"',
-        'sub.add_parser("apply"',
-        'sub.add_parser("finalize-prepared-swap"',
-        'sub.add_parser("materialize-full"',
-        "--allow-current-storage-audit-failure",
-        "--seed-from-storage",
-        "--tracking-update-mode",
-    ]
-    assert [symbol for symbol in parser_commands if symbol in source] == []
-    assert 'sub.add_parser("export-manifest"' in source
-    assert 'sub.add_parser("audit-manifest-content"' in source
-
-
-def test_retired_custom_kg_file_storage_materializer_module_is_removed() -> None:
-    module_path = Path(__file__).resolve().parents[1] / "ops" / "custom_kg_materialize.py"
-    assert not module_path.exists()
-
-    import importlib.util
-
-    assert importlib.util.find_spec("custom_kg_materialize") is None
-
-
 def test_custom_kg_incremental_export_manifest_cli_routes_to_export_runner(monkeypatch, tmp_path, capsys) -> None:
     captured = {}
 

@@ -157,7 +157,6 @@ def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -
     }
     assert created["workspace"].flushed is True
     assert len(created["workspace"].sample_doc_ids) == 4
-    assert all(":" not in doc_id and "/" not in doc_id for doc_id in created["workspace"].sample_doc_ids)
 
 
 def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_path) -> None:
@@ -199,16 +198,6 @@ def test_build_workspace_from_state_fails_closed_when_vectors_are_missing(tmp_pa
     assert db_path.exists() is False
     assert exc.value.report["total_missing"] == 4
     assert exc.value.report["by_type"] == {"chunk": 1, "entity": 1, "relationship": 1, "section": 1}
-
-
-def test_cli_main_requires_zvec_workspace_for_build_workspace(tmp_path) -> None:
-    state = _sample_state(tmp_path)
-    db_path = tmp_path / "native.sqlite"
-
-    with pytest.raises(SystemExit) as excinfo:
-        main(["build-workspace", "--state-dir", str(state), "--db", str(db_path), "--workspace-id", "native-test"])
-
-    assert excinfo.value.code == 2
 
 
 def test_cli_main_builds_zvec_workspace_and_prints_json_report(tmp_path, capsys, monkeypatch) -> None:

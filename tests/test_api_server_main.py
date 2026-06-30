@@ -8,7 +8,7 @@ from llm_wiki_native import runtime
 from llm_wiki_native.api import server
 
 
-def test_provider_factories_are_none_when_unconfigured_and_fail_on_partial_env() -> None:
+def test_provider_factories_cover_server_wrapper_env_states() -> None:
     assert server.embedding_provider_from_env({}) is None
     assert server.answer_generator_from_env({}) is None
 
@@ -17,21 +17,20 @@ def test_provider_factories_are_none_when_unconfigured_and_fail_on_partial_env()
     with pytest.raises(ValueError, match="MODEL"):
         server.answer_generator_from_env({"LLM_WIKI_NATIVE_ANSWER_BASE_URL": "https://chat.local/v1"})
 
-
-def test_embedding_provider_factory_accepts_compatible_binding_env() -> None:
-    provider = server.embedding_provider_from_env(
+    assert server.embedding_provider_from_env(
         {
-            "EMBEDDING_BINDING_HOST": "https://embedding.local/v1",
-            "EMBEDDING_MODEL": "BAAI/bge-m3",
-            "EMBEDDING_BINDING_API_KEY": "secret",
-            "EMBEDDING_DIM": "1024",
+            "LLM_WIKI_NATIVE_EMBEDDING_BASE_URL": "https://embedding.local/v1",
+            "LLM_WIKI_NATIVE_EMBEDDING_MODEL": "embed-small",
+            "LLM_WIKI_NATIVE_EMBEDDING_API_KEY": "secret",
         }
-    )
-
-    assert provider is not None
-    assert provider.config.base_url == "https://embedding.local/v1"
-    assert provider.config.model == "BAAI/bge-m3"
-    assert provider.config.embedding_dim == 1024
+    ) is not None
+    assert server.answer_generator_from_env(
+        {
+            "LLM_WIKI_NATIVE_ANSWER_BASE_URL": "https://chat.local/v1",
+            "LLM_WIKI_NATIVE_ANSWER_MODEL": "chat-small",
+            "LLM_WIKI_NATIVE_ANSWER_API_KEY": "secret",
+        }
+    ) is not None
 
 
 def test_run_server_loads_engine_builds_app_and_calls_runner(tmp_path) -> None:

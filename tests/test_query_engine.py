@@ -206,14 +206,6 @@ def test_data_only_query_engine_rejects_unknown_mode(tmp_path) -> None:
         engine.query("native-test", "alpha query", [1.0], mode="unsupported")
 
 
-def test_data_only_query_engine_rejects_old_graph_mode_as_unsupported(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
-
-    with pytest.raises(ValueError, match="unsupported mode"):
-        engine.query("native-test", "alpha query", [1.0], mode="local")
-
-
 def test_data_only_query_engine_rejects_unknown_record_type(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())

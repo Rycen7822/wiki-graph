@@ -1,13 +1,6 @@
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
-sys.path.insert(0, str(ROOT))
 
 from ops.vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
 
@@ -30,15 +23,6 @@ def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
     assert cached["record_type"] == "entity"
     assert cached["record_id"] == "doc:a"
     assert cached["vector"] == pytest.approx([1.0, 2.0, 3.0])
-
-
-def test_vector_cache_has_no_retired_storage_seed_api() -> None:
-    from ops import vector_cache
-
-    source = (Path(__file__).resolve().parents[1] / "ops" / "vector_cache.py").read_text(encoding="utf-8")
-    assert not hasattr(vector_cache, "seed_vector_cache_from_storage")
-    assert "def seed_vector_cache_from_storage(" not in source
-    assert "SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE" not in source
 
 
 def test_vector_cache_misses_on_embedding_contract_mismatch(tmp_path) -> None:

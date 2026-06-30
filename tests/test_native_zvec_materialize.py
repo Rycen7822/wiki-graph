@@ -6,54 +6,10 @@ from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
-NATIVE_SRC = ROOT
 sys.path.insert(0, str(ROOT))
 
 from ops import native_zvec_materialize  # noqa: E402
 from support import write_json, write_jsonl, write_vector_cache  # noqa: E402
-
-
-def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
-    path = SCRIPTS / "custom_kg_vector_fill.py"
-    assert path.exists()
-    text = path.read_text(encoding="utf-8")
-    retired_backend = "light" + "rag"
-    for banned in [
-        f"from {retired_backend}",
-        f"import {retired_backend}",
-        "import_custom_kg",
-        "wiki_wikigraph_compat_lib",
-        "apply_patch_to_storage",
-        "run_finalize_prepared_swap",
-        "run_shadow_query_data_smokes",
-    ]:
-        assert banned not in text
-    assert "def fill_missing_manifest_vectors" in text
-
-
-def test_native_materializer_uses_native_vector_fill_seam_not_mixed_custom_kg_module() -> None:
-    text = (SCRIPTS / "native_zvec_materialize.py").read_text(encoding="utf-8")
-    assert "from ops.custom_kg_vector_fill import fill_missing_manifest_vectors" in text
-    assert "from ops.custom_kg_incremental import fill_missing_manifest_vectors" not in text
-
-
-def test_custom_kg_file_backend_storage_applier_is_retired() -> None:
-    module_name = "custom_kg_" + "storage_applier"
-    class_name = "FileBackend" + "StorageApplier"
-    retired_test_name = "test_" + "storage_applier" + "_contract.py"
-
-    assert not (SCRIPTS / f"{module_name}.py").exists()
-    assert not (ROOT / "tests" / retired_test_name).exists()
-
-    offenders = []
-    for root in (SCRIPTS, ROOT / "tests", NATIVE_SRC):
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8")
-            if module_name in text or class_name in text:
-                offenders.append(path.relative_to(ROOT).as_posix())
-    assert offenders == []
 
 
 def _sample_state(

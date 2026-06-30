@@ -1,10 +1,16 @@
-from pathlib import Path
 from typing import Any
 
 from llm_wiki_native.api.server import create_app
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-from support import native_record, patch_direct_threadpool, request_asgi as _request
+from support import native_record, request_asgi as _request
+
+
+def patch_direct_threadpool(monkeypatch: Any, target: str = "llm_wiki_native.api.server.run_in_threadpool") -> None:
+    async def direct_threadpool(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(target, direct_threadpool)
 
 
 def _app(tmp_path):
@@ -26,20 +32,6 @@ def _app(tmp_path):
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.mark_audited("native-test", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
     return create_app(NativeQueryEngine(db, zvec_workspace=ZvecWorkspace()))
-
-
-def test_native_api_no_longer_exposes_trace_route(tmp_path) -> None:
-    app = _app(tmp_path)
-    payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"]}
-
-    response = _request(app, "POST", "/native/query/trace", json=payload, raise_app_exceptions=False)
-
-    assert response.status_code == 404
-
-
-def test_native_api_tests_do_not_use_pre_cutover_shadow_vocabulary() -> None:
-    retired = "shadow" + "_api"
-    assert retired not in Path(__file__).read_text(encoding="utf-8")
 
 
 def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:

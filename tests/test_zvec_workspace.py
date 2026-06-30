@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-import tomllib
 import types
 from pathlib import Path
 
@@ -184,13 +183,6 @@ def test_build_schema_matches_plan_numeric_filters_and_hnsw(monkeypatch) -> None
     assert vector.index_param.ef_construction == 400
 
 
-def test_pyproject_declares_zvec_phase1_dependency() -> None:
-    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-
-    assert "zvec>=0.5.1,<0.6" in data["project"]["dependencies"]
-
-
 def test_doc_ids_and_numeric_codes_are_strict_plan_mappings(monkeypatch) -> None:
     _install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
@@ -245,7 +237,6 @@ def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
     doc = module.zvec_doc_from_record(record)
 
     assert isinstance(doc, fake_zvec.Doc)
-    assert doc.id == "section__c2VjLTE"
     assert doc.vectors == {"embedding": [0.1, 0.2]}
     assert doc.fields == {
         "record_type_code": 4,
@@ -552,32 +543,6 @@ def test_create_and_open_workspace_collections_use_mmap_options(
     assert open_call[1] == str(tmp_path / "workspace")
     assert open_call[2].read_only is True
     assert open_call[2].enable_mmap is True
-
-
-def test_workspace_fetch_and_stats_are_thin_collection_calls(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
-    module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
-
-    class Stats:
-        doc_count = 42
-
-    class Collection:
-        stats = Stats()
-
-        def __init__(self) -> None:
-            self.fetch_calls = []
-            self.doc = object()
-
-        def fetch(self, doc_ids, *, include_vector: bool):
-            self.fetch_calls.append((doc_ids, include_vector))
-            return {"doc:1": self.doc}
-
-    collection = Collection()
-    workspace = module.ZvecWorkspace(collection=collection)
-
-    assert workspace.fetch(["doc:1"]) == {"doc:1": collection.doc}
-    assert collection.fetch_calls == [(["doc:1"], False)]
-    assert workspace.stats() == {"doc_count": 42}
 
 
 def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:

@@ -19,9 +19,11 @@ def _workspace_record(workspace_id: str):
 def test_create_workspace_initializes_schema_and_status(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
+    db.put_record(_workspace_record("native-test"))
+    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})
 
-    assert db.get_workspace_status("native-test") == "building"
-    assert db.audit_counts("native-test", {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0})["ok"] is True
+    assert db.get_workspace_status("native-test") == "audited"
+    assert db.audit_counts("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})["ok"] is True
 
 
 def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
@@ -34,16 +36,6 @@ def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
     assert audit["ok"] is False
     assert audit["counts"]["chunks"] == 1
     assert "chunks" in audit["issues"][0]
-
-
-def test_workspace_no_longer_exposes_serving_activation_state(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_workspace_record("native-test"))
-    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})
-
-    assert db.get_workspace_status("native-test") == "audited"
-    assert not hasattr(SQLiteWorkspace, "activate_workspace")
 
 
 def test_workspace_operations_reject_unknown_workspace(tmp_path) -> None:

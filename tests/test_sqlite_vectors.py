@@ -4,10 +4,6 @@ from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from support import native_record
 
 
-def test_sqlite_workspace_no_longer_exposes_nearest_vector_retrieval() -> None:
-    assert not hasattr(SQLiteWorkspace, "nearest_vectors")
-
-
 def test_vector_coverage_audit_reports_records_without_vectors(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")

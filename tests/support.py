@@ -10,6 +10,39 @@ import numpy as np
 from llm_wiki_native.storage.sqlite_workspace import NativeRecord
 
 
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def sample_wiki(tmp_path: Path) -> Path:
+    root = tmp_path / "llm-wiki"
+    write(
+        root / "index.md",
+        "# LLM Wiki Index\n\n> Last updated: 2026-05-18 16:00 | Total pages: 2\n\n"
+        "## Concepts\n\n- [[foo]] - Foo page.\n\n## Queries\n\n- [[bar]] - Bar page.\n",
+    )
+    write(
+        root / "SCHEMA.md",
+        "# Schema\n\nAllowed tags include agent, rag.\n",
+    )
+    write(
+        root / "concepts/foo.md",
+        "---\ntitle: Foo\ntype: concept\ntags: [agent]\nsources: [../raw/clip/2601/26010101_Foo-Paper.md]\nupdated: 2026-05-18 16:00\n---\n# Foo\n\nLinks to [[bar]].\n",
+    )
+    write(
+        root / "queries/bar.md",
+        "---\ntitle: Bar\ntype: query\ntags: [rag]\nupdated: 2026-05-18 16:00\n---\n# Bar\n",
+    )
+    write(
+        root / "raw/clip/2601/26010101_Foo-Paper.md",
+        "---\ntitle: Foo Paper\nsource: https://arxiv.org/abs/2601.0101\ndomain: paper\nupdated: 2026-05-18 16:00\ntags: [paper]\n---\n# Foo Paper\n\n## Methodology\n\nA direct method with enough structured detail to become a method atom during deterministic extraction.\n\n## 对未来研究的启发\n\n- Future work should connect memory repair with section-level evidence retrieval.\n\n## 可能的局限\n\n- The current benchmark may hide failures in long-horizon transfer.\n\n## 可继续追问的问题\n\n- Which unresolved interface lets agents ask for the right evidence section before planning?\n",
+    )
+    write(root / "_meta/raw-clip-map.md", "# Raw Clip Map\n\n- raw/clip/2601/26010101_Foo-Paper.md\n")
+    write(root / "_meta/topic-map.md", "# Topic Map\n")
+    return root
+
+
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -70,10 +103,3 @@ def request_asgi(app: Any, method: str, path: str, *, raise_app_exceptions: bool
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(request_once())
-
-
-def patch_direct_threadpool(monkeypatch: Any, target: str = "llm_wiki_native.api.server.run_in_threadpool") -> None:
-    async def direct_threadpool(func: Any, *args: Any, **kwargs: Any) -> Any:
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(target, direct_threadpool)
