@@ -69,7 +69,7 @@ Pending actionable raw notes:
 {pending_block}
 
 Required workflow:
-1. Load and follow the `llm-wiki` skill, especially `references/raw-fast-batch-wiki-integration.md` and `references/wiki-operational-pitfalls.md`.
+1. Load and follow the `llm-wiki` skill, especially `references/raw-fast-batch-wiki-integration.md` and `references/wiki-core-operations.md`.
 2. Read `SCHEMA.md`, `index.md`, recent `log.md`, `_meta/raw-clip-map.md`, and `_meta/topic-map.md` before editing.
 3. Read every pending raw note listed above; reconcile duplicates or review blockers conservatively.
 4. Batch-update the Markdown/wiki layer: `_meta/raw-clip-map.md`, `_meta/topic-map.md`, relevant compiled pages where the notes meet page/update thresholds, `index.md` if compiled pages were added/removed, and `log.md` with one batch entry. Do not mechanically create one compiled page per raw note.

@@ -76,6 +76,9 @@ def test_wiki_search_cli_help_is_native_only() -> None:
     )
 
     assert "--backend" not in result.stdout
+    assert "--chunk-top-k" not in result.stdout
+    assert "--intent" not in result.stdout
+    assert "--driver" not in result.stdout
     assert ("light" + "rag") not in result.stdout.lower()
 
 
@@ -86,6 +89,11 @@ def test_wiki_search_source_has_no_retired_backend_branch() -> None:
     assert retired not in text.lower()
     assert f'choices=["native", "{retired}"]' not in text
     assert ("Light" + "RAG backend") not in text
+    assert '"--chunk-top-k"' not in text
+    assert '"--intent"' not in text
+    assert '"--driver"' not in text
+    assert 'choices=["local", "global", "hybrid", "naive", "mix", "bypass"]' not in text
+    assert 'choices=["mix", "naive", "bypass"]' in text
 
 
 def test_wiki_search_rejects_stale_non_native_backend_override(tmp_path) -> None:

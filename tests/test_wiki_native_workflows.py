@@ -448,43 +448,13 @@ def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monk
     assert redact_summary({"OPENAI_API_KEY": loaded["OPENAI_API_KEY"], "MODEL": "x"}) == {"OPENAI_API_KEY": "[REDACTED]", "MODEL": "x"}
 
 
-def test_build_evidence_pack_alias_preserves_output_and_records_query_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    import build_evidence_pack
-    import wiki_search
 
-    state = tmp_path / "state"
-    workdir = tmp_path / "work"
+def test_query_evidence_pack_uses_canonical_wiki_search_cli() -> None:
+    import importlib.util
 
-    def fake_http_json(method: str, url: str, payload: dict, *, timeout: int = 60) -> dict:
-        return {"response": f"answer for {payload['query']}", "references": []}
-
-    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "build_evidence_pack.py",
-            "alias query",
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
-            "--server",
-            "http://127.0.0.1:9",
-        ],
-    )
-
-    assert build_evidence_pack.main() == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert set(payload) == {"evidence_pack"}
-    pack = Path(payload["evidence_pack"])
-    assert pack.exists()
-    with sqlite3.connect(state / "native_query_events.db") as conn:
-        rows = conn.execute("SELECT query, mode, evidence_pack_path FROM query_events").fetchall()
-    assert rows == [("alias query", "mix", str(pack))]
+    assert importlib.util.find_spec("build_evidence_pack") is None
+    assert not (SCRIPTS / "build_evidence_pack.py").exists()
+    assert (SCRIPTS / "wiki_search.py").exists()
 
 
 def test_mark_pending_wiki_integration_tracks_raw_fast_queue_without_wiki_pollution(tmp_path: Path) -> None:
@@ -733,6 +703,9 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
     assert f"Native refresh workdir: `{SCRIPTS.parent}`" in prompt
     assert f"python {SCRIPTS / 'batch_wiki_integration.py'} clear-success" in prompt
     assert f"python {SCRIPTS / 'batch_native_refresh.py'} status" in prompt
+    assert "references/raw-fast-batch-wiki-integration.md" in prompt
+    assert "references/wiki-core-operations.md" in prompt
+    assert "references/wiki-operational-pitfalls.md" not in prompt
 
 
 def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_threshold_and_requires_cleared_ledger(tmp_path: Path) -> None:

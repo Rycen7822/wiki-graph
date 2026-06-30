@@ -20,10 +20,7 @@ def test_native_contract_constants_match_zvec_plan() -> None:
     assert NATIVE_SCHEMA_VERSION == 1
     assert WORKSPACE_SCHEMA_VERSION == 1
     assert DEFAULT_NATIVE_PORT == 9622
-    assert SUPPORTED_QUERY_MODES == {"local", "global", "hybrid", "naive", "mix", "bypass"}
-    from llm_wiki_native.contracts import IMPLEMENTED_QUERY_MODES
-
-    assert IMPLEMENTED_QUERY_MODES == {"mix", "naive", "bypass"}
+    assert SUPPORTED_QUERY_MODES == {"mix", "naive", "bypass"}
     assert RECORD_TYPES == {"chunk", "entity", "relationship", "section"}
     assert RECORD_TYPE_CODES == {"chunk": 1, "entity": 2, "relationship": 3, "section": 4}
     assert SOURCE_KIND_CODES == {"compiled": 1, "raw": 2, "generated": 3, "debug": 4}

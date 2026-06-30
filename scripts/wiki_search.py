@@ -143,16 +143,13 @@ def run_query(args, query: str, *, native_embedding_provider=None) -> dict:
 def main() -> int:
     parser = common_paths_parser("Query the llm-wiki native service and optionally save an evidence pack")
     parser.add_argument("query", nargs="?")
-    parser.add_argument("--mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
+    parser.add_argument("--mode", default="mix", choices=["mix", "naive", "bypass"])
     parser.add_argument("--top-k", type=int, default=20)
-    parser.add_argument("--chunk-top-k", type=int, default=10)
     parser.add_argument(
         "--section-kind",
         choices=RAW_NOTE_CONTRACT_SECTION_KINDS,
         help="Prefix a raw_section query and, with --data-only, return only matching raw_section_docs chunks.",
     )
-    parser.add_argument("--intent", default="query")
-    parser.add_argument("--driver", default="hermes-current")
     parser.add_argument("--save-evidence-pack", action="store_true")
     parser.add_argument("--data-only", action="store_true", help="Use /query/data retrieval without LLM answer generation")
     parser.add_argument("--native-db", type=Path, help="SQLite workspace DB for explicit local native queries")
