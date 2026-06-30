@@ -8,8 +8,6 @@ raw-note skeleton, and leaves synthesis of the canonical raw note to the agent.
 from __future__ import annotations
 
 import argparse
-import base64
-import concurrent.futures
 import datetime as dt
 import hashlib
 import json
@@ -414,168 +412,7 @@ def extract_urls(text: str) -> list[str]:
     return sorted({u.rstrip(".,;:") for u in raw})
 
 
-def repo_slug_from_github_url(url: str) -> str | None:
-    match = re.match(r"https://github\.com/([^/\s]+)/([^/\s.#?]+)", url)
-    if not match:
-        return None
-    return f"{match.group(1)}/{match.group(2).removesuffix('.git')}"
-
-
-def decode_github_content_response(response: dict[str, Any]) -> str | None:
-    if not response.get("ok"):
-        return None
-    try:
-        body = json.loads(response.get("text") or "{}")
-        if not isinstance(body, dict):
-            return None
-        if str(body.get("encoding") or "").lower() == "base64" and body.get("content"):
-            return base64.b64decode(str(body.get("content") or ""), validate=False).decode("utf-8", "replace")
-        if body.get("download_url"):
-            return None
-    except Exception:
-        return None
-    return None
-
-
-def parse_pyproject_summary(text: str) -> dict[str, Any]:
-    summary: dict[str, Any] = {"project_name": None, "scripts": [], "dependency_count": None, "optional_dependency_groups": []}
-    try:
-        import tomllib  # type: ignore
-
-        data = tomllib.loads(text)
-        project = data.get("project") if isinstance(data, dict) else {}
-        if isinstance(project, dict):
-            summary["project_name"] = project.get("name")
-            dependencies = project.get("dependencies")
-            if isinstance(dependencies, list):
-                summary["dependency_count"] = len(dependencies)
-            scripts = project.get("scripts")
-            if isinstance(scripts, dict):
-                summary["scripts"] = sorted(str(k) for k in scripts.keys())[:20]
-            optional = project.get("optional-dependencies")
-            if isinstance(optional, dict):
-                summary["optional_dependency_groups"] = sorted(str(k) for k in optional.keys())[:20]
-    except Exception:
-        match = re.search(r"(?m)^name\s*=\s*[\"']([^\"']+)[\"']", text)
-        if match:
-            summary["project_name"] = match.group(1)
-    return {k: v for k, v in summary.items() if v not in (None, [], {})}
-
-
-def readme_resource_mentions(text: str, limit: int = 8) -> list[str]:
-    keywords = re.compile(r"\b(paper|arxiv|benchmark|checkpoint|dataset|artifact|install|usage|model|reproduce|reproduction)\b", re.I)
-    mentions: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip().lstrip("-*").strip()
-        if stripped and keywords.search(stripped):
-            mentions.append(compact_ws(stripped, max_len=240))
-            if len(mentions) >= limit:
-                break
-    return mentions
-
-
-def probe_github_repo(slug: str, timeout: int) -> dict[str, Any]:
-    url = f"https://api.github.com/repos/{slug}"
-    data = fetch_text(url, timeout)
-    if not data.get("ok"):
-        return {"ok": False, "type": "github_repo", "repo": slug, "url": url, "status": data.get("status"), "error": data.get("error"), "message": data.get("message"), "evidence": {}}
-    try:
-        body = json.loads(data.get("text") or "{}")
-    except Exception as exc:
-        return {"ok": False, "type": "github_repo", "repo": slug, "url": url, "status": data.get("status"), "error": type(exc).__name__, "message": str(exc), "evidence": {}}
-    root_files: list[str] = []
-    readme_excerpt: str | None = None
-    readme_mentions: list[str] = []
-    branch_commit: str | None = None
-    pyproject_summary: dict[str, Any] | None = None
-    default_branch = body.get("default_branch") or "main"
-    contents_url = f"https://api.github.com/repos/{slug}/contents?" + urllib.parse.urlencode({"ref": default_branch})
-    contents = fetch_text(contents_url, timeout)
-    if contents.get("ok"):
-        try:
-            contents_body = json.loads(contents.get("text") or "[]")
-            if isinstance(contents_body, list):
-                for item in contents_body[:40]:
-                    if isinstance(item, dict) and item.get("name"):
-                        root_files.append(str(item.get("name")))
-        except Exception:
-            root_files = []
-    branch_url = f"https://api.github.com/repos/{slug}/branches/{urllib.parse.quote(str(default_branch), safe='')}"
-    branch = fetch_text(branch_url, timeout)
-    if branch.get("ok"):
-        try:
-            branch_body = json.loads(branch.get("text") or "{}")
-            commit = branch_body.get("commit") if isinstance(branch_body, dict) else None
-            if isinstance(commit, dict) and commit.get("sha"):
-                branch_commit = str(commit.get("sha"))
-        except Exception:
-            branch_commit = None
-    readme_url = f"https://api.github.com/repos/{slug}/readme?" + urllib.parse.urlencode({"ref": default_branch})
-    readme = fetch_text(readme_url, timeout)
-    if readme.get("ok"):
-        decoded = decode_github_content_response(readme)
-        if decoded is None:
-            try:
-                readme_body = json.loads(readme.get("text") or "{}")
-                if isinstance(readme_body, dict) and readme_body.get("download_url"):
-                    readme_text = fetch_text(str(readme_body["download_url"]), timeout)
-                    if readme_text.get("ok"):
-                        decoded = readme_text.get("text") or ""
-            except Exception:
-                decoded = None
-        if decoded is not None:
-            readme_excerpt = compact_ws(decoded, max_len=2000)
-            readme_mentions = readme_resource_mentions(decoded)
-    if "pyproject.toml" in root_files:
-        pyproject_url = f"https://api.github.com/repos/{slug}/contents/pyproject.toml?" + urllib.parse.urlencode({"ref": default_branch})
-        pyproject_response = fetch_text(pyproject_url, timeout)
-        pyproject_text = decode_github_content_response(pyproject_response)
-        if pyproject_text:
-            pyproject_summary = parse_pyproject_summary(pyproject_text)
-    return {
-        "ok": True,
-        "type": "github_repo",
-        "repo": slug,
-        "url": url,
-        "status": data.get("status"),
-        "error": None,
-        "html_url": body.get("html_url"),
-        "private": body.get("private"),
-        "fork": body.get("fork"),
-        "archived": body.get("archived"),
-        "disabled": body.get("disabled"),
-        "default_branch": default_branch,
-        "license": (body.get("license") or {}).get("spdx_id"),
-        "description": body.get("description"),
-        "stars": body.get("stargazers_count"),
-        "evidence": {"full_name": body.get("full_name"), "pushed_at": body.get("pushed_at"), "updated_at": body.get("updated_at"), "root_files": root_files or None, "readme_excerpt": readme_excerpt, "readme_resource_mentions": readme_mentions or None, "commit": branch_commit, "pyproject": pyproject_summary},
-    }
-
-
-def probe_hf_search(query: str, kind: str, timeout: int) -> dict[str, Any]:
-    endpoint = {
-        "models": "https://huggingface.co/api/models?",
-        "datasets": "https://huggingface.co/api/datasets?",
-        "spaces": "https://huggingface.co/api/spaces?",
-    }[kind]
-    url = endpoint + urllib.parse.urlencode({"search": query, "limit": "10"})
-    data = fetch_text(url, timeout)
-    if not data.get("ok"):
-        return {"ok": False, "type": f"hf_{kind}", "query": query, "url": url, "status": data.get("status"), "error": data.get("error"), "message": data.get("message"), "evidence": {}}
-    try:
-        body = json.loads(data.get("text") or "[]")
-    except Exception as exc:
-        return {"ok": False, "type": f"hf_{kind}", "query": query, "url": url, "status": data.get("status"), "error": type(exc).__name__, "message": str(exc), "evidence": {}}
-    if not isinstance(body, list):
-        body = []
-    compact = []
-    for item in body[:10]:
-        if isinstance(item, dict):
-            compact.append({k: item.get(k) for k in ["id", "modelId", "author", "private", "gated", "disabled", "downloads", "likes", "lastModified", "pipeline_tag"]})
-    return {"ok": True, "type": f"hf_{kind}", "query": query, "url": url, "status": data.get("status"), "error": None, "count": len(body), "items": compact, "evidence": {"items_preview": compact[:3]}}
-
-
-def build_resource_probe(text: str, links_payload: dict[str, Any], url: str, probes: list[str], timeout: int) -> dict[str, Any]:
+def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[str]) -> dict[str, Any]:
     urls = set(extract_urls(text))
     for item in links_payload.get("links") or []:
         if isinstance(item, dict) and item.get("uri"):
@@ -585,66 +422,14 @@ def build_resource_probe(text: str, links_payload: dict[str, Any], url: str, pro
         return {"ok": True, "skipped": True, "urls": sorted(urls), "probes": []}
     doi_strings = sorted(set(re.findall(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, flags=re.I)))[:50]
     arxiv_ids = sorted(set(re.findall(r"arXiv[: ]?(\d{4}\.\d{4,5})", text, flags=re.I)))[:50]
-    tasks: list[tuple[str, str]] = []
-    github_repos = sorted({slug for u in urls if (slug := repo_slug_from_github_url(u))})
     results: list[dict[str, Any]] = []
-
     if "doi" in probes_set:
         for doi in doi_strings:
             results.append({"ok": True, "type": "doi", "doi": doi.rstrip('.'), "status": "detected", "url": f"https://doi.org/{doi.rstrip('.')}", "error": None, "evidence": {"matched_text": doi}})
     if "arxiv" in probes_set:
         for arxiv_id in arxiv_ids:
             results.append({"ok": True, "type": "arxiv", "id": arxiv_id, "status": "detected", "url": f"https://arxiv.org/abs/{arxiv_id}", "error": None, "evidence": {"matched_text": arxiv_id}})
-    if "github" in probes_set:
-        tasks += [("github", slug) for slug in github_repos[:10]]
-    title_guess = title_from_text(text) or Path(urllib.parse.urlparse(url).path).stem
-    if "hf" in probes_set and title_guess:
-        for kind in ["models", "datasets", "spaces"]:
-            tasks.append((f"hf_{kind}", title_guess))
-    if "project" in probes_set:
-        project_urls = [u for u in sorted(urls) if not u.lower().endswith(".pdf")][:10]
-        tasks += [("project", u) for u in project_urls]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        future_map = {}
-        for kind, value in tasks:
-            if kind == "github":
-                future_map[pool.submit(probe_github_repo, value, timeout)] = (kind, value)
-            elif kind.startswith("hf_"):
-                future_map[pool.submit(probe_hf_search, value, kind.removeprefix("hf_"), timeout)] = (kind, value)
-            elif kind == "project":
-                future_map[pool.submit(fetch_text, value, timeout)] = (kind, value)
-        for fut in concurrent.futures.as_completed(future_map):
-            kind, value = future_map[fut]
-            try:
-                payload = fut.result()
-                if kind == "project":
-                    title = html_title(payload.get("text") or "") if payload.get("ok") else None
-                    payload = {
-                        "ok": bool(payload.get("ok")),
-                        "type": "project_page",
-                        "url": value,
-                        "status": payload.get("status"),
-                        "content_type": payload.get("content_type"),
-                        "bytes": payload.get("bytes"),
-                        "title": title,
-                        "error": payload.get("error"),
-                        "message": payload.get("message"),
-                        "evidence": {"title": title, "text_excerpt": compact_ws(payload.get("text") or "", max_len=500) if payload.get("ok") else ""},
-                    }
-                payload.setdefault("status", payload.get("status"))
-                payload.setdefault("error", None)
-                payload.setdefault("evidence", {})
-                results.append(payload)
-            except Exception as exc:
-                results.append({"ok": False, "type": kind, "value": value, "url": value, "status": None, "error": type(exc).__name__, "message": str(exc), "evidence": {}})
-    return {"ok": True, "urls": sorted(urls), "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "github_repos": github_repos, "probes": results}
-
-
-def html_title(text: str) -> str | None:
-    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
-    if not match:
-        return None
-    return re.sub(r"\s+", " ", match.group(1)).strip()
+    return {"ok": True, "urls": sorted(urls), "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "probes": results}
 
 
 def title_from_text(text: str) -> str:
@@ -847,10 +632,6 @@ def extract_result_cards(section_cards: list[dict[str, Any]], table_cards: list[
     return cards[:20]
 
 
-def _normalize_match_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
-
-
 def placeholder_title(text: str | None) -> bool:
     value = compact_ws(text or "", max_len=220).lower()
     if not value or value in {"untitled paper", "paper"}:
@@ -872,39 +653,25 @@ def arxiv_api_title(workdir: Path) -> str | None:
 
 def summarize_resource_boundary(resource_probe: dict[str, Any], metadata: dict[str, Any] | None = None, source_inventory: dict[str, Any] | None = None, pdf_info: dict[str, Any] | None = None, secret_scan: dict[str, Any] | None = None) -> dict[str, Any]:
     metadata = metadata or {}
-    title_norm = _normalize_match_text(str(metadata.get("title") or ""))
-    draft: dict[str, Any] = {"ok": True, "advisory": True, "metadata": metadata, "github": [], "project_pages": [], "hf": {"models": {"status": "not_checked", "paper_owned_candidates": [], "unrelated_candidates": []}, "datasets": {"status": "not_checked", "paper_owned_candidates": [], "unrelated_candidates": []}, "spaces": {"status": "not_checked", "paper_owned_candidates": [], "unrelated_candidates": []}}, "doi": [], "arxiv": [], "warnings": []}
+    draft: dict[str, Any] = {
+        "ok": True,
+        "advisory": True,
+        "metadata": metadata,
+        "github": [],
+        "project_pages": [],
+        "hf": {
+            "models": {"status": "not_checked"},
+            "datasets": {"status": "not_checked"},
+            "spaces": {"status": "not_checked"},
+        },
+        "doi": [],
+        "arxiv": [],
+        "warnings": [],
+    }
     for probe in resource_probe.get("probes") or []:
         ptype = str(probe.get("type") or "")
-        if ptype == "github_repo":
-            status = "verified" if probe.get("ok") else "probe_failed"
-            evidence = probe.get("evidence") or {}
-            draft["github"].append({"status": status, "repo": probe.get("repo"), "html_url": probe.get("html_url"), "private": probe.get("private"), "fork": probe.get("fork"), "archived": probe.get("archived"), "license": probe.get("license"), "default_branch": probe.get("default_branch"), "description": probe.get("description"), "root_files": evidence.get("root_files"), "readme_excerpt": evidence.get("readme_excerpt"), "readme_resource_mentions": evidence.get("readme_resource_mentions"), "commit": evidence.get("commit"), "pyproject": evidence.get("pyproject"), "error": probe.get("error"), "message": probe.get("message")})
-        elif ptype == "project_page":
-            draft["project_pages"].append({"status": "verified" if probe.get("ok") else "probe_failed", "url": probe.get("url"), "title": probe.get("title"), "error": probe.get("error"), "message": probe.get("message")})
-        elif ptype in {"doi", "arxiv"}:
+        if ptype in {"doi", "arxiv"}:
             draft[ptype].append({"status": probe.get("status") or ("verified" if probe.get("ok") else "probe_failed"), "id": probe.get("id"), "doi": probe.get("doi"), "url": probe.get("url"), "error": probe.get("error")})
-        elif ptype.startswith("hf_"):
-            kind = ptype.removeprefix("hf_")
-            bucket = draft["hf"].setdefault(kind, {"status": "not_checked", "paper_owned_candidates": [], "unrelated_candidates": []})
-            if not probe.get("ok"):
-                bucket.update({"status": "probe_failed", "query": probe.get("query"), "error": probe.get("error"), "message": probe.get("message")})
-                continue
-            items = probe.get("items") or []
-            if not items:
-                bucket.update({"status": "verified_absent", "query": probe.get("query"), "count": 0})
-                continue
-            paper_owned: list[dict[str, Any]] = []
-            unrelated: list[dict[str, Any]] = []
-            query_norm = _normalize_match_text(str(probe.get("query") or ""))
-            for item in items:
-                item_id = str(item.get("id") or item.get("modelId") or "")
-                item_norm = _normalize_match_text(item_id)
-                if (title_norm and title_norm in item_norm) or (query_norm and len(query_norm) >= 8 and query_norm in item_norm):
-                    paper_owned.append(item)
-                else:
-                    unrelated.append(item)
-            bucket.update({"status": "paper_owned_candidates" if paper_owned else "candidates_unverified", "query": probe.get("query"), "count": probe.get("count", len(items)), "paper_owned_candidates": paper_owned, "unrelated_candidates": unrelated})
     if secret_scan and secret_scan.get("strict_secret_hits"):
         draft["warnings"].append("strict_secret_hits_present_in_evidence; do not copy raw secret text")
     if source_inventory:
@@ -915,32 +682,18 @@ def summarize_resource_boundary(resource_probe: dict[str, Any], metadata: dict[s
 
 
 def render_resource_boundary_markdown(draft: dict[str, Any]) -> str:
-    lines = ["# Resource boundary draft", "", "Advisory sidecar: read and verify before synthesizing the final resource section.", "", "## GitHub"]
-    for repo in draft.get("github") or []:
-        details = f"status={repo.get('status')}, url={repo.get('html_url')}, license={repo.get('license')}, fork={repo.get('fork')}, archived={repo.get('archived')}, default_branch={repo.get('default_branch')}"
-        if repo.get("commit"):
-            details += f", commit={repo.get('commit')}"
-        pyproject = repo.get("pyproject") if isinstance(repo.get("pyproject"), dict) else None
-        if pyproject:
-            details += f", pyproject={pyproject.get('project_name')}, scripts={','.join(pyproject.get('scripts') or [])}"
-        lines.append(f"- `{repo.get('repo')}`: {details}")
-        for mention in repo.get("readme_resource_mentions") or []:
-            lines.append(f"  - README mention: {mention}")
-    if not draft.get("github"):
-        lines.append("- not_checked")
-    lines.append("\n## Hugging Face")
+    lines = ["# Resource boundary draft", "", "Advisory sidecar: read and verify before synthesizing the final resource section.", "", "## GitHub", "- not_checked", "", "## Hugging Face"]
     for kind, bucket in (draft.get("hf") or {}).items():
-        lines.append(f"- {kind}: status={bucket.get('status')}, query={bucket.get('query')}, count={bucket.get('count')}")
-        if bucket.get("paper_owned_candidates"):
-            lines.append(f"  - paper_owned_candidates: {', '.join(str(i.get('id') or i.get('modelId')) for i in bucket.get('paper_owned_candidates', [])[:5])}")
-        if bucket.get("unrelated_candidates"):
-            lines.append(f"  - unrelated_candidates: {', '.join(str(i.get('id') or i.get('modelId')) for i in bucket.get('unrelated_candidates', [])[:5])}")
-        if bucket.get("error"):
-            lines.append(f"  - error: {bucket.get('error')} {bucket.get('message') or ''}".rstrip())
-    if draft.get("project_pages"):
-        lines.append("\n## Project pages")
-        for page in draft["project_pages"]:
-            lines.append(f"- {page.get('url')}: status={page.get('status')}, title={page.get('title')}")
+        lines.append(f"- {kind}: status={bucket.get('status')}")
+    lines.extend(["", "## Project pages", "- not_checked"])
+    if draft.get("doi"):
+        lines.append("\n## DOI")
+        for item in draft["doi"]:
+            lines.append(f"- {item.get('doi')}: status={item.get('status')}")
+    if draft.get("arxiv"):
+        lines.append("\n## arXiv")
+        for item in draft["arxiv"]:
+            lines.append(f"- {item.get('id')}: status={item.get('status')}")
     if draft.get("warnings"):
         lines.append("\n## Warnings")
         for warning in draft["warnings"]:
@@ -1332,7 +1085,7 @@ def process_pdf(
     files["section_inventory"] = "section_inventory.json"
     files["figure_table_inventory"] = "figure_table_inventory.json"
 
-    resource_probe = timings.record("resource_probe", build_resource_probe, text, links, url, probes, timeout)
+    resource_probe = timings.record("resource_probe", build_resource_probe, text, links, probes)
     write_json(workdir / "resource_probe.json", resource_probe)
     files["resource_probe"] = "resource_probe.json"
 
@@ -1463,7 +1216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
     parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, required=True)
-    parser.add_argument("--probe", action="append", default=None, choices=["github", "hf", "project", "arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests. GitHub/HF/project probes are retired deep probes and should not be used for default llm-wiki clipping.")
+    parser.add_argument("--probe", action="append", default=None, choices=["arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests.")
     parser.add_argument("--pdf-backend", choices=["docling", "pdftotext", "auto"], default="docling")
     parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if the requested structured PDF backend fails instead of falling back to pdftotext evidence")
     parser.add_argument("--timeout", type=int, default=60)

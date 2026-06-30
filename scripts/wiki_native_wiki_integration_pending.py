@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from wiki_native_docs import raw_clip_files
 from wiki_native_state import ensure_state_dirs
@@ -223,12 +223,10 @@ def clear_pending_wiki_integration_after_success(
     state_dir: Path,
     integrated_paths: list[str] | None = None,
     reason: str = "integration",
-    mark_graph_pending: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     ledger = load_pending_wiki_integration_ledger(state_dir)
     pending = list(ledger.get("pending") or [])
     integrated_path_set = {path for path in (integrated_paths or []) if path}
-    marked_graph_pending: list[dict[str, Any]] = []
     cleared_pending: list[dict[str, Any]] = []
     remaining_pending: list[Any] = []
     for item in pending:
@@ -246,8 +244,6 @@ def clear_pending_wiki_integration_after_success(
             remaining_pending.append(item)
             continue
         cleared_pending.append(item)
-        if mark_graph_pending and raw_path and item_status in WIKI_INTEGRATION_ACTIONABLE_STATUSES:
-            marked_graph_pending.append(mark_graph_pending(raw_path, item))
     cleared_at = now_stamp()
     cleared_paths = [str(item.get("raw_path") or "") for item in cleared_pending if item.get("raw_path")]
     remaining_blocking = [
@@ -262,8 +258,6 @@ def clear_pending_wiki_integration_after_success(
     ledger["last_cleared_pending"] = cleared_pending
     ledger["last_cleared_pending_count"] = len(cleared_pending)
     ledger["last_remaining_pending_count"] = len(remaining_pending)
-    ledger["last_marked_graph_pending"] = marked_graph_pending
-    ledger["last_marked_graph_pending_count"] = len(marked_graph_pending)
     ledger["pending"] = remaining_pending
     ledger["dirty"] = bool(remaining_blocking)
     ledger["last_failed_integration"] = None
@@ -274,8 +268,6 @@ def clear_pending_wiki_integration_after_success(
         "last_successful_integration_at": ledger["last_successful_integration_at"],
         "last_successful_integration_raw_count": ledger["last_successful_integration_raw_count"],
         "last_integrated_paths": ledger["last_integrated_paths"],
-        "marked_graph_pending_count": len(marked_graph_pending),
-        "marked_graph_pending": marked_graph_pending,
         "ledger_path": str(pending_wiki_integration_ledger_path(state_dir)),
     }
 

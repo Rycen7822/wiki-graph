@@ -168,13 +168,6 @@ def clear_pending_wiki_integration_after_success(
         integrated_paths=integrated_paths,
         reason=reason,
     )
-    for key in (
-        "marked_graph_pending",
-        "marked_graph_pending_count",
-        "last_marked_graph_pending",
-        "last_marked_graph_pending_count",
-    ):
-        result.pop(key, None)
     marked_native_pending: list[dict[str, Any]] = []
     if mark_native_pending and int(result.get("cleared_count") or 0) > 0:
         marked_native_pending.append(
