@@ -1756,6 +1756,13 @@ def test_raw_fast_evidence_bundle_title_guess_strips_markdown_heading_prefix() -
     assert raw_fast_evidence_bundle.title_from_text("## SWE-Marathon: Can Agents Work?\n\nAbstract") == "SWE-Marathon: Can Agents Work?"
 
 
+def test_raw_fast_evidence_bundle_source_keeps_file_hash_only() -> None:
+    source = (SCRIPTS / "raw_fast_evidence_bundle.py").read_text(encoding="utf-8")
+
+    assert "def sha256_bytes(" not in source
+    assert "def sha256_file(" in source
+
+
 def _assert_timing_step(payload: dict, step: str) -> None:
     timings = payload["timings"]
     entry = timings["steps"][step]

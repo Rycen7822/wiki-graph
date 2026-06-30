@@ -91,7 +91,7 @@ class NativeQueryEngine:
             zvec_hits = self.zvec_workspace.query_vector(
                 query_vector,
                 top_k,
-                _zvec_filter(("chunk", "section"), section_kind),
+                _zvec_filter(record_types, section_kind),
             )
         else:
             raise NotImplementedError(f"zvec query mode is not implemented yet: {mode}")

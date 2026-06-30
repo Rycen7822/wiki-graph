@@ -163,7 +163,7 @@ def test_query_engine_routes_naive_and_bypass_with_zvec_workspace() -> None:
         top_k=5,
     )
 
-    assert zvec.calls == [("vector", [1.0, 0.0], 5, "record_type_code in (1,4)")]
+    assert zvec.calls == [("vector", [1.0, 0.0], 5, "record_type_code in (2)")]
     assert naive["hits"][0]["doc_id"] == "section:sec-a"
     assert naive["trace"]["retrieval_backend"] == "zvec"
     assert bypass["hits"] == []

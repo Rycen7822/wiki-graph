@@ -50,7 +50,6 @@ def test_query_suite_row_requires_must_hit_fields() -> None:
         "query": "How should evidence retrieval be tested?",
         "mode": "mix",
         "top_k": 20,
-        "chunk_top_k": 10,
         "must_include_paths": ["concepts/evidence.md"],
         "must_include_entities": ["compiled:evidence"],
         "notes": "covers path and entity must-hit checks",
@@ -61,6 +60,11 @@ def test_query_suite_row_requires_must_hit_fields() -> None:
     bad.pop("must_include_paths")
     with pytest.raises(ValueError, match="must_include_paths"):
         validate_query_suite_row(bad)
+
+    bad_top_k = dict(row)
+    bad_top_k["top_k"] = 0
+    with pytest.raises(ValueError, match="top_k"):
+        validate_query_suite_row(bad_top_k)
 
 
 def test_reports_module_no_longer_exposes_shadow_comparison_helpers() -> None:

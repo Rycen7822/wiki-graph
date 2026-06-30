@@ -100,10 +100,6 @@ def attach_timings(payload: dict[str, Any], timings: TimingRecorder) -> dict[str
     return payload
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:

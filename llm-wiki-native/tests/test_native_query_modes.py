@@ -65,10 +65,29 @@ def test_naive_mode_uses_zvec_vector_search() -> None:
         record_types=("chunk",),
     )
 
-    assert zvec.calls == [("naive", [1.0, 0.0], 2, "record_type_code in (1,4)")]
+    assert zvec.calls == [("naive", [1.0, 0.0], 2, "record_type_code in (1)")]
     assert result["trace"]["mode"] == "naive"
     assert result["trace"]["retrieval_backend"] == "zvec"
     assert result["hits"][0]["doc_id"] == "chunk:chunk-a"
+
+
+def test_naive_mode_with_section_kind_uses_section_filter() -> None:
+    zvec = _ZvecWorkspace()
+    engine = NativeQueryEngine(_DB(), zvec_workspace=zvec)  # type: ignore[arg-type]
+
+    result = engine.query(
+        "native-test",
+        "method query",
+        [1.0, 0.0],
+        mode="naive",
+        top_k=2,
+        record_types=("chunk",),
+        section_kind="methodology",
+    )
+
+    assert zvec.calls == [("naive", [1.0, 0.0], 2, "record_type_code in (4) and section_kind_code in (4)")]
+    assert result["trace"]["mode"] == "naive"
+    assert result["trace"]["section_kind"] == "methodology"
 
 
 def test_bypass_mode_skips_retrieval() -> None:

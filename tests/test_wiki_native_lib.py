@@ -833,6 +833,17 @@ def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monk
     assert native_runtime_env.env_int("BAD_INT", 9) == 9
     assert native_runtime_env.redact_summary({"OPENAI_API_KEY": loaded["OPENAI_API_KEY"], "MODEL": "x"}) == {"OPENAI_API_KEY": "[REDACTED]", "MODEL": "x"}
 
+    source = (SCRIPTS / "native_runtime_env.py").read_text(encoding="utf-8")
+    assert not hasattr(native_runtime_env, "env_bool")
+    assert not hasattr(native_runtime_env, "env_float")
+    assert not hasattr(native_runtime_env, "port_open")
+    assert hasattr(native_runtime_env, "env_int")
+    assert hasattr(native_runtime_env, "load_env_file")
+    assert hasattr(native_runtime_env, "redact_summary")
+    assert "def env_bool(" not in source
+    assert "def env_float(" not in source
+    assert "def port_open(" not in source
+
 
 def test_active_section_similarity_builder_imports_native_runtime_env() -> None:
     text = (SCRIPTS / "build_section_similarity_graph.py").read_text(encoding="utf-8")
