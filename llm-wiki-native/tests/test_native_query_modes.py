@@ -13,9 +13,6 @@ class _DB:
     def get_workspace_status(self, workspace_id: str) -> str:
         return "audited"
 
-    def nearest_vectors(self, *args, **kwargs):
-        raise AssertionError("native query mode acceptance must use zvec when a zvec workspace is supplied")
-
     def get_record(self, workspace_id: str, record_type: str, record_id: str):
         return {"record_type": record_type, "record_id": record_id, "vector_text": "Alpha"}
 

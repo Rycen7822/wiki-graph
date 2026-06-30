@@ -2,7 +2,7 @@
 """Custom KG manifest and vector-contract helpers for native llm-wiki refresh.
 
 Production refresh materializes native zvec workspaces from state artifacts.
-This module owns deterministic custom KG manifest generation, diff/hash helpers,
+This module owns deterministic custom KG manifest generation, hash helpers,
 and native manifest contract checks.
 """
 
@@ -26,14 +26,12 @@ from wiki_native_lib import (
     ensure_state_dirs,
     now_stamp,
     print_json,
-    release_process_memory,
 )
 
 GRAPH_FIELD_SEP = "<SEP>"
 MANIFEST_SCHEMA_VERSION = 1
 RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "llm-wiki-typed-directed-relationship:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
-DEFAULT_FULL_REBUILD_INTERVAL = 5
 _CONTROL_CHAR_PATTERN_ALL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 _PLACEHOLDER_DOCUMENT_SOURCES = {"", "unknown", "unknown_source", "none", "null"}
@@ -182,22 +180,6 @@ def _stamp_identity_and_hashes(record: dict[str, Any], *, record_id: str, canoni
     _stamp_vector_metadata_hashes(record)
 
 
-def _record_vector_hash(record: dict[str, Any]) -> str | None:
-    if record.get("vector_hash"):
-        return str(record["vector_hash"])
-    if "content" not in record:
-        return None
-    return stable_hash(_vector_hash_payload(record))
-
-
-def _record_metadata_hash(record: dict[str, Any]) -> str | None:
-    if record.get("metadata_hash"):
-        return str(record["metadata_hash"])
-    if "content" not in record:
-        return None
-    return stable_hash({key: value for key, value in record.items() if key not in _RECORD_HASH_FIELDS and key != "content"})
-
-
 def manifest_path(state_dir: Path) -> Path:
     return state_dir / MANIFEST_FILENAME
 
@@ -237,7 +219,6 @@ def metadata_from_environment(
         "canonical_id_algorithm": NATIVE_CANONICAL_ID_ALGORITHM,
         "relationship_vector_content_algorithm": RELATIONSHIP_VECTOR_CONTENT_ALGORITHM,
         "section_similarity_params": section_similarity_params or {},
-        "incremental_count_since_full": 0,
         "created_at": now_stamp(),
     }
 
@@ -251,7 +232,6 @@ def build_custom_kg_manifest(
     embedding_params_version: str | None = None,
     custom_kg_builder_hash: str | None = None,
     section_similarity_params: dict[str, Any] | None = None,
-    incremental_count_since_full: int = 0,
 ) -> dict[str, Any]:
     """Canonicalize a complete custom_kg payload into a desired storage manifest.
 
@@ -259,7 +239,7 @@ def build_custom_kg_manifest(
     relationship identity plus vector text are typed/directed so same endpoint
     pairs with distinct semantics do not silent-last-win collapse.
     Logical ``source_id`` fields are resolved through the complete payload's
-    source-to-chunk map before any diff is attempted.
+    source-to-chunk map before records are emitted.
     """
 
     metadata = metadata_from_environment(
@@ -270,7 +250,6 @@ def build_custom_kg_manifest(
         custom_kg_builder_hash=custom_kg_builder_hash,
         section_similarity_params=section_similarity_params,
     )
-    metadata["incremental_count_since_full"] = incremental_count_since_full
     embedding_contract = {
         "embedding_model": metadata["embedding_model"],
         "embedding_dim": metadata["embedding_dim"],
@@ -388,61 +367,6 @@ def build_custom_kg_manifest(
     }
 
 
-def _embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
-    dim = record.get("embedding_dim")
-    try:
-        normalized_dim = int(dim) if dim is not None else None
-    except (TypeError, ValueError):
-        normalized_dim = None
-    return (
-        str(record.get("embedding_model") or ""),
-        normalized_dim,
-        str(record.get("embedding_params_version") or ""),
-    )
-
-
-def _diff_collection(collection: str, old_items: dict[str, Any], new_items: dict[str, Any]) -> dict[str, Any]:
-    old_keys = set(old_items)
-    new_keys = set(new_items)
-    add_ids = sorted(new_keys - old_keys)
-    delete_ids = sorted(old_keys - new_keys)
-    vector_update_ids: list[str] = []
-    metadata_update_ids: list[str] = []
-    for key in sorted(old_keys & new_keys):
-        old_record = old_items[key]
-        new_record = new_items[key]
-        if old_record.get("record_hash") == new_record.get("record_hash"):
-            continue
-        old_vector_hash = _record_vector_hash(old_record)
-        new_vector_hash = _record_vector_hash(new_record)
-        old_metadata_hash = _record_metadata_hash(old_record)
-        new_metadata_hash = _record_metadata_hash(new_record)
-        if not old_vector_hash or not new_vector_hash:
-            vector_update_ids.append(key)
-        elif old_vector_hash != new_vector_hash:
-            vector_update_ids.append(key)
-        elif old_metadata_hash != new_metadata_hash:
-            metadata_update_ids.append(key)
-        else:
-            # The full record hash changed but the known split hashes did not.
-            # Treat this as a semantic/vector update so future fields
-            # cannot be silently skipped by the optimization.
-            vector_update_ids.append(key)
-    update_ids = sorted([*vector_update_ids, *metadata_update_ids])
-    return {
-        "add": len(add_ids),
-        "update": len(update_ids),
-        "delete": len(delete_ids),
-        "add_ids": add_ids,
-        "update_ids": update_ids,
-        "delete_ids": delete_ids,
-        "vector_update": len(vector_update_ids),
-        "metadata_update": len(metadata_update_ids),
-        "vector_update_ids": vector_update_ids,
-        "metadata_update_ids": metadata_update_ids,
-    }
-
-
 def build_desired_manifest(root: Path, state_dir: Path, *, limit_docs: int | None = None, limit_edges: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     payload, payload_summary = build_custom_kg_payload(root, state_dir, limit_docs, limit_edges)
     desired = build_custom_kg_manifest(payload)
@@ -459,7 +383,6 @@ NATIVE_MANIFEST_METADATA_KEYS = {
     "canonical_id_algorithm",
     "relationship_vector_content_algorithm",
     "section_similarity_params",
-    "incremental_count_since_full",
     "created_at",
     "last_successful_import_mode",
     "last_successful_import_at",

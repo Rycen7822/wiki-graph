@@ -322,6 +322,9 @@ def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> Non
         "def successful_manifest(",
         "def write_successful_manifest(",
         "def manifest_record_count(",
+        "DEFAULT_FULL_REBUILD_INTERVAL",
+        "def _diff_collection(",
+        "incremental_count_since_full",
     ]
     assert [symbol for symbol in forbidden_symbols if symbol in source] == []
 

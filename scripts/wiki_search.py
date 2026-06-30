@@ -75,19 +75,19 @@ def main() -> int:
     parser.add_argument("--native-workspace", help="Workspace id override for native API queries")
     parser.add_argument("--query-vector", help="JSON array query vector forwarded to native API queries")
     parser.add_argument("--neighbor-k", type=int, default=5, help="Max native semantic neighbor records per hit")
-    parser.add_argument("--benchmark", type=Path)
+    parser.add_argument("--query-suite", type=Path, help="JSONL query suite to run through the native API")
     args = parser.parse_args()
-    if args.benchmark:
+    if args.query_suite:
         rows = []
-        for line in args.benchmark.read_text(encoding="utf-8").splitlines():
+        for line in args.query_suite.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             item = json.loads(line)
             rows.append(run_query(args, item.get("query") or item.get("q") or line))
-        print_json({"benchmark": str(args.benchmark), "runs": rows})
+        print_json({"query_suite": str(args.query_suite), "runs": rows})
         return 0
     if not args.query:
-        parser.error("query is required unless --benchmark is set")
+        parser.error("query is required unless --query-suite is set")
     print_json(run_query(args, args.query))
     return 0
 

@@ -81,7 +81,29 @@ def test_wiki_search_cli_help_is_native_only() -> None:
     for marker in LOCAL_SQLITE_CLI_FLAGS:
         assert marker not in result.stdout
     assert "--query-vector" in result.stdout
+    assert "--query-suite" in result.stdout
+    assert "--benchmark" not in result.stdout
     assert ("light" + "rag") not in result.stdout.lower()
+
+
+def test_wiki_search_query_suite_cli_batches_queries_without_benchmark_label(tmp_path, monkeypatch, capsys) -> None:
+    query_suite = tmp_path / "query-suite.jsonl"
+    query_suite.write_text('{"query": "alpha"}\n{"q": "beta"}\n', encoding="utf-8")
+    calls = []
+
+    def fake_run_query(args, query):
+        calls.append(query)
+        return {"query": query, "backend": "native", "response": {"hits": []}}
+
+    monkeypatch.setattr(wiki_search, "run_query", fake_run_query)
+    monkeypatch.setattr(sys, "argv", ["wiki_search.py", "--query-suite", str(query_suite), "--data-only"])
+
+    assert wiki_search.main() == 0
+
+    assert calls == ["alpha", "beta"]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["query_suite"] == str(query_suite)
+    assert "benchmark" not in payload
 
 
 def test_wiki_search_source_has_no_retired_backend_branch() -> None:

@@ -25,12 +25,24 @@ def _record(workspace_id: str, record_id: str) -> NativeRecord:
 
 
 def _app(tmp_path):
+    class Hit:
+        doc_id = "entity:doc:a"
+        score = 1.0
+        fields = {"record_type": "entity", "record_id": "doc:a"}
+
+    class ZvecWorkspace:
+        def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
+            return [Hit()]
+
+        def query_vector(self, query_vector: list[float], top_k: int, filter_expr: str | None):
+            return [Hit()]
+
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
     db.put_record(_record("native-test", "doc:a"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.mark_audited("native-test", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
-    return create_app(NativeQueryEngine(db))
+    return create_app(NativeQueryEngine(db, zvec_workspace=ZvecWorkspace()))
 
 
 async def _request_async(app, method: str, path: str, *, raise_app_exceptions: bool = True, **kwargs: Any) -> httpx.Response:
@@ -74,7 +86,7 @@ def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:
         "status": "ok",
         "service": "llm-wiki-native",
         "backend": "native-zvec",
-        "default_port": 9622,
+        "default_port": 9621,
         "active_workspace_id": None,
     }
 

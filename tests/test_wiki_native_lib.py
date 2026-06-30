@@ -241,7 +241,7 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
     class FakeDb:
         def get_workspace_status(self, workspace_id: str) -> str:
             assert workspace_id == "wikigraph-zvec192-active"
-            return "active"
+            return "audited"
 
         def get_record(self, workspace_id: str, record_type: str, record_id: str) -> dict[str, str]:
             return {"workspace_id": workspace_id, "record_type": record_type, "record_id": record_id}
@@ -879,17 +879,21 @@ def test_retired_wikigraph_refresh_wrapper_and_old_ledger_status_modules_are_rem
         assert importlib.util.find_spec(module_name) is None
 
 
-def test_query_benchmark_tools_do_not_use_old_wikigraph_module_names() -> None:
-    old_names = ("collect_wikigraph_query_report", "probe_wikigraph_baseline_vector_contract")
-    new_names = ("collect_native_query_report", "probe_baseline_query_vector_contract")
+def test_retired_baseline_and_shadow_query_tools_are_removed_after_native_cutover() -> None:
+    removed_modules = (
+        "collect_wikigraph_query_report",
+        "probe_wikigraph_baseline_vector_contract",
+        "probe_baseline_query_vector_contract",
+        "audit_native_performance_comparison",
+    )
     import importlib.util
 
-    for module_name in old_names:
+    for module_name in removed_modules:
         assert not (SCRIPTS / f"{module_name}.py").exists()
         assert importlib.util.find_spec(module_name) is None
-    for module_name in new_names:
-        assert (SCRIPTS / f"{module_name}.py").exists()
-        assert importlib.util.find_spec(module_name) is not None
+
+    assert (SCRIPTS / "collect_native_query_report.py").exists()
+    assert importlib.util.find_spec("collect_native_query_report") is not None
 
 
 def test_old_runtime_env_compatibility_module_is_removed() -> None:

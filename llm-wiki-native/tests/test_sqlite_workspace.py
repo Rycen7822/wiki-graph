@@ -38,18 +38,14 @@ def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
     assert "chunks" in audit["issues"][0]
 
 
-def test_workspace_status_transition_rejects_active_without_audit(tmp_path) -> None:
+def test_workspace_no_longer_exposes_serving_activation_state(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-
-    with pytest.raises(ValueError, match="audited"):
-        db.activate_workspace("native-test")
-
     db.put_record(_record("native-test"))
     db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})
-    db.activate_workspace("native-test")
 
-    assert db.get_workspace_status("native-test") == "active"
+    assert db.get_workspace_status("native-test") == "audited"
+    assert not hasattr(SQLiteWorkspace, "activate_workspace")
 
 
 def test_workspace_operations_reject_unknown_workspace(tmp_path) -> None:

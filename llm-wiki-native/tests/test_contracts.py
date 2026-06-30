@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import llm_wiki_native
 from llm_wiki_native.contracts import (
     DEFAULT_NATIVE_PORT,
     NATIVE_SCHEMA_VERSION,
@@ -13,13 +14,14 @@ from llm_wiki_native.contracts import (
     SUPPORTED_QUERY_MODES,
     WORKSPACE_SCHEMA_VERSION,
 )
-from llm_wiki_native.reports import validate_query_suite_row, validate_shadow_report
+from llm_wiki_native import reports
+from llm_wiki_native.reports import validate_query_suite_row
 
 
 def test_native_contract_constants_match_zvec_plan() -> None:
     assert NATIVE_SCHEMA_VERSION == 1
     assert WORKSPACE_SCHEMA_VERSION == 1
-    assert DEFAULT_NATIVE_PORT == 9622
+    assert DEFAULT_NATIVE_PORT == 9621
     assert SUPPORTED_QUERY_MODES == {"mix", "naive", "bypass"}
     assert RECORD_TYPES == {"chunk", "entity", "relationship", "section"}
     assert RECORD_TYPE_CODES == {"chunk": 1, "entity": 2, "relationship": 3, "section": 4}
@@ -36,6 +38,10 @@ def test_native_contract_constants_match_zvec_plan() -> None:
         "questions": 8,
         "other": 99,
     }
+
+
+def test_native_package_metadata_no_longer_describes_shadow_backend() -> None:
+    assert "shadow" not in (llm_wiki_native.__doc__ or "").lower()
 
 
 def test_query_suite_row_requires_must_hit_fields() -> None:
@@ -57,27 +63,13 @@ def test_query_suite_row_requires_must_hit_fields() -> None:
         validate_query_suite_row(bad)
 
 
-def test_native_shadow_report_requires_trace_and_baseline_sections() -> None:
-    report = {
-        "schema_version": 1,
-        "query_suite": "/tmp/query_suite.jsonl",
-        "baseline": {"server": "http://127.0.0.1:9621", "results": []},
-        "native": {"server": "http://127.0.0.1:9622", "results": []},
-        "trace_paths": ["/tmp/native-trace.json"],
-        "promotion_blockers": [],
-    }
-    validate_shadow_report(report)
+def test_reports_module_no_longer_exposes_shadow_comparison_helpers() -> None:
+    assert not hasattr(reports, "validate_shadow_report")
+    assert not hasattr(reports, "compare_shadow_response")
 
-    bad = dict(report)
-    bad.pop("trace_paths")
-    with pytest.raises(ValueError, match="trace_paths"):
-        validate_shadow_report(bad)
-
-    old = dict(report)
-    old.pop("baseline")
-    old["light" + "rag"] = {"server": "http://127.0.0.1:9621", "results": []}
-    with pytest.raises(ValueError, match="baseline"):
-        validate_shadow_report(old)
+    report_source = Path(reports.__file__).read_text(encoding="utf-8")
+    assert "baseline-vs-native" not in report_source
+    assert "promotion_blockers" not in report_source
 
 
 def test_minimal_query_suite_fixture_matches_schema() -> None:

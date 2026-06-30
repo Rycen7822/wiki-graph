@@ -6,7 +6,6 @@ LLM answer generation, and HTTP serving live in the API/search layers.
 
 from __future__ import annotations
 
-import base64
 from typing import Any
 
 from llm_wiki_native.contracts import (
@@ -19,7 +18,9 @@ from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 
 
 class NativeQueryEngine:
-    def __init__(self, db: SQLiteWorkspace, zvec_workspace: Any | None = None) -> None:
+    def __init__(self, db: SQLiteWorkspace, zvec_workspace: Any) -> None:
+        if zvec_workspace is None:
+            raise ValueError("zvec workspace is required for native query engine")
         self.db = db
         self.zvec_workspace = zvec_workspace
 
@@ -41,10 +42,8 @@ class NativeQueryEngine:
         if unknown_record_types:
             raise ValueError(f"unsupported record_type: {unknown_record_types[0]}")
         status = self.db.get_workspace_status(workspace_id)
-        if status not in {"audited", "active"}:
-            raise ValueError(f"workspace must be audited or active before query: {workspace_id} status={status}")
-        if section_kind is not None and self.zvec_workspace is None:
-            raise NotImplementedError("section_kind requires a zvec workspace")
+        if status != "audited":
+            raise ValueError(f"workspace must be audited before query: {workspace_id} status={status}")
         if mode == "bypass":
             return {
                 "hits": [],
@@ -58,43 +57,16 @@ class NativeQueryEngine:
                     "retrieval_backend": "bypass",
                 },
             }
-        if self.zvec_workspace is not None:
-            return self._query_zvec(
-                workspace_id,
-                query,
-                query_vector,
-                mode=mode,
-                top_k=top_k,
-                record_types=record_types,
-                section_kind=section_kind,
-                neighbor_limit=neighbor_limit,
-            )
-        vector_hits: list[dict[str, Any]] = []
-        for record_type in record_types:
-            vector_hits.extend(self.db.nearest_vectors(workspace_id, record_type, query_vector, top_k))
-        vector_hits.sort(key=lambda item: (-item["score"], item["record_type"], item["record_id"]))
-        hits: list[dict[str, Any]] = []
-        for item in vector_hits[:top_k]:
-            record = self.db.get_record(workspace_id, item["record_type"], item["record_id"])
-            hits.append(
-                {
-                    **item,
-                    "record": record,
-                    "neighbors": self.db.neighbors(workspace_id, item["record_id"], limit=neighbor_limit),
-                }
-            )
-        return {
-            "hits": hits,
-            "trace": {
-                "query": query,
-                "mode": mode,
-                "top_k": top_k,
-                "record_types": list(record_types),
-                "section_kind": section_kind,
-                "vector_hit_count": len(hits),
-                "retrieval_backend": "sqlite",
-            },
-        }
+        return self._query_zvec(
+            workspace_id,
+            query,
+            query_vector,
+            mode=mode,
+            top_k=top_k,
+            record_types=record_types,
+            section_kind=section_kind,
+            neighbor_limit=neighbor_limit,
+        )
 
     def _query_zvec(
         self,
@@ -167,27 +139,8 @@ def _record_type_filter(record_types: tuple[str, ...]) -> str:
 
 
 def _record_identity_from_hit(doc_id: str, fields: dict[str, Any]) -> tuple[str, str]:
-    record_type = fields.get("record_type")
-    record_id = fields.get("record_id")
-    if record_type and record_id:
-        return str(record_type), str(record_id)
-    if ":" not in doc_id:
-        return _record_identity_from_encoded_doc_id(doc_id)
-    fallback_type, fallback_id = doc_id.split(":", 1)
-    return fallback_type, fallback_id
-
-
-def _record_identity_from_encoded_doc_id(doc_id: str) -> tuple[str, str]:
-    if "__" not in doc_id:
-        raise ValueError(f"zvec hit missing record identity: {doc_id}")
-    record_type, encoded_id = doc_id.split("__", 1)
-    if record_type not in RECORD_TYPES or not encoded_id:
-        raise ValueError(f"zvec hit missing record identity: {doc_id}")
-    padding = "=" * (-len(encoded_id) % 4)
-    try:
-        record_id = base64.urlsafe_b64decode(f"{encoded_id}{padding}").decode("utf-8")
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ValueError(f"zvec hit missing record identity: {doc_id}") from exc
-    if not record_id:
-        raise ValueError(f"zvec hit missing record identity: {doc_id}")
+    record_type = str(fields.get("record_type") or "")
+    record_id = str(fields.get("record_id") or "")
+    if not record_type or not record_id:
+        raise ValueError(f"zvec hit missing record_type/record_id fields: {doc_id}")
     return record_type, record_id

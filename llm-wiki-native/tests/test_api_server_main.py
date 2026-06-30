@@ -105,6 +105,7 @@ def test_run_server_passes_active_default_to_default_loader(tmp_path, monkeypatc
     assert result == 0
     assert calls["workspace_file"] == pointer_path
     assert calls["allowed_statuses"] == ("active",)
+    assert calls["port"] == 9621
     assert calls["app"].state.default_workspace_id == "active-workspace"
 
 

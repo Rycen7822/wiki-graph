@@ -1072,6 +1072,7 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
     assert f"{retired_backend}_version" not in metadata
     assert metadata["canonical_id_algorithm"] == "llm-wiki-canonical-id:v1+native-custom-kg:v1"
     assert metadata["relationship_vector_content_algorithm"] == "llm-wiki-typed-directed-relationship:v1"
+    assert "incremental_count_since_full" not in metadata
     assert retired_backend not in metadata["canonical_id_algorithm"]
     assert retired_backend not in metadata["relationship_vector_content_algorithm"]
 

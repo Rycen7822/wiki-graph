@@ -46,12 +46,6 @@ def _as_float32_vector(values: list[float]) -> np.ndarray:
     return vector
 
 
-def _vector_from_blob(blob: bytes, dim: int) -> np.ndarray:
-    vector = np.frombuffer(blob, dtype=np.float32)
-    if vector.size != dim:
-        raise ValueError(f"stored vector dimension mismatch: expected {dim}, found {vector.size}")
-    return vector
-
 
 class SQLiteWorkspace:
     def __init__(self, db_path: Path) -> None:
@@ -223,31 +217,6 @@ class SQLiteWorkspace:
                 (workspace_id, record_type, record_id, vector_hash, int(vector_array.size), vector_array.tobytes()),
             )
 
-    def nearest_vectors(self, workspace_id: str, record_type: str, query_vector: list[float], top_k: int) -> list[dict[str, Any]]:
-        self.get_workspace_status(workspace_id)
-        if top_k <= 0:
-            return []
-        query = _as_float32_vector(query_vector)
-        query_norm = float(np.linalg.norm(query))
-        results: list[dict[str, Any]] = []
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT record_id, vector_hash, dim, vector_blob
-                FROM vector
-                WHERE workspace_id = ? AND record_type = ?
-                """,
-                (workspace_id, record_type),
-            ).fetchall()
-        for row in rows:
-            vector = _vector_from_blob(bytes(row["vector_blob"]), int(row["dim"]))
-            if vector.size != query.size:
-                raise ValueError(f"dimension mismatch for {row['record_id']}: expected {vector.size}, found {query.size}")
-            score = float(np.dot(query, vector) / (query_norm * float(np.linalg.norm(vector))))
-            results.append({"record_type": record_type, "record_id": str(row["record_id"]), "vector_hash": str(row["vector_hash"]), "score": score})
-        results.sort(key=lambda item: (-item["score"], item["record_id"]))
-        return results[:top_k]
-
     def put_edge(self, workspace_id: str, edge_type: str, src_id: str, tgt_id: str, weight: float, payload: dict[str, Any]) -> None:
         self.get_workspace_status(workspace_id)
         if not edge_type or not src_id or not tgt_id:
@@ -357,10 +326,3 @@ class SQLiteWorkspace:
                 raise ValueError(f"workspace vector coverage failed: {vector_audit['missing']}")
         with self._connect() as conn:
             conn.execute("UPDATE workspace SET status = 'audited' WHERE workspace_id = ?", (workspace_id,))
-
-    def activate_workspace(self, workspace_id: str) -> None:
-        if self.get_workspace_status(workspace_id) != "audited":
-            raise ValueError("workspace must be audited before activation")
-        with self._connect() as conn:
-            conn.execute("UPDATE workspace SET status = 'retired' WHERE status = 'active'")
-            conn.execute("UPDATE workspace SET status = 'active' WHERE workspace_id = ?", (workspace_id,))
