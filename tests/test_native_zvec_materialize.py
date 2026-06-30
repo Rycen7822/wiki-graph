@@ -9,12 +9,13 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
-NATIVE_SRC = ROOT / "llm-wiki-native" / "src"
-sys.path.insert(0, str(SCRIPTS))
-sys.path.insert(0, str(NATIVE_SRC))
+SRC = ROOT / "src"
+OPS = SRC / "wiki_graph" / "ops"
+SCRIPTS = OPS
+NATIVE_SRC = SRC
+sys.path.insert(0, str(SRC))
 
-import native_zvec_materialize  # noqa: E402
+from wiki_graph.ops import native_zvec_materialize  # noqa: E402
 
 
 def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
@@ -37,8 +38,8 @@ def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
 
 def test_native_materializer_uses_native_vector_fill_seam_not_mixed_custom_kg_module() -> None:
     text = (SCRIPTS / "native_zvec_materialize.py").read_text(encoding="utf-8")
-    assert "from custom_kg_vector_fill import fill_missing_manifest_vectors" in text
-    assert "from custom_kg_incremental import fill_missing_manifest_vectors" not in text
+    assert "from wiki_graph.ops.custom_kg_vector_fill import fill_missing_manifest_vectors" in text
+    assert "from wiki_graph.ops.custom_kg_incremental import fill_missing_manifest_vectors" not in text
 
 
 def test_custom_kg_file_backend_storage_applier_is_retired() -> None:
@@ -50,7 +51,7 @@ def test_custom_kg_file_backend_storage_applier_is_retired() -> None:
     assert not (ROOT / "tests" / retired_test_name).exists()
 
     offenders = []
-    for root in (ROOT / "scripts", ROOT / "tests", NATIVE_SRC):
+    for root in (SCRIPTS, ROOT / "tests", NATIVE_SRC):
         for path in root.rglob("*.py"):
             text = path.read_text(encoding="utf-8")
             if module_name in text or class_name in text:

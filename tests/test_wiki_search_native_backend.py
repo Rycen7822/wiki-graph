@@ -7,10 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = REPO_ROOT / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+SRC = REPO_ROOT / "src"
+OPS = SRC / "wiki_graph" / "ops"
+SCRIPTS = OPS
+sys.path.insert(0, str(SRC))
 
-import wiki_search  # noqa: E402
+from wiki_graph.ops import wiki_search  # noqa: E402
 
 LOCAL_SQLITE_CLI_FLAGS = ("--native" + "-db", "--expand-section" + "-neighbors")
 LOCAL_SQLITE_SOURCE_MARKERS = (
@@ -67,7 +69,7 @@ def test_wiki_search_does_not_export_retired_query_helpers() -> None:
 
 def test_wiki_search_cli_help_is_native_only() -> None:
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS / "wiki_search.py"), "--help"],
+        [sys.executable, "-m", "wiki_graph.ops.wiki_search", "--help"],
         check=True,
         text=True,
         capture_output=True,
@@ -128,7 +130,7 @@ def test_wiki_search_query_suite_rejects_structured_native_rows_before_http(tmp_
     monkeypatch.setattr(wiki_search, "run_query", fail_run_query)
     monkeypatch.setattr(sys, "argv", ["wiki_search.py", "--query-suite", str(query_suite), "--data-only"])
 
-    with pytest.raises(ValueError, match="collect_native_query_report.py"):
+    with pytest.raises(ValueError, match="wiki_graph.ops.collect_native_query_report"):
         wiki_search.main()
 
 

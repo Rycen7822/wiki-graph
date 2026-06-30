@@ -7,10 +7,13 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+OPS = SRC / "wiki_graph" / "ops"
+SCRIPTS = OPS
+sys.path.insert(0, str(SRC))
 
-import batch_native_refresh  # noqa: E402
+from wiki_graph.ops import batch_native_refresh  # noqa: E402
 
 
 def test_native_refresh_ledger_scope_is_distinct_from_wikigraph_batch_ledger(tmp_path) -> None:

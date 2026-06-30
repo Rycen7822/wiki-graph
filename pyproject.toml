@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-wiki-native"
+version = "0.1.0"
+description = "Native retrieval kernel for llm-wiki."
+requires-python = ">=3.12"
+dependencies = ["numpy", "starlette", "uvicorn", "zvec>=0.5.1,<0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+llm-wiki-native = "llm_wiki_native.cli:main"
+wiki-graph-audit-native-refs = "wiki_graph.ops.audit_native_production_refs:main"
+wiki-graph-batch-native-refresh = "wiki_graph.ops.batch_native_refresh:main"
+wiki-graph-batch-wiki-integration = "wiki_graph.ops.batch_wiki_integration:main"
+wiki-graph-custom-kg = "wiki_graph.ops.custom_kg_incremental:main"
+wiki-graph-native-zvec-materialize = "wiki_graph.ops.native_zvec_materialize:main"
+wiki-graph-raw-fast-closeout = "wiki_graph.ops.raw_fast_closeout:main"
+wiki-graph-raw-fast-evidence-bundle = "wiki_graph.ops.raw_fast_evidence_bundle:main"
+wiki-graph-search = "wiki_graph.ops.wiki_search:main"

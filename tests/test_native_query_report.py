@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "scripts"
-sys.path.insert(0, str(SCRIPTS))
+SRC = ROOT / "src"
+OPS = SRC / "wiki_graph" / "ops"
+SCRIPTS = OPS
+sys.path.insert(0, str(SRC))
 
-import collect_native_query_report  # noqa: E402
+from wiki_graph.ops import collect_native_query_report  # noqa: E402
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
