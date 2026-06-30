@@ -20,7 +20,7 @@ def _env_path(name: str, default: Path) -> Path:
 
 
 DEFAULT_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
-DEFAULT_WIKI_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR / "wiki_test")
+DEFAULT_WIKI_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR)
 DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "native_refresh" / "state")
 DEFAULT_SERVER = os.environ.get("LLM_WIKI_SERVER", "http://127.0.0.1:9621")
 

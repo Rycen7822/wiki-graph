@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import shlex
 import sqlite3
@@ -19,8 +20,18 @@ import urllib.request
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WIKI_ROOT = REPO_ROOT / "wiki_test"
-DEFAULT_WORKDIR = REPO_ROOT / "tmp" / "native_refresh"
+
+
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    return Path(raw).expanduser()
+
+
+DEFAULT_BASE_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
+DEFAULT_WIKI_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_BASE_WORKDIR)
+DEFAULT_WORKDIR = _env_path("LLM_WIKI_NATIVE_REFRESH_WORKDIR", DEFAULT_BASE_WORKDIR / "tmp" / "native_refresh")
 
 
 def pending_ledger_path(state_dir: Path) -> Path:

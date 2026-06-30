@@ -31,11 +31,11 @@ def _env_path(name: str, default: Path) -> Path:
 
 
 DEFAULT_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
-DEFAULT_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR / "wiki_test")
-DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "wiki_test_state")
+DEFAULT_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR)
+DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "native_refresh" / "state")
 DEFAULT_VERIFIER = _env_path(
     "LLM_WIKI_RAW_FAST_VERIFIER",
-    DEFAULT_WORKDIR / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py",
+    Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py",
 )
 DEFAULT_REQUIRED_SECTIONS = [
     "summary",

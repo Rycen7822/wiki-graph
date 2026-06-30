@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from types import SimpleNamespace
 from pathlib import Path
-
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / "ops"
@@ -15,6 +12,7 @@ NATIVE_SRC = ROOT
 sys.path.insert(0, str(ROOT))
 
 from ops import native_zvec_materialize  # noqa: E402
+from support import write_json, write_jsonl, write_vector_cache  # noqa: E402
 
 
 def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
@@ -58,30 +56,6 @@ def test_custom_kg_file_backend_storage_applier_is_retired() -> None:
     assert offenders == []
 
 
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-
-
-def _write_vector_cache(path: Path, vectors: dict[str, list[float]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE vector_cache(vector_hash TEXT PRIMARY KEY, embedding_dim INTEGER NOT NULL, vector_blob BLOB NOT NULL)"
-        )
-        for vector_hash, vector in vectors.items():
-            arr = np.asarray(vector, dtype=np.float32)
-            conn.execute(
-                "INSERT INTO vector_cache(vector_hash, embedding_dim, vector_blob) VALUES(?, ?, ?)",
-                (vector_hash, int(arr.size), arr.tobytes()),
-            )
-
-
 def _sample_state(
     tmp_path: Path,
     *,
@@ -94,7 +68,7 @@ def _sample_state(
     if with_section_embeddings is None:
         with_section_embeddings = with_vectors
     state = tmp_path / "state"
-    _write_json(
+    write_json(
         state / "custom_kg_manifest.json",
         {
             "metadata": {
@@ -149,8 +123,8 @@ def _sample_state(
             },
         },
     )
-    _write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
-    _write_jsonl(
+    write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
+    write_jsonl(
         state / "raw_sections.jsonl",
         [
             {
@@ -166,12 +140,12 @@ def _sample_state(
         ],
     )
     if with_section_embeddings:
-        _write_jsonl(
+        write_jsonl(
             state / "section_embeddings.jsonl",
             [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}],
         )
     if with_manifest_vectors:
-        _write_vector_cache(
+        write_vector_cache(
             state / "vector_cache.sqlite",
             {
                 "chunk-hash": [1.0, 0.0],

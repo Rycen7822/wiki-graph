@@ -52,18 +52,18 @@ def test_status_and_mark_pending_use_native_ledger_under_state(tmp_path, capsys)
     assert not (root / "pending_native_refresh.json").exists()
 
 
-def test_status_default_paths_are_repo_local(capsys) -> None:
+def test_status_default_paths_are_env_backed_without_repo_local_sandbox(capsys) -> None:
     assert batch_native_refresh.main(["status"]) == 0
     payload = json.loads(capsys.readouterr().out)
     repo_root = Path(__file__).resolve().parents[1]
 
-    assert Path(payload["root"]) == repo_root / "wiki_test"
+    assert Path(payload["root"]) == repo_root
     assert Path(payload["state_dir"]) == repo_root / "tmp" / "native_refresh" / "state"
     assert "legacy_refresh_migration_allowed" not in payload
     assert "migrated_from_legacy_refresh" not in payload
 
 
-def test_mark_pending_default_paths_are_repo_local(capsys, monkeypatch) -> None:
+def test_mark_pending_default_paths_are_env_backed_without_repo_local_sandbox(capsys, monkeypatch) -> None:
     calls = []
 
     def fake_mark_pending(state_dir, root, *, reason):
@@ -81,7 +81,7 @@ def test_mark_pending_default_paths_are_repo_local(capsys, monkeypatch) -> None:
     payload = json.loads(capsys.readouterr().out)
     repo_root = Path(__file__).resolve().parents[1]
     expected_state = repo_root / "tmp" / "native_refresh" / "state"
-    expected_root = repo_root / "wiki_test"
+    expected_root = repo_root
 
     assert payload["pending_count"] == 1
     assert calls == [

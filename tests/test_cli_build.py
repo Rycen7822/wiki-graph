@@ -1,36 +1,13 @@
 import json
-import sqlite3
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 import llm_wiki_native.cli as cli_module
 from llm_wiki_native.build import MissingNativeVectorsError
 from llm_wiki_native.cli import build_workspace_from_state, main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-
-
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-
-
-def _write_vector_cache(path: Path, vectors: dict[str, list[float]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE vector_cache(vector_hash TEXT PRIMARY KEY, embedding_dim INTEGER NOT NULL, vector_blob BLOB NOT NULL)")
-        for vector_hash, vector in vectors.items():
-            arr = np.asarray(vector, dtype=np.float32)
-            conn.execute(
-                "INSERT INTO vector_cache(vector_hash, embedding_dim, vector_blob) VALUES(?, ?, ?)",
-                (vector_hash, int(arr.size), arr.tobytes()),
-            )
+from support import write_json, write_jsonl, write_vector_cache
 
 
 def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
@@ -51,9 +28,9 @@ def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
             }
         },
     }
-    _write_json(state / "custom_kg_manifest.json", manifest)
-    _write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
-    _write_jsonl(
+    write_json(state / "custom_kg_manifest.json", manifest)
+    write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
+    write_jsonl(
         state / "raw_sections.jsonl",
         [
             {
@@ -69,7 +46,7 @@ def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
         ],
     )
     if with_vectors:
-        _write_vector_cache(
+        write_vector_cache(
             state / "vector_cache.sqlite",
             {
                 "chunk-hash": [1.0, 0.0],
@@ -77,7 +54,7 @@ def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
                 "rel-vector": [0.0, 1.0],
             },
         )
-        _write_jsonl(
+        write_jsonl(
             state / "section_embeddings.jsonl",
             [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}],
         )
