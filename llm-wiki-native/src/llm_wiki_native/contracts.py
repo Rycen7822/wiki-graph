@@ -4,7 +4,7 @@ from __future__ import annotations
 
 NATIVE_SCHEMA_VERSION = 1
 WORKSPACE_SCHEMA_VERSION = 1
-DEFAULT_NATIVE_PORT = 9622
+DEFAULT_NATIVE_PORT = 9621
 SUPPORTED_QUERY_MODES = {"mix", "naive", "bypass"}
 RECORD_TYPES = {"chunk", "entity", "relationship", "section"}
 RECORD_TYPE_CODES = {"chunk": 1, "entity": 2, "relationship": 3, "section": 4}

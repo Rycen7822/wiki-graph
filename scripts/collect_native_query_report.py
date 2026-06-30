@@ -119,7 +119,6 @@ def collect_query_report(
     server: str,
     workspace_id: str | None = None,
     endpoint: str = "/query/data",
-    measurement_role: str = "native_query",
     timeout: int = 120,
     warmup_runs: int = 0,
     repetitions: int = 1,
@@ -166,7 +165,7 @@ def collect_query_report(
         "query_suite_sha256": _query_suite_sha256(query_suite_path),
         "server": server.rstrip("/"),
         "endpoint": endpoint_path,
-        "measurement_role": measurement_role,
+        "measurement_role": "native_query",
         "workspace_id": workspace_id,
         "timing_scope": _timing_scope(rows),
         "warmup_runs": warmup_runs,
@@ -187,7 +186,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--server", required=True)
     parser.add_argument("--workspace-id")
     parser.add_argument("--endpoint", default="/query/data")
-    parser.add_argument("--measurement-role", choices=("native_query", "baseline_query"), default="native_query")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--warmup-runs", type=int, default=0)
     parser.add_argument("--repetitions", type=int, default=1)
@@ -200,7 +198,6 @@ def main(argv: list[str] | None = None) -> int:
             server=args.server,
             workspace_id=args.workspace_id,
             endpoint=args.endpoint,
-            measurement_role=args.measurement_role,
             timeout=args.timeout,
             warmup_runs=args.warmup_runs,
             repetitions=args.repetitions,

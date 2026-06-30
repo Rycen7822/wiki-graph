@@ -265,7 +265,7 @@ def _package_independence_runtime_smoke(
 
     class _Db:
         def get_workspace_status(self, workspace_id: str) -> str:
-            return "active"
+            return "audited"
 
         def get_record(self, workspace_id: str, record_type: str, record_id: str) -> dict[str, Any]:
             return {

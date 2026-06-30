@@ -96,8 +96,9 @@ def test_build_workspace_from_state_materializes_manifest_and_edges_without_acti
     assert report["edge_count"] == 2
     assert report["vector_audit"]["ok"] is True
     assert db.get_workspace_status("native-test") == "audited"
-    assert db.nearest_vectors("native-test", "chunk", [1.0, 0.0], top_k=1)[0]["record_id"] == "chunk-a"
-    assert db.nearest_vectors("native-test", "section", [0.5, 0.5], top_k=1)[0]["record_id"] == "raw_section:doc-a:method"
+    vector_audit = db.audit_vector_coverage("native-test")
+    assert vector_audit["counts"]["chunk"] == {"records": 1, "vectors": 1, "missing": 0}
+    assert vector_audit["counts"]["section"] == {"records": 1, "vectors": 1, "missing": 0}
     section = db.get_record("native-test", "section", "raw_section:doc-a:method")
     assert section["source_path"] == "a.md"
     assert section["source_id"] == "doc:a"

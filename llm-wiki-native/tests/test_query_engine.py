@@ -19,6 +19,34 @@ def _record(workspace_id: str, record_type: str, record_id: str, text: str) -> N
     )
 
 
+class _ZvecHit:
+    def __init__(self, record_type: str, record_id: str, score: float = 1.0) -> None:
+        self.doc_id = f"{record_type}:{record_id}"
+        self.score = score
+        self.fields = {"record_type": record_type, "record_id": record_id}
+
+
+class _ZvecWorkspace:
+    def __init__(self, hits: list[_ZvecHit] | None = None) -> None:
+        self.hits = list(hits or [])
+        self.calls = []
+
+    def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
+        self.calls.append(("mix", query, query_vector, top_k, filter_expr))
+        return self.hits
+
+    def query_vector(self, query_vector: list[float], top_k: int, filter_expr: str | None):
+        self.calls.append(("vector", query_vector, top_k, filter_expr))
+        return self.hits
+
+
+def test_query_engine_requires_zvec_workspace(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+
+    with pytest.raises(ValueError, match="zvec workspace"):
+        NativeQueryEngine(db, zvec_workspace=None)
+
+
 def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
@@ -28,9 +56,12 @@ def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None
     db.put_vector("native-test", "entity", "doc:b", "doc:b:vector", [0.0, 1.0])
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.8, {"kind": "related"})
     db.mark_audited("native-test", {"chunks": 0, "entities": 2, "relationships": 0, "sections": 0}, require_vectors=True)
-    engine = NativeQueryEngine(db)
+    zvec = _ZvecWorkspace([_ZvecHit("entity", "doc:a")])
+    engine = NativeQueryEngine(db, zvec_workspace=zvec)
 
     result = engine.query("native-test", "alpha query", [1.0, 0.0], mode="mix", top_k=1, record_types=("entity",), neighbor_limit=1)
+
+    assert zvec.calls == [("mix", "alpha query", [1.0, 0.0], 1, "record_type_code in (2)")]
 
     assert result["hits"][0]["record_id"] == "doc:a"
     assert result["hits"][0]["record"]["vector_text"] == "Alpha"
@@ -49,9 +80,6 @@ def test_query_engine_routes_mix_to_zvec_hybrid_when_workspace_is_supplied() -> 
     class DB:
         def get_workspace_status(self, workspace_id: str) -> str:
             return "audited"
-
-        def nearest_vectors(self, *args, **kwargs):
-            raise AssertionError("zvec path must not call SQLite nearest_vectors")
 
         def get_record(self, workspace_id: str, record_type: str, record_id: str):
             return {"record_type": record_type, "record_id": record_id, "vector_text": "Alpha"}
@@ -98,9 +126,6 @@ def test_query_engine_routes_naive_and_bypass_with_zvec_workspace() -> None:
     class DB:
         def get_workspace_status(self, workspace_id: str) -> str:
             return "audited"
-
-        def nearest_vectors(self, *args, **kwargs):
-            raise AssertionError("zvec path must not call SQLite nearest_vectors")
 
         def get_record(self, workspace_id: str, record_type: str, record_id: str):
             return {"record_type": record_type, "record_id": record_id}
@@ -151,9 +176,6 @@ def test_query_engine_routes_section_kind_as_numeric_zvec_filter() -> None:
         def get_workspace_status(self, workspace_id: str) -> str:
             return "audited"
 
-        def nearest_vectors(self, *args, **kwargs):
-            raise AssertionError("zvec path must not call SQLite nearest_vectors")
-
     class ZvecWorkspace:
         def __init__(self) -> None:
             self.calls = []
@@ -184,15 +206,15 @@ def test_data_only_query_engine_rejects_building_workspace(tmp_path) -> None:
     db.create_workspace("native-test", "manifest-hash")
     db.put_record(_record("native-test", "entity", "doc:a", "Alpha"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
-    engine = NativeQueryEngine(db)
+    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
-    with pytest.raises(ValueError, match="audited or active"):
+    with pytest.raises(ValueError, match="workspace must be audited before query"):
         engine.query("native-test", "alpha query", [1.0, 0.0], mode="mix", record_types=("entity",))
 
 
 def test_data_only_query_engine_rejects_unknown_mode(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    engine = NativeQueryEngine(db)
+    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
     with pytest.raises(ValueError, match="mode"):
         engine.query("native-test", "alpha query", [1.0], mode="unsupported")
@@ -200,7 +222,7 @@ def test_data_only_query_engine_rejects_unknown_mode(tmp_path) -> None:
 
 def test_data_only_query_engine_rejects_old_graph_mode_as_unsupported(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    engine = NativeQueryEngine(db)
+    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
     with pytest.raises(ValueError, match="unsupported mode"):
         engine.query("native-test", "alpha query", [1.0], mode="local")
@@ -208,16 +230,21 @@ def test_data_only_query_engine_rejects_old_graph_mode_as_unsupported(tmp_path) 
 
 def test_data_only_query_engine_rejects_unknown_record_type(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    engine = NativeQueryEngine(db)
+    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
     with pytest.raises(ValueError, match="record_type"):
         engine.query("native-test", "alpha query", [1.0], mode="mix", record_types=("unknown",))
 
 
-def test_record_identity_fallback_decodes_zvec_safe_doc_ids() -> None:
-    assert _record_identity_from_hit("chunk__Y2h1bmstYQ", {}) == ("chunk", "chunk-a")
-    assert _record_identity_from_hit("section__cmF3L3NlY3Rpb246ZG9jLWE6bWV0aG9k", {}) == (
-        "section",
-        "raw/section:doc-a:method",
-    )
-    assert _record_identity_from_hit("chunk:legacy-id", {}) == ("chunk", "legacy-id")
+def test_record_identity_requires_zvec_hit_fields() -> None:
+    assert _record_identity_from_hit(
+        "chunk__Y2h1bmstYQ",
+        {"record_type": "chunk", "record_id": "chunk-a"},
+    ) == ("chunk", "chunk-a")
+
+    for doc_id in ("chunk__Y2h1bmstYQ", "chunk:legacy-id"):
+        with pytest.raises(ValueError, match="zvec hit missing record_type/record_id fields"):
+            _record_identity_from_hit(doc_id, {})
+
+    with pytest.raises(ValueError, match="zvec hit missing record_type/record_id fields"):
+        _record_identity_from_hit("chunk__Y2h1bmstYQ", {"record_type": "chunk"})

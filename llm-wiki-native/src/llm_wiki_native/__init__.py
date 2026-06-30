@@ -1,4 +1,4 @@
-"""llm-wiki native retrieval kernel shadow package."""
+"""llm-wiki native retrieval kernel package."""
 
 from .contracts import DEFAULT_NATIVE_PORT, NATIVE_SCHEMA_VERSION
 
