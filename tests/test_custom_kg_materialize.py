@@ -322,11 +322,15 @@ def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> Non
         "def successful_manifest(",
         "def write_successful_manifest(",
         "def manifest_record_count(",
+        "def relation_chunk_key(",
+        "def split_source_ids(",
         "DEFAULT_FULL_REBUILD_INTERVAL",
         "def _diff_collection(",
         "incremental_count_since_full",
     ]
     assert [symbol for symbol in forbidden_symbols if symbol in source] == []
+    assert "def relationship_record_key(" in source
+    assert "def split_relation_chunk_key(" in source
 
     parser_commands = [
         'sub.add_parser("plan"',

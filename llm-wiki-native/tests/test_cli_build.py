@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import llm_wiki_native.cli as cli_module
 from llm_wiki_native.build import MissingNativeVectorsError
 from llm_wiki_native.cli import build_workspace_from_state, main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
@@ -83,7 +84,47 @@ def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
     return state
 
 
-def test_build_workspace_from_state_materializes_manifest_and_edges_without_activation(tmp_path) -> None:
+class _FakeZvecStats:
+    attempted = 4
+    inserted = 4
+    failed = 0
+
+
+class _FakeZvecSmoke:
+    checked = 4
+    passed = 4
+    failures = []
+
+
+class _FakeZvecWorkspace:
+    def __init__(self) -> None:
+        self.records = []
+        self.flushed = False
+        self.sample_doc_ids = []
+
+    def bulk_insert(self, records):
+        self.records = list(records)
+        return _FakeZvecStats()
+
+    def flush_optimize_close(self) -> None:
+        self.flushed = True
+
+    def self_nearest_smoke(self, sample_doc_ids):
+        self.sample_doc_ids = list(sample_doc_ids)
+        return _FakeZvecSmoke()
+
+
+def _fake_zvec_factory(created: dict):
+    def factory(path: Path, embedding_dim: int) -> _FakeZvecWorkspace:
+        created["path"] = path
+        created["embedding_dim"] = embedding_dim
+        created["workspace"] = _FakeZvecWorkspace()
+        return created["workspace"]
+
+    return factory
+
+
+def test_build_workspace_from_state_library_materializes_manifest_and_edges_without_activation(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
 
@@ -111,47 +152,14 @@ def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -
     db_path = tmp_path / "native.sqlite"
     zvec_path = tmp_path / "native.zvec"
 
-    class Stats:
-        attempted = 4
-        inserted = 4
-        failed = 0
-
-    class Smoke:
-        checked = 4
-        passed = 4
-        failures = []
-
-    class Workspace:
-        def __init__(self) -> None:
-            self.records = []
-            self.flushed = False
-            self.sample_doc_ids = []
-
-        def bulk_insert(self, records):
-            self.records = list(records)
-            return Stats()
-
-        def flush_optimize_close(self) -> None:
-            self.flushed = True
-
-        def self_nearest_smoke(self, sample_doc_ids):
-            self.sample_doc_ids = list(sample_doc_ids)
-            return Smoke()
-
     created = {}
-
-    def factory(path: Path, embedding_dim: int) -> Workspace:
-        created["path"] = path
-        created["embedding_dim"] = embedding_dim
-        created["workspace"] = Workspace()
-        return created["workspace"]
 
     report = build_workspace_from_state(
         state,
         db_path,
         "native-test",
         zvec_path=zvec_path,
-        zvec_workspace_factory=factory,
+        zvec_workspace_factory=_fake_zvec_factory(created),
     )
 
     assert created["path"] == zvec_path
@@ -181,14 +189,7 @@ def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_pat
     zvec_path = tmp_path / "native_zvec" / "workspaces" / "native-test" / "zvec_records"
     prepared_path = tmp_path / "native_zvec" / "prepared_workspace.json"
 
-    class Stats:
-        attempted = 4
-        inserted = 4
-        failed = 0
-
-    class Workspace:
-        def bulk_insert(self, records):
-            return Stats()
+    created = {}
 
     report = build_workspace_from_state(
         state,
@@ -196,7 +197,7 @@ def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_pat
         "native-test",
         zvec_path=zvec_path,
         prepared_workspace_path=prepared_path,
-        zvec_workspace_factory=lambda _path, _dim: Workspace(),
+        zvec_workspace_factory=_fake_zvec_factory(created),
     )
 
     pointer = json.loads(prepared_path.read_text(encoding="utf-8"))
@@ -223,12 +224,42 @@ def test_build_workspace_from_state_fails_closed_when_vectors_are_missing(tmp_pa
     assert exc.value.report["by_type"] == {"chunk": 1, "entity": 1, "relationship": 1, "section": 1}
 
 
-def test_cli_main_builds_workspace_and_prints_json_report(tmp_path, capsys) -> None:
+def test_cli_main_requires_zvec_workspace_for_build_workspace(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
 
-    assert main(["build-workspace", "--state-dir", str(state), "--db", str(db_path), "--workspace-id", "native-test"]) == 0
+    with pytest.raises(SystemExit) as excinfo:
+        main(["build-workspace", "--state-dir", str(state), "--db", str(db_path), "--workspace-id", "native-test"])
+
+    assert excinfo.value.code == 2
+
+
+def test_cli_main_builds_zvec_workspace_and_prints_json_report(tmp_path, capsys, monkeypatch) -> None:
+    state = _sample_state(tmp_path)
+    db_path = tmp_path / "native.sqlite"
+    zvec_path = tmp_path / "native.zvec"
+
+    created = {}
+
+    monkeypatch.setattr(cli_module, "_default_zvec_workspace_factory", _fake_zvec_factory(created))
+
+    assert main(
+        [
+            "build-workspace",
+            "--state-dir",
+            str(state),
+            "--db",
+            str(db_path),
+            "--workspace-id",
+            "native-test",
+            "--zvec-workspace",
+            str(zvec_path),
+        ]
+    ) == 0
 
     report = json.loads(capsys.readouterr().out)
+    assert created["path"] == zvec_path
+    assert created["embedding_dim"] == 2
     assert report["workspace_id"] == "native-test"
     assert report["audit"]["ok"] is True
+    assert report["zvec"]["path"] == str(zvec_path)

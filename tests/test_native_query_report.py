@@ -32,7 +32,6 @@ def _query_suite(path: Path) -> None:
                 "query": "alpha evidence",
                 "mode": "mix",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["a.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -43,7 +42,6 @@ def _query_suite(path: Path) -> None:
                 "query": "beta evidence",
                 "mode": "naive",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["b.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -63,7 +61,6 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
                 "query": "alpha evidence",
                 "mode": "mix",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["a.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -76,7 +73,6 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
                 "query": "beta evidence",
                 "mode": "naive",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["b.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -118,13 +114,15 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
     assert report["results"][1]["elapsed_ms"] == 30.0
     assert report["results"][0]["request"] == {
         "top_k": 20,
-        "chunk_top_k": 10,
         "query_vector_dim": 2,
         "section_kind": "methodology",
         "neighbor_limit": 2,
     }
     assert calls[0]["url"] == "http://127.0.0.1:19637/query/data"
     assert calls[0]["payload"]["workspace_id"] == "native-test"
+    retired_chunk_key = "chunk" + "_top_k"
+    assert retired_chunk_key not in calls[0]["payload"]
+    assert retired_chunk_key not in calls[1]["payload"]
     assert calls[0]["payload"]["query_vector"] == [1.0, 0.0]
     assert calls[0]["payload"]["section_kind"] == "methodology"
     assert calls[0]["payload"]["neighbor_limit"] == 2
@@ -141,7 +139,6 @@ def test_native_query_report_collector_marks_endpoint_embedding_timing_when_vect
                 "query": "alpha evidence",
                 "mode": "mix",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["a.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -191,7 +188,6 @@ def test_native_query_report_collector_records_repeated_samples_without_duplicat
                 "query": "alpha evidence",
                 "mode": "mix",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["a.md"],
                 "must_include_entities": [],
                 "notes": "fixture",
@@ -243,7 +239,6 @@ def test_native_query_report_collector_requires_non_empty_query_vectors_for_data
                 "query": "alpha evidence",
                 "mode": "mix",
                 "top_k": 20,
-                "chunk_top_k": 10,
                 "must_include_paths": ["a.md"],
                 "must_include_entities": [],
                 "notes": "fixture",

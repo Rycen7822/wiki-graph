@@ -75,15 +75,40 @@ def main() -> int:
     parser.add_argument("--native-workspace", help="Workspace id override for native API queries")
     parser.add_argument("--query-vector", help="JSON array query vector forwarded to native API queries")
     parser.add_argument("--neighbor-k", type=int, default=5, help="Max native semantic neighbor records per hit")
-    parser.add_argument("--query-suite", type=Path, help="JSONL query suite to run through the native API")
+    parser.add_argument("--query-suite", type=Path, help="plain query-list JSONL with one query/q field per row")
     args = parser.parse_args()
     if args.query_suite:
         rows = []
+        plain_query_keys = {"query", "q"}
+        structured_suite_keys = {
+            "mode",
+            "top_k",
+            "query_vector",
+            "record_types",
+            "section_kind",
+            "neighbor_limit",
+            "max_chars_per_block",
+            "must_include_paths",
+            "must_include_entities",
+        }
         for line in args.query_suite.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             item = json.loads(line)
-            rows.append(run_query(args, item.get("query") or item.get("q") or line))
+            if not isinstance(item, dict):
+                raise ValueError("wiki_search.py --query-suite accepts plain query-list JSONL objects")
+            extra_keys = set(item) - plain_query_keys
+            if extra_keys & structured_suite_keys:
+                raise ValueError(
+                    "structured native query suites must run through scripts/collect_native_query_report.py; "
+                    "wiki_search.py --query-suite accepts plain query-list JSONL only"
+                )
+            if extra_keys:
+                raise ValueError("wiki_search.py --query-suite accepts plain query-list JSONL with only query or q")
+            query = item.get("query") or item.get("q")
+            if not str(query or "").strip():
+                raise ValueError("wiki_search.py --query-suite rows require query or q")
+            rows.append(run_query(args, str(query)))
         print_json({"query_suite": str(args.query_suite), "runs": rows})
         return 0
     if not args.query:

@@ -79,12 +79,6 @@ def relationship_record_id(src_id: str, tgt_id: str, keywords: str) -> str:
     )
 
 
-def relation_chunk_key(src_id: str, tgt_id: str) -> str:
-    """Stable endpoint-pair key used for source chunk grouping."""
-
-    return GRAPH_FIELD_SEP.join(sorted((src_id, tgt_id)))
-
-
 def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, description: str) -> str:
     """Embedding text for a typed, directed relationship record."""
 
@@ -112,12 +106,6 @@ def split_relation_chunk_key(key: str) -> tuple[str, str]:
     if len(parts) < 2:
         raise ValueError(f"Invalid relation key: {key}")
     return parts[0], parts[1]
-
-
-def split_source_ids(source_id: Any) -> list[str]:
-    if source_id in (None, ""):
-        return []
-    return [part for part in str(source_id).split(GRAPH_FIELD_SEP) if part]
 
 
 def native_manifest_sanitize_text(text: Any, replacement_char: str = "") -> str:

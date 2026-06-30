@@ -9,7 +9,6 @@ _QUERY_ROW_REQUIRED = {
     "query",
     "mode",
     "top_k",
-    "chunk_top_k",
     "must_include_paths",
     "must_include_entities",
     "notes",
@@ -37,8 +36,7 @@ def validate_query_suite_row(row: dict) -> None:
         raise ValueError("query.query must be non-empty")
     if row.get("mode") not in SUPPORTED_QUERY_MODES:
         raise ValueError(f"query.mode must be one of {sorted(SUPPORTED_QUERY_MODES)}")
-    for key in ("top_k", "chunk_top_k"):
-        if int(row[key]) <= 0:
-            raise ValueError(f"query.{key} must be positive")
+    if int(row["top_k"]) <= 0:
+        raise ValueError("query.top_k must be positive")
     _require_list(row, "must_include_paths", "query")
     _require_list(row, "must_include_entities", "query")

@@ -4,20 +4,15 @@
 from __future__ import annotations
 
 import os
-import socket
 from pathlib import Path
 
 __all__ = [
-    "env_bool",
-    "env_float",
     "env_int",
     "load_env_file",
-    "port_open",
     "redact_summary",
 ]
 
 _SECRET_KEY_TOKENS = ("key", "token", "secret", "password")
-_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -36,33 +31,12 @@ def load_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in _TRUE_VALUES
-
-
 def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     try:
         return int(raw) if raw not in (None, "") else default
     except ValueError:
         return default
-
-
-def env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    try:
-        return float(raw) if raw not in (None, "") else default
-    except ValueError:
-        return default
-
-
-def port_open(host: str, port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(0.3)
-        return sock.connect_ex((host, port)) == 0
 
 
 def redact_summary(values: dict[str, str]) -> dict[str, str]:

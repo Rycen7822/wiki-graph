@@ -81,6 +81,7 @@ def test_wiki_search_cli_help_is_native_only() -> None:
     for marker in LOCAL_SQLITE_CLI_FLAGS:
         assert marker not in result.stdout
     assert "--query-vector" in result.stdout
+    assert "plain query-list JSONL" in result.stdout
     assert "--query-suite" in result.stdout
     assert "--benchmark" not in result.stdout
     assert ("light" + "rag") not in result.stdout.lower()
@@ -104,6 +105,31 @@ def test_wiki_search_query_suite_cli_batches_queries_without_benchmark_label(tmp
     payload = json.loads(capsys.readouterr().out)
     assert payload["query_suite"] == str(query_suite)
     assert "benchmark" not in payload
+
+
+def test_wiki_search_query_suite_rejects_structured_native_rows_before_http(tmp_path, monkeypatch) -> None:
+    query_suite = tmp_path / "structured-suite.jsonl"
+    query_suite.write_text(
+        json.dumps(
+            {
+                "query": "alpha",
+                "mode": "mix",
+                "top_k": 3,
+                "query_vector": [1.0, 0.0],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fail_run_query(_args, _query):
+        raise AssertionError("structured native suite row reached query runner")
+
+    monkeypatch.setattr(wiki_search, "run_query", fail_run_query)
+    monkeypatch.setattr(sys, "argv", ["wiki_search.py", "--query-suite", str(query_suite), "--data-only"])
+
+    with pytest.raises(ValueError, match="collect_native_query_report.py"):
+        wiki_search.main()
 
 
 def test_wiki_search_source_has_no_retired_backend_branch() -> None:

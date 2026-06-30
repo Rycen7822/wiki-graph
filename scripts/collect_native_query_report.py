@@ -73,7 +73,6 @@ def _query_payload(row: dict[str, Any], *, workspace_id: str | None) -> dict[str
         "query": row["query"],
         "mode": row["mode"],
         "top_k": int(row["top_k"]),
-        "chunk_top_k": int(row["chunk_top_k"]),
     }
     if workspace_id:
         payload["workspace_id"] = workspace_id
@@ -86,7 +85,6 @@ def _query_payload(row: dict[str, Any], *, workspace_id: str | None) -> dict[str
 def _request_metadata(row: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "top_k": int(row["top_k"]),
-        "chunk_top_k": int(row["chunk_top_k"]),
     }
     vector = row.get("query_vector")
     if isinstance(vector, list):

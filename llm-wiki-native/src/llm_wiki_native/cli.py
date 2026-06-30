@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--state-dir", type=Path, required=True)
     build.add_argument("--db", type=Path, required=True)
     build.add_argument("--workspace-id", required=True)
-    build.add_argument("--zvec-workspace", type=Path)
+    build.add_argument("--zvec-workspace", type=Path, required=True)
     build.add_argument("--prepared-workspace-file", type=Path)
     finalize = sub.add_parser("finalize-prepared", help="Promote a prepared native workspace pointer to active")
     finalize.add_argument("--prepared-workspace-file", type=Path, required=True)
