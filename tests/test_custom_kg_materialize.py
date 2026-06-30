@@ -1,5 +1,3 @@
-from array import array
-import base64
 import copy
 import json
 import sys
@@ -13,9 +11,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 import custom_kg_incremental  # noqa: E402
 import custom_kg_vector_fill  # noqa: E402
-from custom_kg_incremental import audit_custom_kg_storage, build_custom_kg_manifest  # noqa: E402
+from custom_kg_incremental import build_custom_kg_manifest  # noqa: E402
 from custom_kg_materialize import materialize_file_storage_from_manifest  # noqa: E402
-from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage  # noqa: E402
+from vector_cache import VectorCache  # noqa: E402
 
 
 def _payload() -> dict:
@@ -42,7 +40,7 @@ def _assert_compact_vector_cache_report(report: dict) -> None:
 
 
 def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
     state_dir = tmp_path / "state"
     workdir = tmp_path / "work"
     root = tmp_path / "wiki"
@@ -66,10 +64,9 @@ def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatc
     assert not (state_dir / "prepared_swap").exists()
 
 
-def test_run_export_manifest_refuses_retired_token_content_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
-    first_chunk = next(iter(manifest["chunks"].values()))
-    first_chunk["content"] = "retired backend mention: " + ("Light" + "RAG")
+def test_run_export_manifest_refuses_unexpected_manifest_metadata_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    manifest["metadata"]["unexpected_tool_version"] = "old"
     state_dir = tmp_path / "state"
 
     monkeypatch.setattr(
@@ -78,7 +75,7 @@ def test_run_export_manifest_refuses_retired_token_content_without_write(monkeyp
         lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
     )
 
-    with pytest.raises(RuntimeError, match="first_source_paths=a.md") as exc_info:
+    with pytest.raises(RuntimeError, match="native manifest metadata contract") as exc_info:
         custom_kg_incremental.run_export_manifest(
             types.SimpleNamespace(
                 root=tmp_path / "wiki",
@@ -89,18 +86,14 @@ def test_run_export_manifest_refuses_retired_token_content_without_write(monkeyp
             )
         )
 
-    assert ("Light" + "RAG") not in str(exc_info.value)
+    assert "unexpected_tool_version" in str(exc_info.value)
     assert not (state_dir / "custom_kg_manifest.json").exists()
     assert not state_dir.exists()
 
 
-def test_run_audit_manifest_content_reports_sources_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
-    first_chunk = next(iter(manifest["chunks"].values()))
-    first_chunk["content"] = "retired backend mention: " + ("Light" + "RAG")
-    first_entity = next(iter(manifest["entities"].values()))
-    first_entity["description"] = "another retired backend mention: " + ("light" + "rag")
-    first_entity["file_path"] = "b.md"
+def test_run_audit_manifest_content_reports_native_contract_issues_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
+    manifest["metadata"]["canonical_id_algorithm"] = "llm-wiki-canonical-id:v0"
     state_dir = tmp_path / "state"
     workdir = tmp_path / "work"
 
@@ -116,11 +109,9 @@ def test_run_audit_manifest_content_reports_sources_without_write(monkeypatch: p
 
     assert report["ok"] is False
     assert report["command"] == "audit-manifest-content"
-    assert report["token_variant_count"] == 2
-    assert report["source_count"] == 2
-    assert report["sources"] == [
-        {"source_path": "a.md", "record_count": 1, "token_variant_count": 1, "collections": {"chunks": 1}},
-        {"source_path": "b.md", "record_count": 1, "token_variant_count": 1, "collections": {"entities": 1}},
+    assert report["issue_count"] == 1
+    assert report["issues"] == [
+        {"type": "invalid_manifest_metadata_value", "path": "metadata.canonical_id_algorithm"}
     ]
     assert not state_dir.exists()
     assert not workdir.exists()
@@ -142,17 +133,7 @@ def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
             ordinal += 1
 
 
-def _materialize_manifest_storage(manifest: dict, storage_dir: Path, cache_path: Path) -> VectorCache:
-    cache = VectorCache(cache_path)
-    _seed_manifest_vectors(manifest, cache)
-    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
-    return cache
-
-
-
 # Prepared shadow/swap internals were removed with the retired live-storage runner.
-
-
 
 
 def test_embedding_profile_env_defaults_and_rejects_unknown() -> None:
@@ -301,82 +282,6 @@ def test_fill_missing_manifest_vectors_reports_redacted_embedding_env(tmp_path) 
     assert "secret" not in json.dumps(report, ensure_ascii=False)
 
 
-def test_manifest_and_materialization_preserve_same_endpoint_typed_relationships(tmp_path) -> None:
-    payload = _payload()
-    payload["relationships"] = [
-        {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc links to topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
-        {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic cites doc", "keywords": "SOURCED_BY", "source_id": "doc:a", "weight": 0.8, "file_path": "a.md"},
-    ]
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-
-    assert len(manifest["relationships"]) == 2
-    assert {record["keywords"] for record in manifest["relationships"].values()} == {"WIKILINKS_TO", "SOURCED_BY"}
-    assert len({record["vdb_id"] for record in manifest["relationships"].values()}) == 2
-
-    cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    ordinal = 1
-    for collection in ("chunks", "entities", "relationships"):
-        for record in manifest[collection].values():
-            cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(ordinal), float(ordinal + 1)],
-            )
-            ordinal += 1
-    storage_dir = tmp_path / "shadow_storage"
-
-    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
-
-    audit = audit_custom_kg_storage(storage_dir, manifest)
-    assert audit["ok"] is True
-    vdb_relationships = json.loads((storage_dir / "vdb_relationships.json").read_text(encoding="utf-8"))
-    assert len(vdb_relationships["data"]) == 2
-    relation_chunks = json.loads((storage_dir / "kv_store_relation_chunks.json").read_text(encoding="utf-8"))
-    assert set(relation_chunks) == set(manifest["relationships"])
-
-
-def test_materialized_audit_accepts_aggregated_graph_sources_for_same_pair_typed_relationships(tmp_path) -> None:
-    payload = {
-        "chunks": [
-            {"content": "Doc A content", "source_id": "doc:a", "file_path": "a.md", "chunk_order_index": 0},
-            {"content": "Doc B content", "source_id": "doc:b", "file_path": "b.md", "chunk_order_index": 1},
-        ],
-        "entities": [
-            {"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
-            {"entity_name": "topic:x", "entity_type": "TOPIC", "description": "Topic X", "source_id": "doc:a", "file_path": "a.md"},
-        ],
-        "relationships": [
-            {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc A links to topic", "keywords": "WIKILINKS_TO", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
-            {"src_id": "topic:x", "tgt_id": "doc:a", "description": "Topic cites Doc A from Doc B context", "keywords": "SOURCED_BY", "source_id": "doc:b", "weight": 0.8, "file_path": "b.md"},
-        ],
-    }
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    ordinal = 1
-    for collection in ("chunks", "entities", "relationships"):
-        for record in manifest[collection].values():
-            cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(ordinal), float(ordinal + 1)],
-            )
-            ordinal += 1
-    storage_dir = tmp_path / "shadow_storage"
-
-    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
-    audit = audit_custom_kg_storage(storage_dir, manifest)
-
-    assert audit["ok"] is True
-
-
 def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> None:
     payload = _payload()
     payload["relationships"] = [
@@ -391,7 +296,7 @@ def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> Non
         }
     ]
 
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    manifest = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     relationship = next(iter(manifest["relationships"].values()))
 
     assert relationship["src_id"] == "topic:z"
@@ -412,7 +317,7 @@ def test_full_materialization_blocker_treats_endpoint_order_content_change_as_ve
             "file_path": "a.md",
         }
     ]
-    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
+    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
     previous = copy.deepcopy(desired)
     key, previous_relationship = next(iter(previous["relationships"].items()))
     previous_relationship["content"] = "SOURCED_BY\tdoc:a\ntopic:z\ntopic:z SOURCED_BY doc:a"
@@ -430,120 +335,20 @@ def test_full_materialization_blocker_treats_endpoint_order_content_change_as_ve
     assert blockers["diff"]["relationships"]["metadata_update"] == 0
 
 
-def test_materialize_file_storage_from_all_hit_vector_cache_passes_audit(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    ordinal = 1
-    for collection in ("chunks", "entities", "relationships"):
-        for record in manifest[collection].values():
-            cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(ordinal), float(ordinal + 1)],
-            )
-            ordinal += 1
-    resolved = resolve_manifest_vectors(manifest, cache)
-    assert resolved["summary"]["total"]["misses"] == 0
-
-    storage_dir = tmp_path / "shadow_storage"
-    report = materialize_file_storage_from_manifest(manifest, resolved["resolved"], storage_dir)
-
-    assert report["ok"] is True
-    audit = audit_custom_kg_storage(storage_dir, manifest)
-    assert audit["ok"] is True
-    chunk_id = next(iter(manifest["chunks"]))
-    vdb_chunks = json.loads((storage_dir / "vdb_chunks.json").read_text(encoding="utf-8"))
-    assert vdb_chunks["embedding_dim"] == 2
-    assert vdb_chunks["data"][0]["__id__"] == chunk_id
-    text_chunks = json.loads((storage_dir / "kv_store_text_chunks.json").read_text(encoding="utf-8"))
-    assert text_chunks[chunk_id]["tokens"] == 3
-
-
-def test_materialize_file_storage_writes_nanovectordb_matrix_buffer(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    for collection in ("chunks", "entities", "relationships"):
-        for idx, record in enumerate(manifest[collection].values(), start=1):
-            cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(idx), float(idx + 1)],
-            )
+def test_materialize_file_storage_from_manifest_is_retired_without_writing_storage(tmp_path) -> None:
+    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
     storage_dir = tmp_path / "shadow_storage"
 
-    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, cache)["resolved"], storage_dir)
+    with pytest.raises(RuntimeError, match="retired"):
+        materialize_file_storage_from_manifest(manifest, {"chunks": {}, "entities": {}, "relationships": {}}, storage_dir)
 
-    vdb_chunks = json.loads((storage_dir / "vdb_chunks.json").read_text(encoding="utf-8"))
-    matrix = array("f")
-    matrix.frombytes(base64.b64decode(vdb_chunks["matrix"]))
-    assert len(matrix) == len(vdb_chunks["data"]) * vdb_chunks["embedding_dim"]
-    assert list(matrix[:2]) == pytest.approx([1.0, 2.0])
+    assert not storage_dir.exists()
 
 
-def test_seed_vector_cache_from_materialized_file_storage_roundtrips_all_vectors(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    source_cache = VectorCache(tmp_path / "source_cache.sqlite")
-    ordinal = 1
-    for collection in ("chunks", "entities", "relationships"):
-        for record in manifest[collection].values():
-            source_cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(ordinal), float(ordinal + 1)],
-            )
-            ordinal += 1
-    storage_dir = tmp_path / "shadow_storage"
-    materialize_file_storage_from_manifest(manifest, resolve_manifest_vectors(manifest, source_cache)["resolved"], storage_dir)
-    fresh_cache = VectorCache(tmp_path / "fresh_cache.sqlite")
-
-    seed_report = seed_vector_cache_from_storage(manifest, storage_dir, fresh_cache)
-    resolved = resolve_manifest_vectors(manifest, fresh_cache)
-
-    assert seed_report["summary"]["total"] == {"total": 4, "seeded": 4, "missing": 0}
-    assert resolved["summary"]["total"] == {"total": 4, "hits": 4, "misses": 0}
-
-
-def test_materialize_file_storage_fails_closed_when_vectors_are_missing(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-
-    try:
-        materialize_file_storage_from_manifest(manifest, {"chunks": {}, "entities": {}, "relationships": {}}, tmp_path / "shadow_storage")
-    except RuntimeError as exc:
-        assert "missing resolved vectors" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("materializer should fail closed when vectors are missing")
-
-
-
-# Retired full-materialization runner behavior is covered by direct fail-closed tests below; low-level materialization helpers remain tested above.
-
-
-
-
-
-
-
-
-
-
+# Retired full-materialization runner behavior is covered by direct fail-closed tests below; old file-storage writer helpers fail closed.
 
 
 def test_run_finalize_prepared_swap_is_retired_without_reading_prepared_bundle(tmp_path) -> None:
-    live_storage = tmp_path / "workdir" / "rag_storage"
-    live_storage.mkdir(parents=True)
-    (live_storage / "live.txt").write_text("live", encoding="utf-8")
     args = types.SimpleNamespace(
         root=tmp_path / "wiki",
         state_dir=tmp_path / "state",
@@ -559,16 +364,8 @@ def test_run_finalize_prepared_swap_is_retired_without_reading_prepared_bundle(t
     with pytest.raises(RuntimeError, match="prepared wikigraph storage activation is retired"):
         custom_kg_incremental.run_finalize_prepared_swap(args)
 
-    assert (live_storage / "live.txt").exists()
+    assert not args.workdir.exists()
     assert not args.prepared_report.exists()
-
-
-
-
-
-
-
-
 
 
 def test_custom_kg_incremental_materialize_full_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:

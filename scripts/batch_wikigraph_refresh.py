@@ -135,12 +135,6 @@ def select_import_commands(root: Path, state_dir: Path, workdir: Path, full_impo
     return []
 
 
-def append_log(log_path: Path, message: str) -> None:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(message)
-        if not message.endswith("\n"):
-            handle.write("\n")
 
 
 def run_subprocess(command: list[str], log_path: Path, env: dict[str, str] | None = None, timeout: int | None = None) -> None:
@@ -168,7 +162,6 @@ def run_real_refresh(
     reuse_validation_report: Path | None = None,
     embedding_profile: str | None = None,
 ) -> dict[str, Any]:
-    append_log(import_log, RETIRED_WIKIGRAPH_MESSAGE)
     raise _retired_error()
 
 

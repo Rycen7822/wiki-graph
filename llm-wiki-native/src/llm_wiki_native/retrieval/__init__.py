@@ -1,1 +1,1 @@
-"""Retrieval helpers for llm-wiki native shadow queries."""
+"""Retrieval helpers for llm-wiki native queries."""

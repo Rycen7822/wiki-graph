@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 sys.path.insert(0, str(SCRIPTS))
 
 import batch_native_refresh  # noqa: E402
@@ -1032,7 +1033,6 @@ def test_build_evidence_pack_alias_preserves_output_and_records_query_event(
     assert rows == [("alias query", "mix", str(pack))]
 
 
-
 # Retired wikigraph pending writes are no longer part of production behavior.
 
 def test_pending_wikigraph_refresh_status_reads_existing_ledger_without_writes(tmp_path: Path) -> None:
@@ -1063,15 +1063,30 @@ def test_pending_wikigraph_refresh_status_reads_existing_ledger_without_writes(t
 
     status = pending_wikigraph_refresh_status(root, state, reason="threshold")
 
+    assert status["retired"] is True
     assert status["pending_count"] == 2
     assert status["threshold"] == 2
-    assert status["should_refresh"] is True
+    assert status["would_refresh_if_unblocked"] is True
+    assert status["should_refresh"] is False
+    assert status["next_required_action"] == "native_refresh"
     assert json.loads(ledger_path.read_text(encoding="utf-8"))["dirty"] is True
     with pytest.raises(RuntimeError, match="ledger writes are retired"):
         mark_wikigraph_refresh_pending(state, root, raw_path="raw/clip/2601/26010103_Baz.md")
     with pytest.raises(RuntimeError, match="ledger writes are retired"):
         clear_wikigraph_refresh_pending_after_success(root, state)
 
+
+def test_pending_wikigraph_refresh_status_is_readonly_when_state_is_absent(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "absent" / "state"
+
+    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
+
+    assert status["retired"] is True
+    assert status["should_refresh"] is False
+    assert status["pending_count"] == 0
+    assert status["raw_fast_pending_wiki_integration_count"] == 0
+    assert not state.exists()
 
 
 def test_mark_pending_wiki_integration_tracks_raw_fast_queue_without_wiki_pollution(tmp_path: Path) -> None:
@@ -1229,12 +1244,6 @@ def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in
     assert wiki_root_machine_pollution(root_a) == []
 
 
-
-
-
-
-
-
 def test_clear_pending_wiki_integration_marks_integrated_items_for_native_refresh(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
@@ -1275,32 +1284,7 @@ def test_clear_pending_wiki_integration_without_integrated_paths_marks_native_re
     assert len(batch_native_refresh.pending_entries(state)) == 1
 
 
-
-
-
-
-
 # Retired batch_wikigraph_refresh behavior is now covered by tests/test_wikigraph_refresh.py.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_batch_wiki_integration_cli_status_mark_and_clear_are_external(tmp_path: Path) -> None:
@@ -1370,7 +1354,7 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
 
     prompt = batch_wiki_integration.build_auto_integration_prompt(root, state, status, "manual")
 
-    assert "/home/xu/project/wiki/wikigraph" not in prompt
+    assert ("/home/" + "xu/project/wiki/wikigraph") not in prompt
     assert f"Native refresh workdir: `{SCRIPTS.parent}`" in prompt
     assert f"python {SCRIPTS / 'batch_wiki_integration.py'} clear-success" in prompt
     assert f"python {SCRIPTS / 'batch_native_refresh.py'} status" in prompt
@@ -1731,13 +1715,14 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
         ],
     }
 
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
+    manifest = build_custom_kg_manifest(payload, native_manifest_tool_version="native-test", embedding_model="test-embed", embedding_dim=3)
 
     metadata = manifest["metadata"]
     retired_backend = "light" + "rag"
-    assert metadata["wikigraph_tool_version"] == "1.5.0"
+    assert metadata["native_manifest_tool_version"] == "native-test"
+    assert "wikigraph_tool_version" not in metadata
     assert f"{retired_backend}_version" not in metadata
-    assert metadata["canonical_id_algorithm"] == "llm-wiki-canonical-id:v1+wikigraph-custom-kg:v1.5"
+    assert metadata["canonical_id_algorithm"] == "llm-wiki-canonical-id:v1+native-custom-kg:v1"
     assert metadata["relationship_vector_content_algorithm"] == "llm-wiki-typed-directed-relationship:v1"
     assert retired_backend not in metadata["canonical_id_algorithm"]
     assert retired_backend not in metadata["relationship_vector_content_algorithm"]
@@ -1795,7 +1780,7 @@ def test_custom_kg_manifest_matches_wikigraph_sanitized_chunk_ids_and_basenames(
         "relationships": [],
     }
 
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
+    manifest = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
     sanitized = wikigraph_sanitize_text(raw_content)
     chunk_id = compute_mdhash_id(sanitized, prefix="chunk-")
 
@@ -1808,12 +1793,18 @@ def test_custom_kg_manifest_matches_wikigraph_sanitized_chunk_ids_and_basenames(
     assert manifest["entities"]["doc:sanitized"]["file_path"] == "doc.md"
 
 
-def test_custom_kg_incremental_source_uses_wikigraph_runtime_wording() -> None:
+def test_custom_kg_incremental_source_uses_native_runtime_wording() -> None:
     text = (SCRIPTS / "custom_kg_incremental.py").read_text(encoding="utf-8")
     retired_backend = "light" + "rag"
 
     assert retired_backend not in text.lower()
-    assert "wikigraph" in text.lower()
+    assert "native zvec" in text.lower()
+    assert "importlib.import_module(retired_graph_module_name" not in text
+    assert "importlib.metadata.version" not in text
+    assert "current_wikigraph_tool_version" not in text
+    assert "def _resolve_wikigraph_tool_version_arg" not in text
+    assert '"wikigraph_tool_version":' not in text
+    assert "wikigraph-custom-kg" not in text
 
 
 def test_import_custom_kg_source_uses_wikigraph_external_graph_wording() -> None:
@@ -1892,7 +1883,7 @@ def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest()
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
+    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     original_metadata = dict(desired["metadata"])
 
     final = successful_manifest(desired, import_mode="incremental", previous_manifest=desired)
@@ -1903,7 +1894,6 @@ def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest()
     assert final["chunks"] == desired["chunks"]
     assert final["entities"] == desired["entities"]
     assert final["relationships"] == desired["relationships"]
-
 
 
 # External tool-python version fallback was removed with the retired backend runner.
@@ -1927,8 +1917,8 @@ def test_custom_kg_manifest_diff_tracks_add_update_delete() -> None:
     }
 
     diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(old_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(new_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
     )
 
     assert diff["chunks"]["add"] == 1
@@ -1936,49 +1926,6 @@ def test_custom_kg_manifest_diff_tracks_add_update_delete() -> None:
     assert diff["entities"]["add"] == 1
     assert diff["entities"]["update"] == 1
     assert diff["relationships"]["delete"] == 1
-
-
-def test_tracking_diff_identifies_entity_and_relationship_tracking_deltas() -> None:
-    from custom_kg_incremental import diff_tracking
-
-    old_manifest = {
-        "entities": {
-            "doc:keep": {"source_chunk_id": "chunk:keep"},
-            "doc:update": {"source_chunk_id": "chunk:old"},
-            "doc:delete": {"source_chunk_id": "chunk:delete"},
-            "doc:unknown": {"source_chunk_id": "UNKNOWN"},
-        },
-        "relationships": {
-            "doc:keep<SEP>topic:keep": {"source_chunk_id": "chunk:keep"},
-            "doc:update<SEP>topic:update": {"source_chunk_id": "chunk:old"},
-            "doc:delete<SEP>topic:delete": {"source_chunk_id": "chunk:delete"},
-        },
-    }
-    new_manifest = {
-        "entities": {
-            "doc:keep": {"source_chunk_id": "chunk:keep"},
-            "doc:update": {"source_chunk_id": "chunk:new"},
-            "doc:add": {"source_chunk_id": "chunk:add"},
-        },
-        "relationships": {
-            "doc:keep<SEP>topic:keep": {"source_chunk_id": "chunk:keep"},
-            "doc:update<SEP>topic:update": {"source_chunk_id": "chunk:new"},
-            "doc:add<SEP>topic:add": {"source_chunk_id": "chunk:add"},
-        },
-    }
-
-    diff = diff_tracking(old_manifest, new_manifest)
-
-    assert diff["entities"]["add_ids"] == ["doc:add"]
-    assert diff["entities"]["update_ids"] == ["doc:update"]
-    assert diff["entities"]["delete_ids"] == ["doc:delete"]
-    assert diff["entities"]["upsert_records"] == {
-        "doc:add": {"chunk_ids": ["chunk:add"], "count": 1},
-        "doc:update": {"chunk_ids": ["chunk:new"], "count": 1},
-    }
-    assert diff["relationships"]["add_ids"] == ["doc:add<SEP>topic:add"]
-    assert diff["relationships"]["update_ids"] == ["doc:update<SEP>topic:update"]
-    assert diff["relationships"]["delete_ids"] == ["doc:delete<SEP>topic:delete"]
 
 
 def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -> None:
@@ -2000,8 +1947,8 @@ def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -
     }
 
     diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(old_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
+        build_custom_kg_manifest(new_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
     )
     rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
 
@@ -2022,10 +1969,10 @@ def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
         "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
     }
 
-    base = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
-    model_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1")
-    dim_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1")
-    params_changed = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2")
+    base = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
+    model_changed = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1")
+    dim_changed = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1")
+    params_changed = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2")
 
     entity_hash = next(iter(base["entities"].values()))["vector_hash"]
     relationship_hash = next(iter(base["relationships"].values()))["vector_hash"]
@@ -2046,7 +1993,7 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
         },
-        wikigraph_tool_version="1.5.0",
+        native_manifest_tool_version="1.5.0",
         embedding_model="embed-a",
         embedding_dim=3,
         embedding_params_version="v1",
@@ -2057,7 +2004,7 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "new.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "new.md"}],
         },
-        wikigraph_tool_version="1.5.0",
+        native_manifest_tool_version="1.5.0",
         embedding_model="embed-a",
         embedding_dim=3,
         embedding_params_version="v1",
@@ -2080,7 +2027,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
         },
-        wikigraph_tool_version="1.5.0",
+        native_manifest_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -2090,7 +2037,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
             "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:b", "file_path": "new.md"}],
             "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:b", "file_path": "new.md"}],
         },
-        wikigraph_tool_version="1.5.0",
+        native_manifest_tool_version="1.5.0",
         embedding_model="test",
         embedding_dim=3,
     )
@@ -2108,10 +2055,7 @@ def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> No
     assert diff["relationships"]["vector_update_ids"] == []
 
 
-
 # Direct storage patching via ExternalGraph APIs was removed with the retired live-storage runner.
-
-
 
 
 def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incrementals() -> None:
@@ -2122,81 +2066,40 @@ def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incremen
         "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
         "relationships": [],
     }
-    desired = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
+    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
 
-    no_manifest = choose_refresh_mode(None, desired, storage_audit_ok=True, full_rebuild_interval=5)
+    no_manifest = choose_refresh_mode(None, desired, native_preflight_ok=True, full_rebuild_interval=5)
     assert no_manifest["selected_mode"] == "full_rebuild"
     assert "missing_manifest" in no_manifest["reasons"]
 
     previous = json.loads(json.dumps(desired))
     previous["metadata"]["incremental_count_since_full"] = 4
-    fifth_incremental = choose_refresh_mode(previous, desired, storage_audit_ok=True, full_rebuild_interval=5)
+    fifth_incremental = choose_refresh_mode(previous, desired, native_preflight_ok=True, full_rebuild_interval=5)
     assert fifth_incremental["selected_mode"] == "incremental"
     assert fifth_incremental["next_incremental_count_since_full"] == 5
 
     previous["metadata"]["incremental_count_since_full"] = 5
-    after_five = choose_refresh_mode(previous, desired, storage_audit_ok=True, full_rebuild_interval=5)
+    after_five = choose_refresh_mode(previous, desired, native_preflight_ok=True, full_rebuild_interval=5)
     assert after_five["selected_mode"] == "full_rebuild"
     assert "incremental_interval_reached" in after_five["reasons"]
-
 
 
 # Retired incremental apply runner behavior is covered by direct fail-closed tests; low-level diff helpers remain tested above.
 
 
+def test_custom_kg_storage_audit_is_retired_without_reading_old_storage(tmp_path: Path) -> None:
+    from custom_kg_incremental import audit_custom_kg_storage
 
-
-
-
-def test_custom_kg_storage_audit_detects_graph_vdb_mismatch_and_unknown_source(tmp_path: Path) -> None:
-    import networkx as nx
-    from custom_kg_incremental import audit_custom_kg_storage, build_custom_kg_manifest
-
-    payload = {
-        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [
-            {"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
-            {"entity_name": "topic:x", "entity_type": "TOPIC", "description": "Topic", "source_id": "doc:a", "file_path": "a.md"},
-        ],
-        "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
-    }
-    manifest = build_custom_kg_manifest(payload, wikigraph_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
     storage = tmp_path / "rag_storage"
     storage.mkdir()
-    chunk_id = next(iter(manifest["chunks"]))
-    graph = nx.Graph()
-    for entity in manifest["entities"].values():
-        graph.add_node(entity["entity_name"], entity_id=entity["entity_name"], entity_type=entity["entity_type"], description=entity["description"], source_id=entity["source_chunk_id"], file_path=entity["file_path"])
-    rel = next(iter(manifest["relationships"].values()))
-    graph.add_edge(rel["src_id"], rel["tgt_id"], description=rel["description"], keywords=rel["keywords"], source_id=rel["source_chunk_id"], file_path=rel["file_path"])
-    nx.write_graphml(graph, storage / "graph_chunk_entity_relation.graphml")
-    write(storage / "vdb_chunks.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": chunk_id, "content": "Doc A", "full_doc_id": "doc:a", "file_path": "a.md"}], "matrix": ""}))
-    write(storage / "kv_store_text_chunks.json", json.dumps({chunk_id: {"content": "Doc A", "source_id": "doc:a", "full_doc_id": "doc:a", "file_path": "a.md"}}))
-    write(storage / "vdb_entities.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": entity["vdb_id"], "entity_name": entity["entity_name"], "source_id": entity["source_chunk_id"], "file_path": entity["file_path"]} for entity in manifest["entities"].values()], "matrix": ""}))
-    write(storage / "vdb_relationships.json", json.dumps({"embedding_dim": 3, "data": [{"__id__": rel["vdb_id"], "src_id": rel["src_id"], "tgt_id": rel["tgt_id"], "keywords": rel["keywords"], "source_id": rel["source_chunk_id"], "file_path": rel["file_path"]}], "matrix": ""}))
-    write(storage / "kv_store_entity_chunks.json", json.dumps({name: {"chunk_ids": [entity["source_chunk_id"]], "count": 1} for name, entity in manifest["entities"].items()}))
-    write(storage / "kv_store_relation_chunks.json", json.dumps({rel["chunk_key"]: {"chunk_ids": [rel["source_chunk_id"]], "count": 1}}))
+    (storage / "graph_chunk_entity_relation.graphml").write_text("not graphml", encoding="utf-8")
 
-    ok = audit_custom_kg_storage(storage, manifest)
-    assert ok["ok"] is True
+    with pytest.raises(RuntimeError, match="retired"):
+        audit_custom_kg_storage(storage, {"chunks": {}, "entities": {}, "relationships": {}})
 
-    graph.nodes["topic:x"]["source_id"] = "UNKNOWN"
-    nx.write_graphml(graph, storage / "graph_chunk_entity_relation.graphml")
-    bad = audit_custom_kg_storage(storage, manifest)
-    assert bad["ok"] is False
-    assert any(issue["type"] == "unknown_source_id" for issue in bad["issues"])
-
-
-
-
-
-
-
-
-
-
-
-
+    source = (SCRIPTS / "custom_kg_incremental.py").read_text(encoding="utf-8")
+    forbidden = ["_load_vdb", "_load_kv", "nx.read_graphml", "CUSTOM_KG_STORAGE_AUDIT_FILES", "storage_audit_ok", "current_storage_audit_failed"]
+    assert [token for token in forbidden if token in source] == []
 
 
 def test_section_similarity_embedding_text_uses_clean_section_content_without_sidecar_boilerplate() -> None:
@@ -3161,7 +3064,7 @@ def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadat
     result = subprocess.run(
         [
             sys.executable,
-            "/home/xu/.hermes/skills/research/llm-wiki/scripts/raw_fast_note_verify.py",
+            str(RAW_FAST_VERIFIER),
             "--wiki",
             str(root),
             "--raw-file",
@@ -3215,7 +3118,7 @@ def test_raw_fast_verifier_rejects_remote_markdown_images(tmp_path: Path) -> Non
     result = subprocess.run(
         [
             sys.executable,
-            "/home/xu/.hermes/skills/research/llm-wiki/scripts/raw_fast_note_verify.py",
+            str(RAW_FAST_VERIFIER),
             "--wiki",
             str(root),
             "--raw-file",

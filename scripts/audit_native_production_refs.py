@@ -24,8 +24,14 @@ from wiki_wikigraph_compat_names import (
 EXACT_ACTIVE_SURFACES = (
     "scripts/batch_native_refresh.py",
     "scripts/batch_wiki_integration.py",
+    "scripts/custom_kg_incremental.py",
+    "scripts/custom_kg_vector_fill.py",
+    "scripts/native_zvec_materialize.py",
     "scripts/raw_fast_closeout.py",
+    "scripts/raw_fast_evidence_bundle.py",
     "scripts/sync_virtual_docs.py",
+    "scripts/vector_cache.py",
+    "scripts/wiki_native_cli.py",
     "scripts/wiki_search.py",
 )
 ACTIVE_GLOBS = (
@@ -34,8 +40,14 @@ ACTIVE_GLOBS = (
 )
 ACTIVE_IMPORT_MODULES = (
     "batch_native_refresh",
+    "custom_kg_incremental",
+    "custom_kg_vector_fill",
+    "native_zvec_materialize",
     "raw_fast_closeout",
+    "raw_fast_evidence_bundle",
     "sync_virtual_docs",
+    "vector_cache",
+    "wiki_native_cli",
     "wiki_search",
     "llm_wiki_native.api.server",
     "llm_wiki_native.retrieval.query_engine",

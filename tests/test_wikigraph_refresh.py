@@ -57,6 +57,27 @@ def test_batch_wikigraph_refresh_retired_wrapper_has_no_old_backend_command_plan
     assert "systemctl" not in source
 
 
+def test_batch_wikigraph_refresh_run_real_refresh_fails_without_log_side_effects(tmp_path: Path) -> None:
+    module = importlib.import_module("batch_wikigraph_refresh")
+    root = tmp_path / "wiki"
+    state = tmp_path / "state"
+    workdir = tmp_path / "work"
+    artifact_log = tmp_path / "logs" / "artifact.log"
+    import_log = tmp_path / "logs" / "import.log"
+
+    try:
+        module.run_real_refresh(root, state, workdir, "manual", artifact_log, import_log)
+    except module.RetiredWikigraphActivationError as exc:
+        assert "batch_native_refresh.py" in str(exc)
+    else:  # pragma: no cover - this branch is the regression under test
+        raise AssertionError("run_real_refresh did not fail closed")
+
+    assert not artifact_log.exists()
+    assert not import_log.exists()
+    source = (SCRIPTS / "batch_wikigraph_refresh.py").read_text(encoding="utf-8")
+    assert "append_log(" not in source
+
+
 def test_batch_wikigraph_refresh_cli_is_readonly_retired_and_does_not_write_old_ledger(tmp_path: Path) -> None:
     root = tmp_path / "wiki"
     state = tmp_path / "state"

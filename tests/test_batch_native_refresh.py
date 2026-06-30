@@ -88,10 +88,10 @@ def test_mark_pending_default_paths_are_repo_local(capsys, monkeypatch) -> None:
     ]
 
 
-def test_mark_pending_rejects_external_true_wiki_root_before_write(tmp_path, monkeypatch) -> None:
+def test_mark_pending_accepts_explicit_root_without_hardcoded_local_special_case(tmp_path, monkeypatch) -> None:
     calls = []
     workdir = tmp_path / "workdir"
-    root = Path("/mnt/d/data/Clippings/llm-wiki")
+    root = tmp_path / "operator-wiki"
 
     def fake_mark_pending(state_dir, root, *, reason):
         calls.append(("mark", state_dir, root, reason))
@@ -104,7 +104,7 @@ def test_mark_pending_rejects_external_true_wiki_root_before_write(tmp_path, mon
     monkeypatch.setattr(batch_native_refresh, "mark_pending", fake_mark_pending)
     monkeypatch.setattr(batch_native_refresh, "status", fake_status)
 
-    try:
+    assert (
         batch_native_refresh.main(
             [
                 "mark-pending",
@@ -113,17 +113,16 @@ def test_mark_pending_rejects_external_true_wiki_root_before_write(tmp_path, mon
                 "--workdir",
                 str(workdir),
                 "--reason",
-                "external-root-smoke",
+                "operator-root-smoke",
             ]
         )
-    except ValueError as exc:
-        assert "external true wiki root" in str(exc)
-        assert "wiki_test" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("mark-pending must reject external true wiki root before writing")
+        == 0
+    )
 
-    assert calls == []
-    assert not (workdir / "state").exists()
+    assert calls == [
+        ("mark", workdir / "state", root.resolve(), "operator-root-smoke"),
+        ("status", workdir / "state", root.resolve()),
+    ]
 
 
 def test_refresh_prepare_only_updates_prepared_pointer_without_active_or_clear(tmp_path, capsys, monkeypatch) -> None:
@@ -307,7 +306,7 @@ def test_status_ignores_retired_wikigraph_pending_ledger_without_migration(tmp_p
     assert "--no-migrate-legacy" not in text
 
 
-def test_status_accepts_external_true_wiki_root_without_legacy_flag(tmp_path, capsys) -> None:
+def test_status_accepts_explicit_operator_root_without_legacy_flag(tmp_path, capsys) -> None:
     old_backend = "light" + "rag"
     workdir = tmp_path / "wikigraph"
     state_dir = workdir / "state"
@@ -324,7 +323,7 @@ def test_status_accepts_external_true_wiki_root_without_legacy_flag(tmp_path, ca
             [
                 "status",
                 "--root",
-                "/mnt/d/data/Clippings/llm-wiki",
+                str(tmp_path / "operator-wiki"),
                 "--workdir",
                 str(workdir),
             ]
@@ -333,7 +332,7 @@ def test_status_accepts_external_true_wiki_root_without_legacy_flag(tmp_path, ca
     )
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["root"] == "/mnt/d/data/Clippings/llm-wiki"
+    assert payload["root"] == str((tmp_path / "operator-wiki").resolve())
     assert payload["pending_count"] == 0
     assert payload["should_refresh"] is False
     assert legacy_path.exists()
@@ -1315,9 +1314,9 @@ def test_refresh_cutover_rejects_native_output_unchanged_path_before_status(tmp_
     assert calls == []
 
 
-def test_refresh_prepare_only_rejects_external_true_wiki_root_before_status(tmp_path, monkeypatch) -> None:
-    state_dir = tmp_path / "wikigraph" / "state"
-    root = Path("/mnt/d/data/Clippings/llm-wiki")
+def test_refresh_prepare_only_accepts_explicit_root_without_hardcoded_local_special_case(tmp_path, monkeypatch) -> None:
+    state_dir = tmp_path / "native" / "state"
+    root = tmp_path / "operator-wiki"
     workspace_root = state_dir / "native_zvec" / "workspaces"
     calls = []
 
@@ -1332,27 +1331,23 @@ def test_refresh_prepare_only_rejects_external_true_wiki_root_before_status(tmp_
     monkeypatch.setattr(batch_native_refresh, "status", fake_status)
     monkeypatch.setattr(batch_native_refresh, "build_prepared_workspace", build_workspace)
 
-    try:
-        batch_native_refresh.refresh_prepare_only(
-            root=root,
-            state_dir=state_dir,
-            workspace_root=workspace_root,
-            workspace_id="candidate",
-            embedding_profile="conservative",
-        )
-    except ValueError as exc:
-        assert "external true wiki root" in str(exc)
-        assert "wiki_test" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("prepare-only refresh must reject external true wiki root before status or build")
+    result = batch_native_refresh.refresh_prepare_only(
+        root=root,
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        workspace_id="candidate",
+        embedding_profile="conservative",
+    )
 
-    assert calls == []
+    assert result["prepared_only"] is True
+    assert result["skipped"] is False
+    assert calls == [("status", (root, state_dir), {}), ("build", "candidate")]
 
 
-def test_refresh_cutover_rejects_external_true_wiki_root_before_status(tmp_path, monkeypatch) -> None:
-    state_dir = tmp_path / "wikigraph" / "state"
+def test_refresh_cutover_accepts_explicit_root_without_hardcoded_local_special_case(tmp_path, monkeypatch) -> None:
+    state_dir = tmp_path / "native" / "state"
     state_dir.mkdir(parents=True)
-    root = Path("/mnt/d/data/Clippings/llm-wiki")
+    root = tmp_path / "operator-wiki"
     workspace_root = state_dir / "native_zvec" / "workspaces"
     watched_dir = tmp_path / "watched"
     watched_dir.mkdir()
@@ -1380,26 +1375,27 @@ def test_refresh_cutover_rejects_external_true_wiki_root_before_status(tmp_path,
 
     monkeypatch.setattr(batch_native_refresh, "status", fake_status)
 
-    try:
-        batch_native_refresh.refresh_cutover(
-            root=root,
-            state_dir=state_dir,
-            workspace_root=workspace_root,
-            workspace_id="candidate",
-            embedding_profile="conservative",
-            build_workspace=build_workspace,
-            finalize_workspace=finalize_workspace,
-            restart_service=restart_service,
-            query_smoke=query_smoke,
-            required_unchanged_paths=[watched_dir],
-        )
-    except ValueError as exc:
-        assert "external true wiki root" in str(exc)
-        assert "wiki_test" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("cutover refresh must reject external true wiki root before status or build")
+    result = batch_native_refresh.refresh_cutover(
+        root=root,
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        workspace_id="candidate",
+        embedding_profile="conservative",
+        build_workspace=build_workspace,
+        finalize_workspace=finalize_workspace,
+        restart_service=restart_service,
+        query_smoke=query_smoke,
+        required_unchanged_paths=[watched_dir],
+    )
 
-    assert calls == []
+    assert result["cutover_executed"] is True
+    assert calls == [
+        ("status", (root, state_dir), {}),
+        ("build", "candidate"),
+        ("finalize", "native refresh cutover"),
+        ("restart", str(state_dir)),
+        ("smoke", str(state_dir)),
+    ]
 
 
 def test_refresh_cutover_runs_query_smoke_before_clearing_pending(tmp_path) -> None:

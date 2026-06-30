@@ -27,6 +27,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from wiki_native_cli import DEFAULT_WIKI_ROOT
+
 USER_AGENT = "Hermes llm-wiki raw-fast evidence bundle"
 TEXT_EXTENSIONS = {".txt", ".json", ".md", ".html", ".htm", ".js", ".toml", ".yaml", ".yml", ".tex", ".xml"}
 DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
@@ -1459,7 +1461,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an llm-wiki raw-fast evidence bundle without writing the wiki")
     parser.add_argument("--url", required=True)
     parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
-    parser.add_argument("--root", type=Path, default=Path("/mnt/d/data/Clippings/llm-wiki"))
+    parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--probe", action="append", default=None, choices=["github", "hf", "project", "arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests. GitHub/HF/project probes are retired deep probes and should not be used for default llm-wiki clipping.")
     parser.add_argument("--pdf-backend", choices=["docling", "pdftotext", "auto"], default="docling")

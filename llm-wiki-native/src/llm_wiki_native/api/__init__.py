@@ -1,1 +1,1 @@
-"""Shadow HTTP API for llm-wiki native retrieval."""
+"""HTTP API for llm-wiki native retrieval."""

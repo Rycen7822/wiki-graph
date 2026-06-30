@@ -1,4 +1,4 @@
-"""Schema validators for native shadow benchmark inputs and reports."""
+"""Schema validators for baseline-vs-native benchmark inputs and reports."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _require_list(data: dict, key: str, label: str) -> None:
 
 
 def validate_query_suite_row(row: dict) -> None:
-    """Validate one native shadow benchmark query-suite row."""
+    """Validate one native benchmark query-suite row."""
 
     _require_keys(row, _QUERY_ROW_REQUIRED, "query")
     if not str(row.get("id", "")).strip():
@@ -55,7 +55,7 @@ def validate_query_suite_row(row: dict) -> None:
 
 
 def validate_shadow_report(report: dict) -> None:
-    """Validate a baseline-vs-native shadow benchmark report shell."""
+    """Validate a baseline-vs-native benchmark report shell."""
 
     _require_keys(report, _SHADOW_REPORT_REQUIRED, "report")
     if int(report.get("schema_version", -1)) != NATIVE_SCHEMA_VERSION:

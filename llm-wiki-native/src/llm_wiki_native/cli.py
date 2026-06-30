@@ -1,4 +1,4 @@
-"""Callable build helpers for the native shadow workspace."""
+"""Callable build helpers for native llm-wiki workspaces."""
 
 from __future__ import annotations
 
@@ -231,7 +231,7 @@ def build_workspace_from_state(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build and audit llm-wiki native shadow workspaces")
+    parser = argparse.ArgumentParser(description="Build and audit llm-wiki native workspaces")
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build-workspace", help="Build an audited native SQLite workspace from existing state artifacts")
     build.add_argument("--state-dir", type=Path, required=True)
