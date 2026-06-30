@@ -28,7 +28,7 @@ def retired_graph_env_name(name: str) -> str:
 
 
 def retired_graph_tool_python_path() -> str:
-    return f"/home/xu/.local/share/uv/tools/{retired_graph_package_name()}-hku/bin/python"
+    return f"<retired-{retired_graph_package_name()}-tool-python>"
 
 
 def retired_graph_service_name() -> str:

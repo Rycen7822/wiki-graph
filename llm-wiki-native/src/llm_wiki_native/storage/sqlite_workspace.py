@@ -1,4 +1,4 @@
-"""SQLite versioned workspace storage for the native shadow kernel."""
+"""SQLite versioned workspace storage for the native retrieval kernel."""
 
 from __future__ import annotations
 

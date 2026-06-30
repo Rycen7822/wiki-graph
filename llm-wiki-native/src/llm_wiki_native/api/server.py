@@ -1,7 +1,7 @@
-"""Starlette shadow API for native retrieval.
+"""Starlette API for native llm-wiki retrieval.
 
-The app is default-off and intended for port 9622. Query embeddings and answer
-generation are supplied by injected providers during the native migration.
+The app serves immutable native workspaces. Query embeddings and answer
+generation are supplied by configured providers or injected test doubles.
 """
 
 from __future__ import annotations

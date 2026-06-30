@@ -34,7 +34,7 @@ Active production owner:
 Retired compatibility surface:
 
 - `scripts/batch_wikigraph_refresh.py` is only a retired wrapper. Status/decision commands are read-only; mutation commands fail closed and point to native refresh state.
-- `scripts/custom_kg_incremental.py` still has manifest/content helper commands used by native staging, but old live-storage commands (`plan`, `audit-storage`, `apply`, `materialize-full`, `finalize-prepared-swap`) are retired/fail-closed.
+- `scripts/custom_kg_incremental.py` still has manifest/export helper commands used by native staging, but old live-storage commands (`plan`, `audit-storage`, `apply`, `materialize-full`, `finalize-prepared-swap`) are retired/fail-closed.
 - `scripts/import_custom_kg.py` is a retired cold-import shim. `--dry-run` can summarize payload shape; non-dry import and direct old graph construction fail closed.
 - `scripts/wiki_wikigraph_refresh_pending.py` can read old pending ledger state for diagnostics, but writing old wikigraph refresh ledgers is retired/fail-closed.
 
@@ -131,14 +131,21 @@ Run syntax and whitespace checks before committing:
 
 ```bash
 python3 -m py_compile \
+  scripts/audit_native_production_refs.py \
   scripts/batch_native_refresh.py \
   scripts/batch_wikigraph_refresh.py \
   scripts/import_custom_kg.py \
   scripts/custom_kg_incremental.py \
+  scripts/custom_kg_materialize.py \
+  scripts/custom_kg_vector_fill.py \
+  scripts/native_zvec_materialize.py \
   scripts/wiki_wikigraph_refresh_pending.py \
   scripts/wiki_wikigraph_compat_lib.py \
+  scripts/wiki_native_cli.py \
   scripts/wiki_native_wiki_integration_pending.py \
-  scripts/raw_fast_closeout.py
+  scripts/raw_fast_closeout.py \
+  scripts/raw_fast_evidence_bundle.py \
+  scripts/vector_cache.py
 
 git diff --check
 ```

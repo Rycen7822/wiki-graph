@@ -1,4 +1,4 @@
-"""Public constants for the llm-wiki native shadow kernel."""
+"""Public constants for the llm-wiki native retrieval kernel."""
 
 from __future__ import annotations
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -112,7 +114,7 @@ def test_retired_external_compatibility_names_are_centralized() -> None:
     assert names.retired_graph_class_name() == retired_class
     assert names.retired_graph_module_name("utils") == f"{retired_backend}.utils"
     assert names.retired_graph_env_name("PYTHON") == f"{retired_backend.upper()}_PYTHON"
-    assert names.retired_graph_tool_python_path() == f"/home/xu/.local/share/uv/tools/{retired_backend}-hku/bin/python"
+    assert names.retired_graph_tool_python_path() == f"<retired-{retired_backend}-tool-python>"
     assert names.retired_graph_service_name() == f"{retired_backend}-server.service"
     assert names.retired_refresh_ledger_name() == f"pending_{retired_backend}_refresh.json"
 
@@ -146,6 +148,10 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> N
     assert "scripts/batch_native_refresh.py" not in report["allowed_refs"]
     assert "scripts/wiki_search.py" in report["checked_paths"]
     assert "scripts/sync_virtual_docs.py" in report["checked_paths"]
+    assert "scripts/custom_kg_incremental.py" in report["checked_paths"]
+    assert "scripts/vector_cache.py" in report["checked_paths"]
+    assert "scripts/native_zvec_materialize.py" in report["checked_paths"]
+    assert "scripts/raw_fast_evidence_bundle.py" in report["checked_paths"]
     assert "llm-wiki-native/src/llm_wiki_native/api/server.py" in report["checked_paths"]
     assert "compat_registry_module" in report["marker_labels"]
     assert report["allowed_refs"] == {}
@@ -178,8 +184,14 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
     imported = {row["module"] for row in package_independence["imports"]}
     assert {
         "batch_native_refresh",
+        "custom_kg_incremental",
+        "custom_kg_vector_fill",
+        "native_zvec_materialize",
         "raw_fast_closeout",
+        "raw_fast_evidence_bundle",
         "sync_virtual_docs",
+        "vector_cache",
+        "wiki_native_cli",
         "wiki_search",
         "llm_wiki_native.api.server",
         "llm_wiki_native.retrieval.query_engine",
@@ -431,6 +443,62 @@ def test_native_cli_module_owns_defaults_and_common_helpers(capsys: pytest.Captu
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
     assert "from wiki_native_cli import" in facade_text
+
+
+def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "LLM_WIKI_ROOT": str(tmp_path / "wiki-root"),
+            "LLM_WIKI_STATE_DIR": str(tmp_path / "state-dir"),
+            "WIKI_GRAPH_REPO": str(tmp_path / "repo-root"),
+            "LLM_WIKI_SERVER": "http://127.0.0.1:9999",
+        }
+    )
+    code = (
+        "import json, sys; "
+        f"sys.path.insert(0, {str(SCRIPTS)!r}); "
+        "import wiki_native_cli; "
+        "print(json.dumps({"
+        "'root': str(wiki_native_cli.DEFAULT_WIKI_ROOT), "
+        "'state': str(wiki_native_cli.DEFAULT_STATE_DIR), "
+        "'workdir': str(wiki_native_cli.DEFAULT_WORKDIR), "
+        "'server': wiki_native_cli.DEFAULT_SERVER"
+        "}, sort_keys=True))"
+    )
+
+    completed = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True, env=env, check=True)
+    payload = json.loads(completed.stdout)
+
+    assert payload == {
+        "root": str(tmp_path / "wiki-root"),
+        "state": str(tmp_path / "state-dir"),
+        "workdir": str(tmp_path / "repo-root"),
+        "server": "http://127.0.0.1:9999",
+    }
+
+
+def test_active_sources_do_not_embed_operator_local_paths() -> None:
+    scanned = [
+        SCRIPTS / "wiki_native_cli.py",
+        SCRIPTS / "batch_native_refresh.py",
+        SCRIPTS / "raw_fast_closeout.py",
+        SCRIPTS / "raw_fast_evidence_bundle.py",
+        SCRIPTS / "wiki_wikigraph_compat_names.py",
+        SCRIPTS / "batch_wiki_integration.py",
+        SCRIPTS / "wiki_search.py",
+    ]
+    private_clip_root = Path("/mnt") / "d" / "data" / ("Clip" + "pings")
+    patterns = [str(Path.home()), str(Path.home() / ".local" / "share" / "uv" / "tools"), str(private_clip_root)]
+
+    offenders = []
+    for path in scanned:
+        text = path.read_text(encoding="utf-8")
+        for pattern in patterns:
+            if pattern in text:
+                offenders.append(f"{path.relative_to(ROOT)} contains {pattern}")
+
+    assert offenders == []
 
 
 def test_native_artifacts_module_owns_source_and_builder_helpers() -> None:

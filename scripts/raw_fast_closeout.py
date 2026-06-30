@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,10 +20,23 @@ import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_WORKDIR = Path("/home/xu/project/wiki/wiki-graph")
-DEFAULT_ROOT = DEFAULT_WORKDIR / "wiki_test"
-DEFAULT_STATE_DIR = DEFAULT_WORKDIR / "tmp" / "wiki_test_state"
-DEFAULT_VERIFIER = DEFAULT_WORKDIR / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    return Path(raw).expanduser()
+
+
+DEFAULT_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
+DEFAULT_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR / "wiki_test")
+DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "wiki_test_state")
+DEFAULT_VERIFIER = _env_path(
+    "LLM_WIKI_RAW_FAST_VERIFIER",
+    DEFAULT_WORKDIR / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py",
+)
 DEFAULT_REQUIRED_SECTIONS = [
     "summary",
     "abstract",

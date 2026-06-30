@@ -9,9 +9,7 @@ import json
 import math
 from pathlib import Path
 import sqlite3
-import struct
 from typing import Any
-import zlib
 
 
 GRAPH_FIELD_SEP = "<SEP>"
@@ -23,53 +21,6 @@ def _compute_mdhash_id(content: str, prefix: str = "") -> str:
     except UnicodeEncodeError:
         digest = hashlib.md5(str(content).encode("utf-8", errors="replace")).hexdigest()
     return prefix + digest
-
-
-def _record_embedding_contract(record: dict[str, Any]) -> tuple[str, int | None, str]:
-    dim = record.get("embedding_dim")
-    try:
-        normalized_dim = int(dim) if dim is not None else None
-    except (TypeError, ValueError):
-        normalized_dim = None
-    return (
-        str(record.get("embedding_model") or ""),
-        normalized_dim,
-        str(record.get("embedding_params_version") or ""),
-    )
-
-
-def _storage_record_ids_for_manifest_record(collection: str, key: str, record: dict[str, Any]) -> list[str]:
-    ids: list[str] = []
-    record_id = record.get("record_id") or key
-    if record_id not in (None, ""):
-        ids.append(str(record_id))
-    return ids
-
-
-def _first_storage_record(storage_records: dict[str, dict[str, Any]], ids: list[str]) -> dict[str, Any] | None:
-    for record_id in ids:
-        record = storage_records.get(record_id)
-        if isinstance(record, dict):
-            return record
-    return None
-
-
-def _can_seed_after_previous_hash_mismatch(
-    collection: str,
-    previous_record: Any,
-    desired_record: dict[str, Any],
-    storage_record: dict[str, Any] | None,
-) -> bool:
-    if collection != "relationships":
-        return False
-    if not isinstance(previous_record, dict) or not isinstance(storage_record, dict):
-        return False
-    if _record_embedding_contract(previous_record) != _record_embedding_contract(desired_record):
-        return False
-    for field in ("src_id", "tgt_id", "keywords", "description"):
-        if str(previous_record.get(field)) != str(desired_record.get(field)):
-            return False
-    return str(storage_record.get("content")) == str(desired_record.get("content"))
 
 
 class VectorCache:
@@ -335,65 +286,10 @@ def resolve_manifest_vectors(manifest: dict[str, Any], cache: VectorCache) -> di
     }
     return {"resolved": resolved, "missing": missing, "summary": summary}
 
-
-_STORAGE_VDB_FILES = {
-    "chunks": "vdb_chunks.json",
-    "entities": "vdb_entities.json",
-    "relationships": "vdb_relationships.json",
-}
-
-
-def _load_storage_vdb_records(path: Path) -> dict[str, dict[str, Any]]:
-    if not path.exists():
-        return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    records = raw.get("data", []) if isinstance(raw, dict) else raw
-    if not isinstance(records, list):
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        record_id = record.get("__id__") or record.get("id")
-        if record_id:
-            result[str(record_id)] = record
-    return result
-
-
-def _vector_from_storage_record(record: dict[str, Any] | None, embedding_dim: int) -> list[float] | None:
-    if not record:
-        return None
-    vector = record.get("vector")
-    if vector is None:
-        vector = record.get("__vector__")
-    if isinstance(vector, list):
-        try:
-            return [float(value) for value in vector]
-        except (TypeError, ValueError):
-            return None
-    if isinstance(vector, str):
-        return _decode_encoded_storage_vector(vector, embedding_dim)
-    return None
-
-
-def _decode_encoded_storage_vector(value: str, embedding_dim: int) -> list[float] | None:
-    try:
-        blob = zlib.decompress(base64.b64decode(value))
-    except Exception:
-        return None
-    formats = (
-        (2, "e"),
-        (4, "f"),
-        (8, "d"),
-    )
-    for byte_width, fmt in formats:
-        if len(blob) != int(embedding_dim) * byte_width:
-            continue
-        try:
-            return [float(item[0]) for item in struct.iter_unpack("<" + fmt, blob)]
-        except struct.error:
-            return None
-    return None
+SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE = (
+    "seed_vector_cache_from_storage is retired after native zvec production cutover; "
+    "use the native vector cache or explicit embedding fill path instead of retired file-backend VDB JSON"
+)
 
 
 def seed_vector_cache_from_storage(
@@ -403,97 +299,6 @@ def seed_vector_cache_from_storage(
     *,
     previous_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Seed ``cache`` from explicit vector fields in wikigraph file-backend VDB JSON.
+    """Fail closed before reading retired file-backend VDB JSON."""
 
-    When ``previous_manifest`` is provided, a storage vector may only satisfy a
-    desired record whose vector hash matches the previous successful manifest.
-    This prevents record-id-stable vector updates from being mislabeled as fresh
-    desired vectors.
-    """
-
-    storage_dir = Path(storage_dir)
-    summary: dict[str, dict[str, int]] = {}
-    missing: dict[str, list[str]] = {}
-    skipped_vector_hash_mismatch: dict[str, list[str]] = {}
-    cache_records: list[dict[str, Any]] = []
-    for collection, filename in _STORAGE_VDB_FILES.items():
-        records = manifest.get(collection, {})
-        if not isinstance(records, dict):
-            records = {}
-        storage_records = _load_storage_vdb_records(storage_dir / filename)
-        previous_records = previous_manifest.get(collection, {}) if isinstance(previous_manifest, dict) else {}
-        if not isinstance(previous_records, dict):
-            previous_records = {}
-        collection_summary = {"total": 0, "seeded": 0, "missing": 0}
-        collection_missing: list[str] = []
-        collection_skipped_hash_mismatch: list[str] = []
-        for key in sorted(records):
-            record = records[key]
-            collection_summary["total"] += 1
-            if not isinstance(record, dict):
-                collection_summary["missing"] += 1
-                collection_missing.append(str(key))
-                continue
-            previous_record = previous_records.get(key) if previous_manifest is not None else None
-            embedding_dim = record.get("embedding_dim")
-            storage_record = _first_storage_record(
-                storage_records,
-                _storage_record_ids_for_manifest_record(collection, str(key), record),
-            )
-            previous_hash_mismatch = previous_manifest is not None and (
-                not isinstance(previous_record, dict)
-                or str(previous_record.get("vector_hash")) != str(record.get("vector_hash"))
-            )
-            if previous_hash_mismatch and not _can_seed_after_previous_hash_mismatch(
-                collection,
-                previous_record,
-                record,
-                storage_record,
-            ):
-                collection_summary["missing"] += 1
-                collection_missing.append(str(key))
-                collection_skipped_hash_mismatch.append(str(key))
-                continue
-            vector = _vector_from_storage_record(
-                storage_record,
-                int(embedding_dim or 0),
-            )
-            required = [
-                record.get("vector_hash"),
-                record.get("record_type"),
-                record.get("record_id"),
-                record.get("embedding_model"),
-                embedding_dim,
-                record.get("embedding_params_version"),
-            ]
-            if vector is None or any(value in (None, "") for value in required):
-                collection_summary["missing"] += 1
-                collection_missing.append(str(key))
-                continue
-            cache_records.append(
-                {
-                    "vector_hash": str(record["vector_hash"]),
-                    "record_type": str(record["record_type"]),
-                    "record_id": str(record["record_id"]),
-                    "embedding_model": str(record["embedding_model"]),
-                    "embedding_dim": int(record["embedding_dim"]),
-                    "embedding_params_version": str(record["embedding_params_version"]),
-                    "vector": vector,
-                }
-            )
-            collection_summary["seeded"] += 1
-        summary[collection] = collection_summary
-        missing[collection] = collection_missing
-        skipped_vector_hash_mismatch[collection] = collection_skipped_hash_mismatch
-    cache.put_many(cache_records)
-    summary["total"] = {
-        "total": sum(item["total"] for key, item in summary.items() if key != "total"),
-        "seeded": sum(item["seeded"] for key, item in summary.items() if key != "total"),
-        "missing": sum(item["missing"] for key, item in summary.items() if key != "total"),
-    }
-    return {
-        "storage_dir": str(storage_dir),
-        "summary": summary,
-        "missing": missing,
-        "skipped_vector_hash_mismatch": skipped_vector_hash_mismatch,
-    }
+    raise RuntimeError(SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE)

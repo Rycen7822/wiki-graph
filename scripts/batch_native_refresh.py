@@ -18,7 +18,6 @@ from urllib.parse import urlparse
 import urllib.request
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
-EXTERNAL_TRUE_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WIKI_ROOT = REPO_ROOT / "wiki_test"
 DEFAULT_WORKDIR = REPO_ROOT / "tmp" / "native_refresh"
@@ -42,19 +41,6 @@ def prepared_workspace_path(state_dir: Path) -> Path:
 
 def active_workspace_path(state_dir: Path) -> Path:
     return native_dir(state_dir) / "active_workspace.json"
-
-
-def reject_external_true_wiki_refresh_root(root: Path) -> None:
-    target = Path(root).expanduser().resolve(strict=False)
-    blocked = EXTERNAL_TRUE_WIKI_ROOT.expanduser().resolve(strict=False)
-    try:
-        target.relative_to(blocked)
-    except ValueError:
-        return
-    raise ValueError(
-        "native refresh refuses the external true wiki root; "
-        "copy production data into repo-local wiki_test or tmp before refresh"
-    )
 
 
 def _path_snapshot(path: Path) -> dict[str, Any]:
@@ -206,7 +192,6 @@ def refresh_prepare_only(
     force: bool = False,
     required_unchanged_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
-    reject_external_true_wiki_refresh_root(root)
     before_active = active_workspace_path(state_dir).read_text(encoding="utf-8") if active_workspace_path(state_dir).exists() else None
     unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
     current_status = status(root, state_dir)
@@ -549,7 +534,6 @@ def refresh_cutover(
     force: bool = False,
     required_unchanged_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
-    reject_external_true_wiki_refresh_root(root)
     if not required_unchanged_paths:
         raise ValueError("native refresh cutover requires at least one --require-unchanged-path guard")
     if query_smoke is None:
@@ -663,7 +647,6 @@ def main(argv: list[str] | None = None) -> int:
         print_json(status(root, state_dir))
         return 0
     if args.command == "mark-pending":
-        reject_external_true_wiki_refresh_root(root)
         entry = mark_pending(state_dir, root, reason=args.reason)
         print_json({"marked": entry, **status(root, state_dir)})
         return 0

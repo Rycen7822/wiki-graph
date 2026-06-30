@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from wiki_native_docs import collect_source_docs, raw_clip_files
-from wiki_native_state import ensure_state_dirs
 from wiki_native_wiki_checks import now_stamp
-from wiki_native_wiki_integration_pending import pending_wiki_integration_status
+from wiki_native_wiki_integration_pending import pending_wiki_integration_ledger_path, pending_wiki_integration_status
 
 PENDING_WIKIGRAPH_REFRESH_LEDGER = "pending_wikigraph_refresh.json"
 DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD = 10
@@ -38,7 +37,6 @@ def default_wikigraph_refresh_ledger(threshold: int | None = None) -> dict[str, 
 
 
 def load_wikigraph_refresh_ledger(state_dir: Path, threshold: int | None = None) -> dict[str, Any]:
-    ensure_state_dirs(state_dir)
     path = pending_wikigraph_refresh_ledger_path(state_dir)
     if not path.exists():
         return default_wikigraph_refresh_ledger(threshold)
@@ -128,7 +126,19 @@ def pending_wikigraph_refresh_status(
     normalized_reason = reason.strip().lower().replace("_", "-")
     ledger = load_wikigraph_refresh_ledger(state_dir, threshold=threshold)
     upstream_reason = normalized_reason if normalized_reason in {"pre-query", "query", "manual"} else "threshold"
-    upstream_wiki_integration = pending_wiki_integration_status(root, state_dir, reason=upstream_reason)
+    if pending_wiki_integration_ledger_path(state_dir).exists():
+        upstream_wiki_integration = pending_wiki_integration_status(root, state_dir, reason=upstream_reason)
+    else:
+        upstream_wiki_integration = {
+            "pending_count": 0,
+            "blocking_pending_count": 0,
+            "actionable_pending_count": 0,
+            "review_pending_count": 0,
+            "should_integrate": False,
+            "should_review": False,
+            "next_required_action": "none",
+            "reasons": [],
+        }
     upstream_actionable_count = int(upstream_wiki_integration.get("actionable_pending_count") or 0)
     upstream_review_count = int(upstream_wiki_integration.get("review_pending_count") or 0)
     upstream_pending_count = int(
@@ -175,13 +185,16 @@ def pending_wikigraph_refresh_status(
         next_required_action = "wiki_integration"
     elif upstream_review_count:
         next_required_action = "manual_review"
-    elif should_refresh:
-        next_required_action = "wikigraph_refresh"
+    elif would_refresh_if_unblocked:
+        next_required_action = "native_refresh"
     else:
         next_required_action = "none"
     return {
+        "retired": True,
+        "replacement_action": "native_refresh",
         "reason": normalized_reason,
-        "should_refresh": should_refresh,
+        "should_refresh": False,
+        "retired_backend_should_refresh": should_refresh,
         "would_refresh_if_unblocked": would_refresh_if_unblocked,
         "blocked_by_pending_wiki_integration": blocked_by_pending_wiki_integration,
         "blocked_reasons": sorted(set(blocked_reasons)),

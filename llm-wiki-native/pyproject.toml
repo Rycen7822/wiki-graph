@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm-wiki-native"
 version = "0.1.0"
-description = "Shadow native retrieval kernel for llm-wiki."
+description = "Native retrieval kernel for llm-wiki."
 requires-python = ">=3.12"
 dependencies = ["numpy", "starlette", "uvicorn", "zvec>=0.5.1,<0.6"]
 

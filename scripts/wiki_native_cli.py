@@ -9,10 +9,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-DEFAULT_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
-DEFAULT_WORKDIR = Path("/home/xu/project/wiki/wikigraph")
-DEFAULT_STATE_DIR = DEFAULT_WORKDIR / "state"
-DEFAULT_SERVER = "http://127.0.0.1:9621"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    return Path(raw).expanduser()
+
+
+DEFAULT_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
+DEFAULT_WIKI_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR / "wiki_test")
+DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "native_refresh" / "state")
+DEFAULT_SERVER = os.environ.get("LLM_WIKI_SERVER", "http://127.0.0.1:9621")
 
 
 def print_json(data: Any) -> None:
