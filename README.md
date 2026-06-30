@@ -2,7 +2,7 @@
 
 This repository contains the native zvec runtime, refresh tooling, query helpers, tests, and rehearsal workspace for an `llm-wiki` graph/retrieval pipeline.
 
-Production retrieval is native-only. The previous `wikigraph` / `custom_kg` live-storage backend has been retired from production paths; remaining old-named scripts are explicit read-only diagnostics or fail-closed shims so stale automation cannot mutate live storage by accident.
+Production retrieval is native-only. The previous `wikigraph` / `custom_kg` live-storage backend has been retired from production paths; stale live-mutation automation should fail through missing entrypoints or explicit audit detectors, not maintained compatibility shims.
 
 ## Configure your environment
 
@@ -31,7 +31,7 @@ Active production owner:
 - `scripts/wiki_search.py` queries the native service/runtime and can save evidence packs.
 - `llm-wiki-native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, pointer handling, and native tests.
 
-Retired compatibility surface:
+Retired live-storage boundary:
 
 - `scripts/custom_kg_incremental.py` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
 
@@ -104,7 +104,7 @@ python3 scripts/audit_native_production_refs.py --repo-root .
 
 ## Validation gates for changes
 
-For changes touching native refresh, wiki integration, query/runtime code, or retired compatibility shims, run the focused repo tests:
+For changes touching native refresh, wiki integration, query/runtime code, or retired-surface audit guards, run the focused repo tests:
 
 ```bash
 python3 -m pytest \
@@ -150,7 +150,7 @@ A bare `python3 -m pytest -q` from the repo root may collect vendored/reference 
 - Keep generated evidence, logs, service output, native state, and sidecars out of the human wiki root.
 - Do not clear pending ledgers, cut over workspaces, or promote active pointers without an explicit validation run.
 - Prefer native refresh state (`pending_native_refresh.json`) over retired wikigraph refresh state.
-- If a command mentions retired wikigraph/custom_kg live-storage mutation, expect it to fail closed; update the caller to use native refresh instead.
+- If a command mentions retired wikigraph/custom_kg live-storage mutation, update or remove the caller; production no longer maintains mutation compatibility shims.
 
 ## Worknotes
 

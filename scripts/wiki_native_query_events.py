@@ -28,34 +28,12 @@ def slugify(text: str, max_len: int = 80) -> str:
     return (slug or "item")[:max_len].strip("-") or "item"
 
 
-def init_manifest_db(state_dir: Path) -> Path:
+def init_query_events_db(state_dir: Path) -> Path:
     _ensure_state_dirs(state_dir)
     db = state_dir / NATIVE_QUERY_EVENTS_DB_FILENAME
     with sqlite3.connect(db) as conn:
-        conn.executescript(
+        conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS docs (
-              canonical_id TEXT PRIMARY KEY,
-              rel_path TEXT NOT NULL,
-              doc_type TEXT NOT NULL,
-              sha256 TEXT NOT NULL,
-              title TEXT,
-              updated TEXT,
-              native_track_id TEXT,
-              native_doc_status TEXT,
-              last_synced_at TEXT,
-              deleted INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS sync_events (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              canonical_id TEXT NOT NULL,
-              event_type TEXT NOT NULL,
-              old_sha256 TEXT,
-              new_sha256 TEXT,
-              track_id TEXT,
-              status TEXT,
-              created_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS query_events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               query TEXT NOT NULL,
@@ -63,7 +41,7 @@ def init_manifest_db(state_dir: Path) -> Path:
               rewritten_queries TEXT,
               evidence_pack_path TEXT,
               created_at TEXT NOT NULL
-            );
+            )
             """
         )
     return db
@@ -117,7 +95,7 @@ def save_evidence_pack(state_dir: Path, query: str, mode: str, response: dict[st
 
 
 def add_query_event(state_dir: Path, query: str, mode: str, evidence_pack_path: str | None = None) -> None:
-    db = init_manifest_db(state_dir)
+    db = init_query_events_db(state_dir)
     with sqlite3.connect(db) as conn:
         conn.execute(
             "INSERT INTO query_events(query, mode, rewritten_queries, evidence_pack_path, created_at) VALUES(?,?,?,?,?)",

@@ -39,10 +39,6 @@ ACTIVE_NATIVE_ONLY_HELP_TEXT_SCRIPTS = [
     "validate_wiki.py",
 ]
 
-UNSUPPORTED_DOCUMENT_SYNC_SCRIPTS = [
-    ("sync_virtual_docs", "sync_virtual_docs.py", ["--kind", "method_atom"]),
-]
-
 PURE_VALIDATION_HELPERS = {
     "COMPILED_DIR_TYPES",
     "as_list",
@@ -126,7 +122,7 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> N
     assert report["offenders"] == []
     assert "scripts/batch_native_refresh.py" not in report["allowed_refs"]
     assert "scripts/wiki_search.py" in report["checked_paths"]
-    assert "scripts/sync_virtual_docs.py" in report["checked_paths"]
+    assert "scripts/sync_virtual_docs.py" not in report["checked_paths"]
     assert "scripts/custom_kg_incremental.py" in report["checked_paths"]
     assert "scripts/vector_cache.py" in report["checked_paths"]
     assert "scripts/native_zvec_materialize.py" in report["checked_paths"]
@@ -167,7 +163,6 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
         "native_zvec_materialize",
         "raw_fast_closeout",
         "raw_fast_evidence_bundle",
-        "sync_virtual_docs",
         "vector_cache",
         "wiki_native_cli",
         "wiki_search",
@@ -356,7 +351,10 @@ def test_native_query_events_module_owns_active_query_helpers() -> None:
     module_text = (SCRIPTS / "wiki_native_query_events.py").read_text(encoding="utf-8")
     assert "def save_evidence_pack(" in module_text
     assert "def add_query_event(" in module_text
-    assert "def init_manifest_db(" in module_text
+    assert "def init_query_events_db(" in module_text
+    assert "def init_manifest_db(" not in module_text
+    assert "CREATE TABLE IF NOT EXISTS docs" not in module_text
+    assert "CREATE TABLE IF NOT EXISTS sync_events" not in module_text
     assert "def slugify(" in module_text
     assert "import wiki_wikigraph_compat_lib" not in module_text
     assert "from wiki_wikigraph_compat_lib import" not in module_text
@@ -938,54 +936,16 @@ def test_native_facade_imports_validation_from_native_owner() -> None:
     assert f"from wiki_{old_backend}_validation import" not in text
 
 
-@pytest.mark.parametrize(("module_name", "script_name", "extra_args"), UNSUPPORTED_DOCUMENT_SYNC_SCRIPTS)
-def test_legacy_document_sync_entrypoints_fail_closed_under_native_migration(
-    module_name: str,
-    script_name: str,
-    extra_args: list[str],
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    module = importlib.import_module(module_name)
+def test_retired_document_sync_entrypoints_are_removed_after_native_cutover() -> None:
+    import importlib.util
 
-    result = module.main(
-        [
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--server",
-            "http://127.0.0.1:9621",
-            "--limit",
-            "1",
-            *extra_args,
-        ]
-    )
-
-    assert result == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert payload["error"] == "unsupported_native_document_sync"
-    assert payload["script"] == script_name
-    assert payload["operation"] == "document_sync"
-    assert payload["unsupported_endpoint"] == "/documents/texts"
-    assert payload["native_refresh"]["command"] == "scripts/batch_native_refresh.py refresh --prepare-only"
-    assert "scripts/batch_native_refresh.py status" in payload["native_refresh"]["status_command"]
-
-
-def test_old_named_canonical_document_sync_entrypoint_is_removed() -> None:
     assert not (SCRIPTS / ("light" + "rag_sync.py")).exists()
+    assert not (SCRIPTS / "sync_virtual_docs.py").exists()
+    assert importlib.util.find_spec("sync_virtual_docs") is None
 
-
-def test_legacy_document_sync_wrappers_do_not_import_or_call_old_sync_helper() -> None:
-    old_backend = "light" + "rag"
-    for _, script_name, _ in UNSUPPORTED_DOCUMENT_SYNC_SCRIPTS:
-        text = (SCRIPTS / script_name).read_text(encoding="utf-8")
-        assert f"from wiki_{old_backend}_lib import" not in text
-        assert f"import wiki_{old_backend}_lib" not in text
-        assert f"sync_docs_to_{old_backend}" not in text
+    audit_text = (SCRIPTS / "audit_native_production_refs.py").read_text(encoding="utf-8")
+    assert "sync_virtual_docs" not in audit_text
+    assert "/documents/texts" not in audit_text
 
 
 def test_clear_success_native_surface_has_no_legacy_backend_aliases() -> None:
