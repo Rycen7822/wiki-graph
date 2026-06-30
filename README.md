@@ -29,7 +29,7 @@ Active production owner:
 - `wiki_graph.ops.batch_native_refresh` manages pending native refresh state, workspace preparation, and guarded native cutover.
 - `wiki_graph.ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
 - `wiki_graph.ops.wiki_search` queries the native service/runtime and can save evidence packs.
-- `src/llm_wiki_native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, and pointer handling.
+- `llm_wiki_native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, and pointer handling.
 
 Retired live-storage boundary:
 
@@ -42,7 +42,7 @@ Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old 
 Check native refresh state:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh status \
+python3 -m wiki_graph.ops.batch_native_refresh status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO"
@@ -51,7 +51,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh status \
 Check wiki-integration state:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.batch_wiki_integration status \
+python3 -m wiki_graph.ops.batch_wiki_integration status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --reason threshold
@@ -60,7 +60,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.batch_wiki_integration status \
 Mark native refresh as pending when upstream integration or reviewed changes require a graph refresh:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
+python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -70,7 +70,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
 Prepare a native workspace without cutover:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
+python3 -m wiki_graph.ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -80,7 +80,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
 Cutover is intentionally explicit and should only be done after validation gates pass:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
+python3 -m wiki_graph.ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -90,7 +90,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
 Query the native service/data endpoint:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.wiki_search "your query" \
+python3 -m wiki_graph.ops.wiki_search "your query" \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --data-only
@@ -99,7 +99,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.wiki_search "your query" \
 Run the production-reference audit:
 
 ```bash
-PYTHONPATH=src python3 -m wiki_graph.ops.audit_native_production_refs --repo-root .
+python3 -m wiki_graph.ops.audit_native_production_refs --repo-root .
 ```
 
 ## Validation gates for changes
@@ -107,7 +107,7 @@ PYTHONPATH=src python3 -m wiki_graph.ops.audit_native_production_refs --repo-roo
 For changes touching native refresh, wiki integration, query/runtime code, or retired-surface audit guards, run the focused repo tests:
 
 ```bash
-PYTHONPATH=src python3 -m pytest \
+python3 -m pytest \
   tests/test_batch_native_refresh.py \
   tests/test_wiki_native_lib.py \
   tests/test_wiki_native_workflows.py \
@@ -117,16 +117,16 @@ PYTHONPATH=src python3 -m pytest \
   -q
 ```
 
-Run the unified test suite from the repository-root `tests/` directory, with the native package source directory on `PYTHONPATH`:
+Run the unified test suite from the repository-root `tests/` directory:
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests -q
+python3 -m pytest tests -q
 ```
 
 Run syntax and whitespace checks before committing:
 
 ```bash
-PYTHONPATH=src python3 -m compileall -q src tests
+python3 -m compileall -q llm_wiki_native wiki_graph tests
 
 git diff --check
 ```

@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 import urllib.request
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_WIKI_ROOT = REPO_ROOT / "wiki_test"
 DEFAULT_WORKDIR = REPO_ROOT / "tmp" / "native_refresh"
 

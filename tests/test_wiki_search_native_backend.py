@@ -7,10 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "src"
-OPS = SRC / "wiki_graph" / "ops"
+OPS = REPO_ROOT / "wiki_graph" / "ops"
 SCRIPTS = OPS
-sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(REPO_ROOT))
 
 from wiki_graph.ops import wiki_search  # noqa: E402
 

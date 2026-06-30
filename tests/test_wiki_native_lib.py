@@ -11,10 +11,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-OPS = SRC / "wiki_graph" / "ops"
+OPS = ROOT / "wiki_graph" / "ops"
 SCRIPTS = OPS
-sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(ROOT))
 
 from wiki_graph.ops import batch_native_refresh  # noqa: E402
 from wiki_graph.ops import wiki_native_lib  # noqa: E402
@@ -87,8 +86,8 @@ def test_python_sources_do_not_spell_retired_backend_token_directly() -> None:
     ]
     source_roots = [
         SCRIPTS,
+        ROOT / "llm_wiki_native",
         ROOT / "tests",
-        ROOT / "src",
     ]
     offenders: list[str] = []
 
@@ -122,14 +121,14 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> N
 
     assert report["ok"] is True
     assert report["offenders"] == []
-    assert "src/wiki_graph/ops/batch_native_refresh.py" not in report["allowed_refs"]
-    assert "src/wiki_graph/ops/wiki_search.py" in report["checked_paths"]
-    assert "src/wiki_graph/ops/sync_virtual_docs.py" not in report["checked_paths"]
-    assert "src/wiki_graph/ops/custom_kg_incremental.py" in report["checked_paths"]
-    assert "src/wiki_graph/ops/vector_cache.py" in report["checked_paths"]
-    assert "src/wiki_graph/ops/native_zvec_materialize.py" in report["checked_paths"]
-    assert "src/wiki_graph/ops/raw_fast_evidence_bundle.py" in report["checked_paths"]
-    assert "src/llm_wiki_native/api/server.py" in report["checked_paths"]
+    assert "wiki_graph/ops/batch_native_refresh.py" not in report["allowed_refs"]
+    assert "wiki_graph/ops/wiki_search.py" in report["checked_paths"]
+    assert "wiki_graph/ops/sync_virtual_docs.py" not in report["checked_paths"]
+    assert "wiki_graph/ops/custom_kg_incremental.py" in report["checked_paths"]
+    assert "wiki_graph/ops/vector_cache.py" in report["checked_paths"]
+    assert "wiki_graph/ops/native_zvec_materialize.py" in report["checked_paths"]
+    assert "wiki_graph/ops/raw_fast_evidence_bundle.py" in report["checked_paths"]
+    assert "llm_wiki_native/api/server.py" in report["checked_paths"]
     assert "compat_registry_module" not in report["marker_labels"]
     assert "registry_function_prefix" not in report["marker_labels"]
     assert report["allowed_refs"] == {}
@@ -435,7 +434,7 @@ def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None
     )
     code = (
         "import json, sys; "
-        f"sys.path.insert(0, {str(SRC)!r}); "
+        f"sys.path.insert(0, {str(ROOT)!r}); "
         "from wiki_graph.ops import wiki_native_cli; "
         "print(json.dumps({"
         "'root': str(wiki_native_cli.DEFAULT_WIKI_ROOT), "

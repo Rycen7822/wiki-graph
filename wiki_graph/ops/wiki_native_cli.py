@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _env_path(name: str, default: Path) -> Path:

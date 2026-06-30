@@ -9,11 +9,10 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-OPS = SRC / "wiki_graph" / "ops"
+OPS = ROOT / "wiki_graph" / "ops"
 SCRIPTS = OPS
-NATIVE_SRC = SRC
-sys.path.insert(0, str(SRC))
+NATIVE_SRC = ROOT
+sys.path.insert(0, str(ROOT))
 
 from wiki_graph.ops import native_zvec_materialize  # noqa: E402
 
