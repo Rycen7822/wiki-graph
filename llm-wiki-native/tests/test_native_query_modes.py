@@ -88,8 +88,8 @@ def test_bypass_mode_skips_retrieval() -> None:
 
 
 @pytest.mark.parametrize("mode", ["local", "global", "hybrid"])
-def test_supported_graph_modes_fail_closed_until_native_equivalence_exists(mode: str) -> None:
+def test_old_graph_modes_are_not_supported_native_modes(mode: str) -> None:
     engine = NativeQueryEngine(_DB(), zvec_workspace=_ZvecWorkspace())
 
-    with pytest.raises(NotImplementedError, match="not implemented"):
+    with pytest.raises(ValueError, match="unsupported mode"):
         engine.query("native-test", "alpha query", [1.0, 0.0], mode=mode, top_k=2)

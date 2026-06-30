@@ -10,7 +10,6 @@ import base64
 from typing import Any
 
 from llm_wiki_native.contracts import (
-    IMPLEMENTED_QUERY_MODES,
     RECORD_TYPE_CODES,
     RECORD_TYPES,
     SECTION_KIND_CODES,
@@ -38,8 +37,6 @@ class NativeQueryEngine:
     ) -> dict[str, Any]:
         if mode not in SUPPORTED_QUERY_MODES:
             raise ValueError(f"unsupported mode: {mode}")
-        if mode not in IMPLEMENTED_QUERY_MODES:
-            raise NotImplementedError(f"native query mode is not implemented yet: {mode}")
         unknown_record_types = [record_type for record_type in record_types if record_type not in RECORD_TYPES]
         if unknown_record_types:
             raise ValueError(f"unsupported record_type: {unknown_record_types[0]}")

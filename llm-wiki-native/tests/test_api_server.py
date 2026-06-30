@@ -102,15 +102,15 @@ def test_shadow_api_returns_structured_400_for_validation_errors(tmp_path, monke
     assert "record_type" in response.json()["error"]
 
 
-def test_shadow_api_returns_structured_501_for_unimplemented_supported_mode(tmp_path, monkeypatch) -> None:
+def test_shadow_api_rejects_old_graph_mode_as_unsupported(tmp_path, monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "mode": "local"}
 
     response = _request(app, "POST", "/native/query/trace", json=payload, raise_app_exceptions=False)
 
-    assert response.status_code == 501
-    assert "not implemented" in response.json()["error"]
+    assert response.status_code == 400
+    assert "unsupported mode" in response.json()["error"]
 
 
 def test_shadow_api_requires_bearer_token_when_configured(tmp_path, monkeypatch) -> None:

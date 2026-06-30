@@ -19,7 +19,6 @@ import wiki_native_lib  # noqa: E402
 
 PURE_NATIVE_FACADE_SCRIPTS = [
     "audit_raw_note_sections.py",
-    "build_evidence_pack.py",
     "build_section_similarity_graph.py",
     "build_seed_edges.py",
     "extract_method_atoms.py",
@@ -946,6 +945,13 @@ def test_retired_document_sync_entrypoints_are_removed_after_native_cutover() ->
     audit_text = (SCRIPTS / "audit_native_production_refs.py").read_text(encoding="utf-8")
     assert "sync_virtual_docs" not in audit_text
     assert "/documents/texts" not in audit_text
+
+
+def test_deprecated_build_evidence_pack_alias_is_removed_after_query_cli_cutover() -> None:
+    import importlib.util
+
+    assert not (SCRIPTS / "build_evidence_pack.py").exists()
+    assert importlib.util.find_spec("build_evidence_pack") is None
 
 
 def test_clear_success_native_surface_has_no_legacy_backend_aliases() -> None:
