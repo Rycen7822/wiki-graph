@@ -285,20 +285,3 @@ def resolve_manifest_vectors(manifest: dict[str, Any], cache: VectorCache) -> di
         "misses": sum(item["misses"] for key, item in summary.items() if key != "total"),
     }
     return {"resolved": resolved, "missing": missing, "summary": summary}
-
-SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE = (
-    "seed_vector_cache_from_storage is retired after native zvec production cutover; "
-    "use the native vector cache or explicit embedding fill path instead of retired file-backend VDB JSON"
-)
-
-
-def seed_vector_cache_from_storage(
-    manifest: dict[str, Any],
-    storage_dir: Path,
-    cache: VectorCache,
-    *,
-    previous_manifest: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Fail closed before reading retired file-backend VDB JSON."""
-
-    raise RuntimeError(SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE)

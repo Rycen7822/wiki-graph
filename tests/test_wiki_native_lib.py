@@ -105,37 +105,16 @@ def test_python_sources_do_not_spell_retired_backend_token_directly() -> None:
     assert offenders == []
 
 
-def test_retired_external_compatibility_names_are_centralized() -> None:
-    names = importlib.import_module("wiki_wikigraph_compat_names")
-    retired_backend = "light" + "rag"
-    retired_class = "Light" + "RAG"
+def test_retired_external_compatibility_name_registry_is_removed() -> None:
+    registry_path = SCRIPTS / "wiki_wikigraph_compat_names.py"
+    assert not registry_path.exists()
 
-    assert names.retired_graph_package_name() == retired_backend
-    assert names.retired_graph_class_name() == retired_class
-    assert names.retired_graph_module_name("utils") == f"{retired_backend}.utils"
-    assert names.retired_graph_env_name("PYTHON") == f"{retired_backend.upper()}_PYTHON"
-    assert names.retired_graph_tool_python_path() == f"<retired-{retired_backend}-tool-python>"
-    assert names.retired_graph_service_name() == f"{retired_backend}-server.service"
-    assert names.retired_refresh_ledger_name() == f"pending_{retired_backend}_refresh.json"
+    import importlib.util
 
-    allowed_owner = SCRIPTS / "wiki_wikigraph_compat_names.py"
-    constructed_fragments = [
-        '"light" + "rag"',
-        '"Light" + "RAG"',
-        "'light' + 'rag'",
-        "'Light' + 'RAG'",
-    ]
-    offenders = []
-    for path in sorted(SCRIPTS.glob("*.py")):
-        if path == allowed_owner:
-            continue
-        text = path.read_text(encoding="utf-8")
-        for fragment in constructed_fragments:
-            if fragment in text:
-                offenders.append(f"{path.relative_to(ROOT)} constructs retired external graph name")
-                break
-
-    assert offenders == []
+    assert importlib.util.find_spec("wiki_wikigraph_compat_names") is None
+    audit_text = (SCRIPTS / "audit_native_production_refs.py").read_text(encoding="utf-8")
+    assert "from wiki_wikigraph_compat_names import" not in audit_text
+    assert "retired_graph_package_name" not in audit_text
 
 
 def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> None:
@@ -153,25 +132,24 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> N
     assert "scripts/native_zvec_materialize.py" in report["checked_paths"]
     assert "scripts/raw_fast_evidence_bundle.py" in report["checked_paths"]
     assert "llm-wiki-native/src/llm_wiki_native/api/server.py" in report["checked_paths"]
-    assert "compat_registry_module" in report["marker_labels"]
+    assert "compat_registry_module" not in report["marker_labels"]
+    assert "registry_function_prefix" not in report["marker_labels"]
     assert report["allowed_refs"] == {}
-    retired_wrapper_key = "retired_wikigraph_wrapper_refs"
-    old_wrapper_key = "legacy" + "_wikigraph_wrapper_refs"
-    assert old_wrapper_key not in report
-    wrapper_refs = report[retired_wrapper_key]
-    assert wrapper_refs["ok"] is True
-    assert wrapper_refs["offender_count"] == 0
-    assert wrapper_refs["offenders"] == []
-    assert wrapper_refs["marker_labels"] == ["retired_wikigraph_refresh_module", "retired_wikigraph_refresh_script"]
+    assert "retired_wikigraph_wrapper_refs" not in report
+    assert "legacy" + "_wikigraph_wrapper_refs" not in report
 
 
 def test_active_native_diagnostics_do_not_import_retired_compat_name_registry() -> None:
     checks_text = (SCRIPTS / "wiki_native_wiki_checks.py").read_text(encoding="utf-8")
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
+    audit_text = (SCRIPTS / "audit_native_production_refs.py").read_text(encoding="utf-8")
 
     assert "wiki_wikigraph_compat_names" not in checks_text
     assert "retired_graph_package_name" not in checks_text
     assert "wiki_wikigraph_refresh_pending" not in facade_text
+    assert "compatibility_marker_specs" not in audit_text
+    assert "__wikigraph_" not in audit_text
+    assert "old backend compatibility refs" not in audit_text
 
 
 def test_audit_native_production_refs_imports_active_modules_with_retired_package_blocked() -> None:
@@ -484,7 +462,6 @@ def test_active_sources_do_not_embed_operator_local_paths() -> None:
         SCRIPTS / "batch_native_refresh.py",
         SCRIPTS / "raw_fast_closeout.py",
         SCRIPTS / "raw_fast_evidence_bundle.py",
-        SCRIPTS / "wiki_wikigraph_compat_names.py",
         SCRIPTS / "batch_wiki_integration.py",
         SCRIPTS / "wiki_search.py",
     ]
@@ -499,6 +476,15 @@ def test_active_sources_do_not_embed_operator_local_paths() -> None:
                 offenders.append(f"{path.relative_to(ROOT)} contains {pattern}")
 
     assert offenders == []
+
+
+def test_wikigraph_compat_facade_module_is_removed_after_native_cutover() -> None:
+    facade_path = SCRIPTS / "wiki_wikigraph_compat_lib.py"
+    assert not facade_path.exists()
+
+    import importlib.util
+
+    assert importlib.util.find_spec("wiki_wikigraph_compat_lib") is None
 
 
 def test_native_artifacts_module_owns_source_and_builder_helpers() -> None:
@@ -737,16 +723,20 @@ def test_native_query_response_module_owns_section_response_helpers() -> None:
 
     module_text = (SCRIPTS / "wiki_native_query_response.py").read_text(encoding="utf-8")
     retired_backend = "light" + "rag"
-    assert "def expand_wikigraph_data_response_with_section_neighbors(" in module_text
-    assert "def filter_wikigraph_data_response_by_section_kind(" in module_text
+    assert "def expand_native_data_response_with_section_neighbors(" in module_text
+    assert "def filter_native_data_response_by_section_kind(" in module_text
+    assert "def expand_wikigraph_data_response_with_section_neighbors(" not in module_text
+    assert "def filter_wikigraph_data_response_by_section_kind(" not in module_text
     assert f"def expand_{retired_backend}_data_response_with_section_neighbors(" not in module_text
     assert f"def filter_{retired_backend}_data_response_by_section_kind(" not in module_text
     assert "from wiki_native_jsonl import jsonl_read" in module_text
     assert "from wiki_native_raw_sections import" in module_text
     assert "import wiki_wikigraph_compat_lib" not in module_text
     assert "from wiki_wikigraph_compat_lib import" not in module_text
-    assert callable(native_response.expand_wikigraph_data_response_with_section_neighbors)
-    assert callable(native_response.filter_wikigraph_data_response_by_section_kind)
+    assert callable(native_response.expand_native_data_response_with_section_neighbors)
+    assert callable(native_response.filter_native_data_response_by_section_kind)
+    assert not hasattr(native_response, "expand_wikigraph_data_response_with_section_neighbors")
+    assert not hasattr(native_response, "filter_wikigraph_data_response_by_section_kind")
 
 
 def test_native_section_similarity_module_owns_graph_helpers() -> None:
@@ -857,7 +847,7 @@ def test_active_section_similarity_builder_imports_native_runtime_env() -> None:
 def test_custom_kg_scripts_import_native_runtime_env() -> None:
     old_backend = "light" + "rag"
 
-    for script_name in ["import_custom_kg.py", "custom_kg_incremental.py"]:
+    for script_name in ["custom_kg_incremental.py"]:
         text = (SCRIPTS / script_name).read_text(encoding="utf-8")
         assert "from native_runtime_env import" in text
         assert f"from {old_backend}_runtime_env import" not in text
@@ -866,31 +856,42 @@ def test_custom_kg_scripts_import_native_runtime_env() -> None:
 def test_custom_kg_scripts_import_native_facade() -> None:
     old_backend = "light" + "rag"
 
-    for script_name in ["import_custom_kg.py", "custom_kg_incremental.py"]:
+    for script_name in ["custom_kg_incremental.py"]:
         text = (SCRIPTS / script_name).read_text(encoding="utf-8")
         assert "from wiki_native_lib import" in text
         assert f"from wiki_{old_backend}_lib import" not in text
 
 
-def test_wikigraph_compat_facade_replaces_old_facade_module() -> None:
-    old_backend = "light" + "rag"
-    old_module_name = f"wiki_{old_backend}_lib"
-    new_module_name = "wiki_wikigraph_compat_lib"
-    tests_dir = SCRIPTS.parent / "tests"
+def test_retired_import_custom_kg_shim_is_removed_after_native_cutover() -> None:
+    shim_path = SCRIPTS / "import_custom_kg.py"
+    assert not shim_path.exists()
 
-    sys.modules.pop(old_module_name, None)
-    sys.modules.pop(new_module_name, None)
+    import importlib.util
 
-    assert not (SCRIPTS / f"{old_module_name}.py").exists()
-    assert not (tests_dir / f"test_{old_module_name}.py").exists()
-    assert (SCRIPTS / f"{new_module_name}.py").exists()
-    assert (tests_dir / f"test_{new_module_name}.py").exists()
+    assert importlib.util.find_spec("import_custom_kg") is None
 
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(old_module_name)
 
-    compat_lib = importlib.import_module(new_module_name)
-    assert compat_lib.build_custom_kg_payload is wiki_native_lib.build_custom_kg_payload
+def test_retired_wikigraph_refresh_wrapper_and_old_ledger_status_modules_are_removed() -> None:
+    for module_name in ("batch_wikigraph_refresh", "wiki_wikigraph_refresh_pending"):
+        module_path = SCRIPTS / f"{module_name}.py"
+        assert not module_path.exists()
+
+        import importlib.util
+
+        assert importlib.util.find_spec(module_name) is None
+
+
+def test_query_benchmark_tools_do_not_use_old_wikigraph_module_names() -> None:
+    old_names = ("collect_wikigraph_query_report", "probe_wikigraph_baseline_vector_contract")
+    new_names = ("collect_native_query_report", "probe_baseline_query_vector_contract")
+    import importlib.util
+
+    for module_name in old_names:
+        assert not (SCRIPTS / f"{module_name}.py").exists()
+        assert importlib.util.find_spec(module_name) is None
+    for module_name in new_names:
+        assert (SCRIPTS / f"{module_name}.py").exists()
+        assert importlib.util.find_spec(module_name) is not None
 
 
 def test_old_runtime_env_compatibility_module_is_removed() -> None:

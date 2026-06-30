@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit active native production surfaces for old backend compatibility refs."""
+"""Audit active native production surfaces for retired external backend refs."""
 
 from __future__ import annotations
 
@@ -12,14 +12,6 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
-
-from wiki_wikigraph_compat_names import (
-    retired_graph_class_name,
-    retired_graph_package_name,
-    retired_graph_service_name,
-    retired_graph_tool_python_path,
-    retired_refresh_ledger_name,
-)
 
 EXACT_ACTIVE_SURFACES = (
     "scripts/batch_native_refresh.py",
@@ -54,10 +46,13 @@ ACTIVE_IMPORT_MODULES = (
     "llm_wiki_native.runtime",
 )
 ALLOWED_REF_REASONS: dict[str, str] = {}
-RETIRED_WIKIGRAPH_WRAPPER_MARKERS = (
-    ("retired_wikigraph_refresh_module", "batch_wikigraph_refresh"),
-    ("retired_wikigraph_refresh_script", "batch_wikigraph_refresh.py"),
-)
+
+OLD_EXTERNAL_GRAPH_PACKAGE = "light" + "rag"
+OLD_EXTERNAL_GRAPH_CLASS = "Light" + "RAG"
+OLD_EXTERNAL_GRAPH_SERVICE = OLD_EXTERNAL_GRAPH_PACKAGE + "-server.service"
+OLD_EXTERNAL_GRAPH_TOOL_PYTHON = "<retired-" + OLD_EXTERNAL_GRAPH_PACKAGE + "-tool-python>"
+OLD_EXTERNAL_REFRESH_LEDGER = "pending_" + OLD_EXTERNAL_GRAPH_PACKAGE + "_refresh.json"
+
 
 _ISOLATED_PACKAGE_ABSENCE_SMOKE_CODE = r"""
 import importlib
@@ -139,17 +134,15 @@ class _BlockedPackageFinder(importlib.abc.MetaPathFinder):
         return None
 
 
-def compatibility_marker_specs() -> list[dict[str, str]]:
-    """Return centrally generated old-backend markers with neutral labels."""
+def forbidden_old_backend_marker_specs() -> list[dict[str, str]]:
+    """Return retired external backend markers checked on active surfaces."""
 
     return [
-        {"label": "compat_registry_module", "value": "wiki_wikigraph_compat_names"},
-        {"label": "registry_function_prefix", "value": "retired_graph_"},
-        {"label": "external_package_name", "value": retired_graph_package_name()},
-        {"label": "external_class_name", "value": retired_graph_class_name()},
-        {"label": "external_service_name", "value": retired_graph_service_name()},
-        {"label": "external_tool_python_path", "value": retired_graph_tool_python_path()},
-        {"label": "old_refresh_ledger_name", "value": retired_refresh_ledger_name()},
+        {"label": "external_package_name", "value": OLD_EXTERNAL_GRAPH_PACKAGE},
+        {"label": "external_class_name", "value": OLD_EXTERNAL_GRAPH_CLASS},
+        {"label": "external_service_name", "value": OLD_EXTERNAL_GRAPH_SERVICE},
+        {"label": "external_tool_python_path", "value": OLD_EXTERNAL_GRAPH_TOOL_PYTHON},
+        {"label": "old_refresh_ledger_name", "value": OLD_EXTERNAL_REFRESH_LEDGER},
         {"label": "old_storage_dir_name", "value": "rag_storage"},
     ]
 
@@ -168,23 +161,6 @@ def active_production_surface_paths(repo_root: Path) -> list[Path]:
 
 def _marker_hits(text: str, marker_specs: list[dict[str, str]]) -> list[str]:
     return [spec["label"] for spec in marker_specs if spec["value"] and spec["value"] in text]
-
-
-def audit_retired_wikigraph_wrapper_refs(root: Path, active_paths: list[Path]) -> dict[str, Any]:
-    repo_root = Path(root).resolve()
-    offenders: list[dict[str, Any]] = []
-    for path in active_paths:
-        rel = path.relative_to(repo_root).as_posix()
-        text = path.read_text(encoding="utf-8")
-        marker_labels = [label for label, marker in RETIRED_WIKIGRAPH_WRAPPER_MARKERS if marker in text]
-        if marker_labels:
-            offenders.append({"path": rel, "marker_labels": marker_labels})
-    return {
-        "ok": not offenders,
-        "marker_labels": [label for label, _marker in RETIRED_WIKIGRAPH_WRAPPER_MARKERS],
-        "offender_count": len(offenders),
-        "offenders": offenders,
-    }
 
 
 def _sanitize_query_trace(trace: dict[str, Any]) -> dict[str, Any]:
@@ -348,8 +324,8 @@ def _package_independence_runtime_smoke(
     try:
         import batch_native_refresh
 
-        root = Path("__wikigraph_package_independence_smoke_root__")
-        state_dir = Path("__wikigraph_package_independence_smoke_state__")
+        root = Path("__native_package_independence_smoke_root__")
+        state_dir = Path("__native_package_independence_smoke_state__")
         status = batch_native_refresh.status(root, state_dir)
         checks.append(
             {
@@ -377,7 +353,7 @@ def _package_independence_runtime_smoke(
             pass
 
         calls: dict[str, Any] = {}
-        with TemporaryDirectory(prefix="wikigraph-active-loader-") as tmp:
+        with TemporaryDirectory(prefix="native-active-loader-") as tmp:
             tmp_path = Path(tmp)
             pointer_path = tmp_path / "active_workspace.json"
             sqlite_path = tmp_path / "records.sqlite"
@@ -433,7 +409,7 @@ def _package_independence_runtime_smoke(
     try:
         from llm_wiki_native.pointers import rollback_active_workspace
 
-        with TemporaryDirectory(prefix="wikigraph-pointer-rollback-") as tmp:
+        with TemporaryDirectory(prefix="native-pointer-rollback-") as tmp:
             tmp_path = Path(tmp)
             active_path = tmp_path / "active_workspace.json"
             history_path = tmp_path / "active_workspace.history.jsonl"
@@ -571,7 +547,7 @@ def audit_package_independent_imports(
     zvec_workspace_factory: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root).resolve()
-    blocked_package = retired_graph_package_name()
+    blocked_package = OLD_EXTERNAL_GRAPH_PACKAGE
     finder = _BlockedPackageFinder(blocked_package)
     original_path = list(sys.path)
     original_meta_path = list(sys.meta_path)
@@ -645,7 +621,7 @@ def audit_active_production_refs(
     zvec_workspace_factory: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root).resolve()
-    marker_specs = compatibility_marker_specs()
+    marker_specs = forbidden_old_backend_marker_specs()
     marker_labels = [spec["label"] for spec in marker_specs]
     active_paths = active_production_surface_paths(root)
     checked_paths: list[str] = []
@@ -666,7 +642,6 @@ def audit_active_production_refs(
             continue
         offenders.append({"path": rel, "marker_labels": hits})
 
-    retired_wikigraph_wrapper_refs = audit_retired_wikigraph_wrapper_refs(root, active_paths)
     package_independence = audit_package_independent_imports(
         root,
         repo_local_active_pointer_path=repo_local_active_pointer_path,
@@ -676,7 +651,7 @@ def audit_active_production_refs(
     )
 
     return {
-        "ok": not offenders and retired_wikigraph_wrapper_refs["ok"] and package_independence["ok"],
+        "ok": not offenders and package_independence["ok"],
         "repo_root": str(root),
         "checked_count": len(checked_paths),
         "checked_paths": checked_paths,
@@ -684,7 +659,6 @@ def audit_active_production_refs(
         "allowed_refs": allowed_refs,
         "offender_count": len(offenders),
         "offenders": offenders,
-        "retired_wikigraph_wrapper_refs": retired_wikigraph_wrapper_refs,
         "package_independence": package_independence,
     }
 

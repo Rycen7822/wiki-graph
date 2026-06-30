@@ -7,8 +7,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from vector_cache import VectorCache, resolve_manifest_vectors, seed_vector_cache_from_storage  # noqa: E402
-
+from vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
 
 
 def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
@@ -29,6 +28,15 @@ def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
     assert cached["record_type"] == "entity"
     assert cached["record_id"] == "doc:a"
     assert cached["vector"] == pytest.approx([1.0, 2.0, 3.0])
+
+
+def test_vector_cache_has_no_retired_storage_seed_api() -> None:
+    import vector_cache
+
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "vector_cache.py").read_text(encoding="utf-8")
+    assert not hasattr(vector_cache, "seed_vector_cache_from_storage")
+    assert "def seed_vector_cache_from_storage(" not in source
+    assert "SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE" not in source
 
 
 def test_vector_cache_misses_on_embedding_contract_mismatch(tmp_path) -> None:
@@ -169,15 +177,3 @@ def test_manifest_vector_resolver_uses_bulk_cache_lookup(tmp_path, monkeypatch) 
 
     assert result["summary"]["total"] == {"total": 12, "hits": 12, "misses": 0}
     assert result["resolved"]["chunks"]["chunk-07"]["vector"] == pytest.approx([7.0, 8.0])
-
-
-def test_seed_vector_cache_from_storage_is_retired_without_reading_storage(tmp_path) -> None:
-    storage_dir = tmp_path / "old_storage"
-    storage_dir.mkdir()
-    (storage_dir / "vdb_chunks.json").write_text("not json", encoding="utf-8")
-    cache = VectorCache(tmp_path / "cache.sqlite")
-
-    with pytest.raises(RuntimeError, match="retired"):
-        seed_vector_cache_from_storage({"chunks": {}, "entities": {}, "relationships": {}}, storage_dir, cache)
-
-    assert resolve_manifest_vectors({"chunks": {}, "entities": {}, "relationships": {}}, cache)["summary"]["total"] == {"total": 0, "hits": 0, "misses": 0}

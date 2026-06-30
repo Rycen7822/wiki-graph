@@ -10,7 +10,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import audit_native_performance_comparison  # noqa: E402
-import collect_wikigraph_query_report  # noqa: E402
+import collect_native_query_report  # noqa: E402
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -1303,7 +1303,7 @@ def test_performance_comparison_reports_recall_and_threshold_blockers(tmp_path, 
     assert any(blocker.startswith("refresh seconds") for blocker in payload["blockers"])
 
 
-def test_wikigraph_query_report_collector_posts_suite_rows_and_records_latency(tmp_path) -> None:
+def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _write_jsonl(
         query_suite,
@@ -1345,7 +1345,7 @@ def test_wikigraph_query_report_collector_posts_suite_rows_and_records_latency(t
         calls.append({"url": url, "payload": payload, "timeout": timeout})
         return responses[len(calls) - 1]
 
-    report = collect_wikigraph_query_report.collect_query_report(
+    report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         workspace_id="native-test",
@@ -1383,7 +1383,7 @@ def test_wikigraph_query_report_collector_posts_suite_rows_and_records_latency(t
     assert calls[1]["payload"]["mode"] == "naive"
 
 
-def test_wikigraph_query_report_collector_marks_endpoint_embedding_timing_when_vector_is_missing(tmp_path) -> None:
+def test_native_query_report_collector_marks_endpoint_embedding_timing_when_vector_is_missing(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _write_jsonl(
         query_suite,
@@ -1404,7 +1404,7 @@ def test_wikigraph_query_report_collector_marks_endpoint_embedding_timing_when_v
     def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
         return {"source_paths": ["a.md"]}
 
-    report = collect_wikigraph_query_report.collect_query_report(
+    report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         post_json=fake_post,
@@ -1414,7 +1414,7 @@ def test_wikigraph_query_report_collector_marks_endpoint_embedding_timing_when_v
     assert report["timing_scope"] == "endpoint_includes_embedding"
 
 
-def test_wikigraph_query_report_collector_allows_baseline_measurement_role(tmp_path) -> None:
+def test_native_query_report_collector_allows_baseline_measurement_role(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _query_suite(query_suite)
     responses = [
@@ -1428,7 +1428,7 @@ def test_wikigraph_query_report_collector_allows_baseline_measurement_role(tmp_p
     def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
         return responses.pop(0)
 
-    report = collect_wikigraph_query_report.collect_query_report(
+    report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         measurement_role="baseline_query",
@@ -1440,7 +1440,7 @@ def test_wikigraph_query_report_collector_allows_baseline_measurement_role(tmp_p
     assert report["timing_scope"] == "data_only"
 
 
-def test_wikigraph_query_report_collector_output_feeds_performance_auditor(tmp_path) -> None:
+def test_native_query_report_collector_output_feeds_performance_auditor(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _query_suite(query_suite)
     responses = [
@@ -1455,7 +1455,7 @@ def test_wikigraph_query_report_collector_output_feeds_performance_auditor(tmp_p
     def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
         return responses.pop(0)
 
-    native_report = collect_wikigraph_query_report.collect_query_report(
+    native_report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         post_json=fake_post,
@@ -1638,7 +1638,7 @@ def test_performance_comparison_blocks_data_only_reports_when_query_suite_lacks_
     assert "query suite explicit query_vector coverage 0/3 is required for data_only timing" in audit["blockers"]
 
 
-def test_wikigraph_query_report_collector_records_repeated_samples_without_duplicate_results(tmp_path) -> None:
+def test_native_query_report_collector_records_repeated_samples_without_duplicate_results(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _write_jsonl(
         query_suite,
@@ -1668,7 +1668,7 @@ def test_wikigraph_query_report_collector_records_repeated_samples_without_dupli
         calls.append({"url": url, "payload": payload, "timeout": timeout})
         return responses[len(calls) - 1]
 
-    report = collect_wikigraph_query_report.collect_query_report(
+    report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         workspace_id="native-test",
@@ -1691,7 +1691,7 @@ def test_wikigraph_query_report_collector_records_repeated_samples_without_dupli
     assert report["results"][0]["response"]["source_paths"] == ["a.md"]
 
 
-def test_wikigraph_query_report_collector_requires_non_empty_query_vectors_for_data_only_scope(tmp_path) -> None:
+def test_native_query_report_collector_requires_non_empty_query_vectors_for_data_only_scope(tmp_path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
     _write_jsonl(
         query_suite,
@@ -1713,7 +1713,7 @@ def test_wikigraph_query_report_collector_requires_non_empty_query_vectors_for_d
     def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
         return {"source_paths": ["a.md"]}
 
-    report = collect_wikigraph_query_report.collect_query_report(
+    report = collect_native_query_report.collect_query_report(
         query_suite_path=query_suite,
         server="http://127.0.0.1:19637",
         post_json=fake_post,

@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import probe_wikigraph_baseline_vector_contract  # noqa: E402
+import probe_baseline_query_vector_contract  # noqa: E402
 
 
 def _openapi_schema(*, query_vector: bool) -> dict:
@@ -49,7 +49,7 @@ def test_probe_fails_closed_when_query_data_schema_lacks_query_vector(tmp_path: 
     schema_path = tmp_path / "openapi.json"
     schema_path.write_text(json.dumps(_openapi_schema(query_vector=False)), encoding="utf-8")
 
-    result = probe_wikigraph_baseline_vector_contract.main(
+    result = probe_baseline_query_vector_contract.main(
         ["--openapi-json", str(schema_path), "--endpoint", "/query/data"]
     )
     payload = json.loads(capsys.readouterr().out)
@@ -66,7 +66,7 @@ def test_probe_accepts_query_data_schema_with_query_vector(tmp_path: Path, capsy
     schema_path = tmp_path / "openapi.json"
     schema_path.write_text(json.dumps(_openapi_schema(query_vector=True)), encoding="utf-8")
 
-    result = probe_wikigraph_baseline_vector_contract.main(
+    result = probe_baseline_query_vector_contract.main(
         ["--openapi-json", str(schema_path), "--endpoint", "/query/data"]
     )
     payload = json.loads(capsys.readouterr().out)

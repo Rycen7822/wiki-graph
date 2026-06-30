@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe whether a baseline wikigraph endpoint declares explicit vector input."""
+"""Probe whether a baseline query endpoint declares explicit vector input."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Probe baseline wikigraph explicit-vector request contract")
+    parser = argparse.ArgumentParser(description="Probe baseline query explicit-vector request contract")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--server", help="Baseline server base URL; /openapi.json is fetched from this URL")
     source.add_argument("--openapi-json", type=Path, help="Saved OpenAPI JSON file")
