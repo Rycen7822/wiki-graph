@@ -6,22 +6,8 @@ from pathlib import Path
 import pytest
 
 from llm_wiki_native import runtime
-from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
-
-
-def _record(workspace_id: str, record_id: str = "doc:a") -> NativeRecord:
-    return NativeRecord(
-        workspace_id=workspace_id,
-        record_type="entity",
-        record_id=record_id,
-        vector_text="Alpha",
-        content_hash=f"{record_id}:content",
-        metadata_hash=f"{record_id}:metadata",
-        vector_hash=f"{record_id}:vector",
-        source_path="alpha.md",
-        source_id=record_id,
-        payload={"title": "Alpha"},
-    )
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+from support import native_record
 
 
 def test_load_engine_from_workspace_pointer_uses_read_only_zvec_factory_for_active_default(tmp_path) -> None:
@@ -79,7 +65,7 @@ def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_p
     zvec_path = tmp_path / "zvec_records"
     db = SQLiteWorkspace(sqlite_path)
     db.create_workspace("native-active", "manifest-hash")
-    db.put_record(_record("native-active", "doc:a"))
+    db.put_record(native_record("native-active", "entity", "doc:a", "Alpha", source_path="alpha.md"))
     db.put_vector("native-active", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.mark_audited("native-active", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
     pointer_path.write_text(

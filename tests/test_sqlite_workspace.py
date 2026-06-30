@@ -1,14 +1,12 @@
 import pytest
 
-from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+from support import native_record
 
 
-def _record(workspace_id: str, record_type: str = "chunk", record_id: str = "chunk-a") -> NativeRecord:
-    return NativeRecord(
-        workspace_id=workspace_id,
-        record_type=record_type,
-        record_id=record_id,
-        vector_text="Doc A",
+def _workspace_record(workspace_id: str):
+    return native_record(
+        workspace_id,
         content_hash="content-hash",
         metadata_hash="metadata-hash",
         vector_hash="vector-hash",
@@ -29,7 +27,7 @@ def test_create_workspace_initializes_schema_and_status(tmp_path) -> None:
 def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test"))
+    db.put_record(_workspace_record("native-test"))
 
     audit = db.audit_counts("native-test", {"chunks": 2, "entities": 0, "relationships": 0, "sections": 0})
 
@@ -41,7 +39,7 @@ def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
 def test_workspace_no_longer_exposes_serving_activation_state(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test"))
+    db.put_record(_workspace_record("native-test"))
     db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})
 
     assert db.get_workspace_status("native-test") == "audited"
@@ -54,4 +52,4 @@ def test_workspace_operations_reject_unknown_workspace(tmp_path) -> None:
     with pytest.raises(KeyError, match="missing-workspace"):
         db.audit_counts("missing-workspace", {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0})
     with pytest.raises(KeyError, match="missing-workspace"):
-        db.put_record(_record("missing-workspace"))
+        db.put_record(_workspace_record("missing-workspace"))

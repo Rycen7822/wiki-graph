@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-
-import httpx
 import pytest
 
 from llm_wiki_native.api.server import _answer_response_payload, create_app
+from support import request_asgi as _request
 
 
 class FakeAnswerGenerator:
@@ -23,16 +21,6 @@ def _context() -> dict:
         "source_paths": ["alpha.md"],
         "trace": {"mode": "mix", "context_block_count": 1},
     }
-
-
-async def _request_async(app, method: str, path: str, **kwargs) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
-
-
-def _request(app, method: str, path: str, **kwargs) -> httpx.Response:
-    return asyncio.run(_request_async(app, method, path, **kwargs))
 
 
 def test_answer_response_payload_uses_answer_generator_context() -> None:

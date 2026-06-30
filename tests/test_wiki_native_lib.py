@@ -114,6 +114,37 @@ def test_retired_external_compatibility_name_registry_is_removed() -> None:
     assert "retired_graph_package_name" not in audit_text
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    (
+        "wiki_wikigraph_compat_lib",
+        "import_custom_kg",
+        "batch_wikigraph_refresh",
+        "wiki_wikigraph_refresh_pending",
+        "collect_wikigraph_query_report",
+        "probe_wikigraph_baseline_vector_contract",
+        "probe_baseline_query_vector_contract",
+        "audit_native_performance_comparison",
+        ("light" + "rag_runtime_env"),
+        ("wiki_" + "light" + "rag" + "_validation"),
+        ("light" + "rag_sync"),
+        "sync_virtual_docs",
+        "build_evidence_pack",
+    ),
+)
+def test_retired_top_level_script_entrypoints_are_absent(module_name: str) -> None:
+    import importlib.util
+
+    sys.modules.pop(module_name, None)
+    assert not (SCRIPTS / f"{module_name}.py").exists()
+    assert importlib.util.find_spec(module_name) is None
+
+
+def test_native_query_report_entrypoint_remains_available() -> None:
+    assert (SCRIPTS / "collect_native_query_report.py").exists()
+    assert importlib.util.find_spec("ops.collect_native_query_report") is not None
+
+
 def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> None:
     audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 
@@ -477,13 +508,6 @@ def test_active_sources_do_not_embed_operator_local_paths() -> None:
     assert offenders == []
 
 
-def test_wikigraph_compat_facade_module_is_removed_after_native_cutover() -> None:
-    facade_path = SCRIPTS / "wiki_wikigraph_compat_lib.py"
-    assert not facade_path.exists()
-
-    import importlib.util
-
-    assert importlib.util.find_spec("wiki_wikigraph_compat_lib") is None
 
 
 def test_native_artifacts_module_owns_source_and_builder_helpers() -> None:
@@ -872,51 +896,12 @@ def test_custom_kg_scripts_import_native_facade() -> None:
         assert f"from wiki_{old_backend}_lib import" not in text
 
 
-def test_retired_import_custom_kg_shim_is_removed_after_native_cutover() -> None:
-    shim_path = SCRIPTS / "import_custom_kg.py"
-    assert not shim_path.exists()
-
-    import importlib.util
-
-    assert importlib.util.find_spec("import_custom_kg") is None
 
 
-def test_retired_wikigraph_refresh_wrapper_and_old_ledger_status_modules_are_removed() -> None:
-    for module_name in ("batch_wikigraph_refresh", "wiki_wikigraph_refresh_pending"):
-        module_path = SCRIPTS / f"{module_name}.py"
-        assert not module_path.exists()
-
-        import importlib.util
-
-        assert importlib.util.find_spec(module_name) is None
 
 
-def test_retired_baseline_and_shadow_query_tools_are_removed_after_native_cutover() -> None:
-    removed_modules = (
-        "collect_wikigraph_query_report",
-        "probe_wikigraph_baseline_vector_contract",
-        "probe_baseline_query_vector_contract",
-        "audit_native_performance_comparison",
-    )
-    import importlib.util
-
-    for module_name in removed_modules:
-        assert not (SCRIPTS / f"{module_name}.py").exists()
-        assert importlib.util.find_spec(module_name) is None
-
-    assert (SCRIPTS / "collect_native_query_report.py").exists()
-    assert importlib.util.find_spec("ops.collect_native_query_report") is not None
 
 
-def test_old_runtime_env_compatibility_module_is_removed() -> None:
-    old_backend = "light" + "rag"
-    module_name = f"{old_backend}_runtime_env"
-
-    sys.modules.pop(module_name, None)
-
-    assert not (SCRIPTS / f"{module_name}.py").exists()
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(module_name)
 
 
 def test_native_validation_module_owns_validation_implementation() -> None:
@@ -933,15 +918,6 @@ def test_native_validation_module_owns_validation_implementation() -> None:
     assert "import wiki_wikigraph_compat_lib" not in text
 
 
-def test_old_validation_compatibility_module_is_removed() -> None:
-    old_backend = "light" + "rag"
-    module_name = f"wiki_{old_backend}_validation"
-
-    sys.modules.pop(module_name, None)
-
-    assert not (SCRIPTS / f"{module_name}.py").exists()
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(module_name)
 
 
 def test_native_facade_imports_validation_from_native_owner() -> None:
@@ -952,23 +928,8 @@ def test_native_facade_imports_validation_from_native_owner() -> None:
     assert f"from wiki_{old_backend}_validation import" not in text
 
 
-def test_retired_document_sync_entrypoints_are_removed_after_native_cutover() -> None:
-    import importlib.util
-
-    assert not (SCRIPTS / ("light" + "rag_sync.py")).exists()
-    assert not (SCRIPTS / "sync_virtual_docs.py").exists()
-    assert importlib.util.find_spec("sync_virtual_docs") is None
-
-    audit_text = (SCRIPTS / "audit_native_production_refs.py").read_text(encoding="utf-8")
-    assert "sync_virtual_docs" not in audit_text
-    assert "/documents/texts" not in audit_text
 
 
-def test_deprecated_build_evidence_pack_alias_is_removed_after_query_cli_cutover() -> None:
-    import importlib.util
-
-    assert not (SCRIPTS / "build_evidence_pack.py").exists()
-    assert importlib.util.find_spec("build_evidence_pack") is None
 
 
 def test_clear_success_native_surface_has_no_legacy_backend_aliases() -> None:

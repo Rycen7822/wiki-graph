@@ -1,21 +1,7 @@
 import pytest
 
-from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
-
-
-def _record(workspace_id: str, record_id: str, text: str) -> NativeRecord:
-    return NativeRecord(
-        workspace_id=workspace_id,
-        record_type="entity",
-        record_id=record_id,
-        vector_text=text,
-        content_hash=f"{record_id}:content",
-        metadata_hash=f"{record_id}:metadata",
-        vector_hash=f"{record_id}:vector",
-        source_path=f"{record_id}.md",
-        source_id=record_id,
-        payload={"entity_name": record_id},
-    )
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+from support import native_record
 
 
 def test_sqlite_workspace_no_longer_exposes_nearest_vector_retrieval() -> None:
@@ -25,8 +11,8 @@ def test_sqlite_workspace_no_longer_exposes_nearest_vector_retrieval() -> None:
 def test_vector_coverage_audit_reports_records_without_vectors(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test", "doc:a", "Alpha"))
-    db.put_record(_record("native-test", "doc:b", "Beta"))
+    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha", payload={"entity_name": "doc:a"}))
+    db.put_record(native_record("native-test", "entity", "doc:b", "Beta", payload={"entity_name": "doc:b"}))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
 
     audit = db.audit_vector_coverage("native-test")
@@ -41,7 +27,7 @@ def test_vector_coverage_audit_reports_records_without_vectors(tmp_path) -> None
 def test_vector_insert_rejects_hash_mismatch(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test", "doc:a", "Alpha"))
+    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha", payload={"entity_name": "doc:a"}))
 
     with pytest.raises(ValueError, match="vector_hash"):
         db.put_vector("native-test", "entity", "doc:a", "wrong-vector-hash", [1.0, 0.0])

@@ -1,27 +1,10 @@
-import asyncio
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from llm_wiki_native.api.server import create_app
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine
-from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
-
-
-def _record(workspace_id: str, record_id: str) -> NativeRecord:
-    return NativeRecord(
-        workspace_id=workspace_id,
-        record_type="entity",
-        record_id=record_id,
-        vector_text="Alpha",
-        content_hash=f"{record_id}:content",
-        metadata_hash=f"{record_id}:metadata",
-        vector_hash=f"{record_id}:vector",
-        source_path="alpha.md",
-        source_id=record_id,
-        payload={"title": "Alpha"},
-    )
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+from support import native_record, patch_direct_threadpool, request_asgi as _request
 
 
 def _app(tmp_path):
@@ -39,27 +22,10 @@ def _app(tmp_path):
 
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test", "doc:a"))
+    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha", source_path="alpha.md"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.mark_audited("native-test", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
     return create_app(NativeQueryEngine(db, zvec_workspace=ZvecWorkspace()))
-
-
-async def _request_async(app, method: str, path: str, *, raise_app_exceptions: bool = True, **kwargs: Any) -> httpx.Response:
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_app_exceptions)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, **kwargs)
-
-
-def _request(app, method: str, path: str, *, raise_app_exceptions: bool = True, **kwargs: Any) -> httpx.Response:
-    return asyncio.run(_request_async(app, method, path, raise_app_exceptions=raise_app_exceptions, **kwargs))
-
-
-def _use_direct_threadpool(monkeypatch) -> None:
-    async def direct_threadpool(func, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr("llm_wiki_native.api.server.run_in_threadpool", direct_threadpool)
 
 
 def test_native_api_no_longer_exposes_trace_route(tmp_path) -> None:
@@ -92,7 +58,7 @@ def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:
 
 
 def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None:
-    _use_direct_threadpool(monkeypatch)
+    patch_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {
         "workspace_id": "native-test",
@@ -112,7 +78,7 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
 
 
 def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monkeypatch) -> None:
-    _use_direct_threadpool(monkeypatch)
+    patch_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {
         "workspace_id": "native-test",
@@ -129,7 +95,7 @@ def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monke
 
 
 def test_native_api_rejects_old_graph_mode_as_unsupported(tmp_path, monkeypatch) -> None:
-    _use_direct_threadpool(monkeypatch)
+    patch_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "mode": "local"}
 
@@ -140,7 +106,7 @@ def test_native_api_rejects_old_graph_mode_as_unsupported(tmp_path, monkeypatch)
 
 
 def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch) -> None:
-    _use_direct_threadpool(monkeypatch)
+    patch_direct_threadpool(monkeypatch)
     monkeypatch.setenv("LLM_WIKI_NATIVE_API_KEY", "secret-token")
     app = _app(tmp_path)
     payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "top_k": 1}
@@ -151,7 +117,7 @@ def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch)
 
 
 def test_native_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> None:
-    _use_direct_threadpool(monkeypatch)
+    patch_direct_threadpool(monkeypatch)
     calls = []
 
     class FakeEngine:

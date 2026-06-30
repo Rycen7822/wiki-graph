@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sys
 from pathlib import Path
 
 import pytest
+
+from support import write_jsonl
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / "ops"
@@ -15,17 +16,12 @@ sys.path.insert(0, str(ROOT))
 from ops import collect_native_query_report  # noqa: E402
 
 
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-
-
 def _query_suite_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _query_suite(path: Path) -> None:
-    _write_jsonl(
+    write_jsonl(
         path,
         [
             {
@@ -54,7 +50,7 @@ def _query_suite(path: Path) -> None:
 
 def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_path: Path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
-    _write_jsonl(
+    write_jsonl(
         query_suite,
         [
             {
@@ -132,7 +128,7 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
 
 def test_native_query_report_collector_marks_endpoint_embedding_timing_when_vector_is_missing(tmp_path: Path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
-    _write_jsonl(
+    write_jsonl(
         query_suite,
         [
             {
@@ -181,7 +177,7 @@ def test_native_query_report_cli_rejects_retired_baseline_measurement_role(tmp_p
 
 def test_native_query_report_collector_records_repeated_samples_without_duplicate_results(tmp_path: Path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
-    _write_jsonl(
+    write_jsonl(
         query_suite,
         [
             {
@@ -232,7 +228,7 @@ def test_native_query_report_collector_records_repeated_samples_without_duplicat
 
 def test_native_query_report_collector_requires_non_empty_query_vectors_for_data_only_scope(tmp_path: Path) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
-    _write_jsonl(
+    write_jsonl(
         query_suite,
         [
             {

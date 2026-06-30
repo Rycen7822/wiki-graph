@@ -1,22 +1,8 @@
 import pytest
 
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine, _record_identity_from_hit
-from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
-
-
-def _record(workspace_id: str, record_type: str, record_id: str, text: str) -> NativeRecord:
-    return NativeRecord(
-        workspace_id=workspace_id,
-        record_type=record_type,
-        record_id=record_id,
-        vector_text=text,
-        content_hash=f"{record_id}:content",
-        metadata_hash=f"{record_id}:metadata",
-        vector_hash=f"{record_id}:vector",
-        source_path=f"{record_id}.md",
-        source_id=record_id,
-        payload={"title": text},
-    )
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
+from support import native_record
 
 
 class _ZvecHit:
@@ -50,8 +36,8 @@ def test_query_engine_requires_zvec_workspace(tmp_path) -> None:
 def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test", "entity", "doc:a", "Alpha"))
-    db.put_record(_record("native-test", "entity", "doc:b", "Beta"))
+    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha"))
+    db.put_record(native_record("native-test", "entity", "doc:b", "Beta"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.put_vector("native-test", "entity", "doc:b", "doc:b:vector", [0.0, 1.0])
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.8, {"kind": "related"})
@@ -204,7 +190,7 @@ def test_query_engine_routes_section_kind_as_numeric_zvec_filter() -> None:
 def test_data_only_query_engine_rejects_building_workspace(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     db.create_workspace("native-test", "manifest-hash")
-    db.put_record(_record("native-test", "entity", "doc:a", "Alpha"))
+    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 

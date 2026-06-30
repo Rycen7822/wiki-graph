@@ -5,11 +5,7 @@ import json
 import pytest
 
 from llm_wiki_native.pointers import finalize_prepared_workspace, rollback_active_workspace
-
-
-def _write_json(path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+from support import write_json, write_jsonl
 
 
 def test_finalize_prepared_workspace_updates_active_pointer_and_history(tmp_path) -> None:
@@ -30,8 +26,8 @@ def test_finalize_prepared_workspace_updates_active_pointer_and_history(tmp_path
         "sqlite_path": "/tmp/old.sqlite",
         "zvec_path": "/tmp/old.zvec",
     }
-    _write_json(prepared_path, prepared)
-    _write_json(active_path, previous)
+    write_json(prepared_path, prepared)
+    write_json(active_path, previous)
 
     active = finalize_prepared_workspace(
         prepared_path,
@@ -61,18 +57,17 @@ def test_rollback_active_workspace_restores_previous_pointer(tmp_path) -> None:
     history_path = tmp_path / "active_workspace.history.jsonl"
     previous = {"schema_version": 1, "workspace_id": "old-workspace", "status": "active"}
     current = {"schema_version": 1, "workspace_id": "new-workspace", "status": "active"}
-    _write_json(active_path, current)
-    history_path.write_text(
-        json.dumps(
+    write_json(active_path, current)
+    write_jsonl(
+        history_path,
+        [
             {
                 "previous": previous,
                 "current": current,
                 "reason": "shadow gate passed",
                 "finalized_at": "2026-06-28T12:00:00Z",
             }
-        )
-        + "\n",
-        encoding="utf-8",
+        ],
     )
 
     restored = rollback_active_workspace(active_path, history_path)
