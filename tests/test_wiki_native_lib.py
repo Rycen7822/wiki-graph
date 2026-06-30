@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import batch_native_refresh  # noqa: E402
 import wiki_native_lib  # noqa: E402
+import wiki_native_wiki_integration_pending  # noqa: E402
 
 PURE_NATIVE_FACADE_SCRIPTS = [
     "audit_raw_note_sections.py",
@@ -965,6 +966,33 @@ def test_clear_success_native_surface_has_no_legacy_backend_aliases() -> None:
     assert "--no-mark-native-pending" in text
     assert f"--no-mark-{old_backend}-pending" not in text
     assert f"mark_{old_backend}_pending=" not in text
+
+
+def test_low_level_wiki_integration_clear_has_no_graph_pending_hook() -> None:
+    signature = inspect.signature(wiki_native_wiki_integration_pending.clear_pending_wiki_integration_after_success)
+
+    assert "mark_graph_pending" not in signature.parameters
+
+
+def test_low_level_wiki_integration_clear_result_has_no_graph_pending_fields(tmp_path) -> None:
+    root = tmp_path / "wiki"
+    state_dir = tmp_path / "state"
+    root.mkdir()
+    wiki_native_wiki_integration_pending.mark_pending_wiki_integration(
+        state_dir,
+        root,
+        raw_path="raw/clip/26010101_Test.md",
+        title="Test",
+    )
+
+    result = wiki_native_wiki_integration_pending.clear_pending_wiki_integration_after_success(
+        root,
+        state_dir,
+        reason="unit",
+    )
+
+    assert "marked_graph_pending" not in result
+    assert "marked_graph_pending_count" not in result
 
 
 def test_clear_success_marks_native_refresh_not_legacy_backend_refresh(tmp_path) -> None:

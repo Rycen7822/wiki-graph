@@ -238,13 +238,6 @@ def create_app(
         )
         return JSONResponse(answer_payload)
 
-    async def query_trace(request: Request) -> JSONResponse:
-        if not _authorized(request, api_key):
-            return unauthorized()
-        payload = await _json_payload(request)
-        result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
-        return JSONResponse({"trace": result["trace"]})
-
     async def value_error(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -262,7 +255,6 @@ def create_app(
             Route("/health", health, methods=["GET"]),
             Route("/query", query, methods=["POST"]),
             Route("/query/data", query_data, methods=["POST"]),
-            Route("/native/query/trace", query_trace, methods=["POST"]),
         ],
         exception_handlers={RequestEntityTooLarge: request_too_large, NotImplementedError: not_implemented, ValueError: value_error, KeyError: key_error},
     )

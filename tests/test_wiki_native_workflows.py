@@ -2029,41 +2029,57 @@ def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_imag
     assert digest["metadata_card"]["title"] == "API Grounded Paper Title"
 
 
-def test_raw_fast_evidence_bundle_resource_boundary_draft_distinguishes_absence_failure_and_unrelated_hits() -> None:
+def test_raw_fast_evidence_bundle_probe_choices_are_current_only() -> None:
+    source = (SCRIPTS / "raw_fast_evidence_bundle.py").read_text(encoding="utf-8")
+    help_result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "raw_fast_evidence_bundle.py"), "--help"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert 'choices=["github", "hf", "project", "arxiv", "doi", "none"]' not in source
+    assert "{arxiv,doi,none}" in help_result.stdout
+    assert "GitHub/HF/project probes" not in help_result.stdout
+
+
+def test_raw_fast_evidence_bundle_has_no_retired_deep_probe_helpers() -> None:
+    source = (SCRIPTS / "raw_fast_evidence_bundle.py").read_text(encoding="utf-8")
+
+    for retired in [
+        "def probe_github_repo",
+        "def probe_hf_search",
+        '"verified_absent"',
+        '"candidates_unverified"',
+    ]:
+        assert retired not in source
+
+
+def test_raw_fast_evidence_bundle_resource_boundary_defaults_to_not_checked_without_exact_link_report() -> None:
     import raw_fast_evidence_bundle
 
     resource_probe = {
         "ok": True,
         "probes": [
-            {
-                "ok": True,
-                "type": "github_repo",
-                "repo": "example/sidecar-paper",
-                "html_url": "https://github.com/example/sidecar-paper",
-                "private": False,
-                "fork": False,
-                "archived": False,
-                "license": "MIT",
-                "default_branch": "main",
-                "evidence": {"root_files": ["README.md", "src"], "readme_excerpt": "Fixture repo README", "commit": "abc123"},
-            },
-            {"ok": True, "type": "hf_models", "query": "Fixture Sidecar Paper", "count": 0, "items": []},
-            {"ok": False, "type": "hf_datasets", "query": "Fixture Sidecar Paper", "error": "TimeoutExpired", "message": "timed out"},
-            {"ok": True, "type": "hf_spaces", "query": "q0", "count": 1, "items": [{"id": "unrelated/q0-demo", "likes": 1}]},
+            {"ok": True, "type": "doi", "doi": "10.1234/example.paper", "status": "detected", "url": "https://doi.org/10.1234/example.paper"},
+            {"ok": True, "type": "arxiv", "id": "2604.08999", "status": "detected", "url": "https://arxiv.org/abs/2604.08999"},
+            {"ok": True, "type": "github_repo", "repo": "example/ignored"},
+            {"ok": True, "type": "hf_models", "query": "Fixture", "count": 0, "items": []},
+            {"ok": True, "type": "project_page", "url": "https://example.test/project"},
         ],
     }
 
     draft = raw_fast_evidence_bundle.summarize_resource_boundary(resource_probe, metadata={"title": "Fixture Sidecar Paper"})
     markdown = raw_fast_evidence_bundle.render_resource_boundary_markdown(draft)
 
-    assert draft["github"][0]["status"] == "verified"
-    assert draft["github"][0]["license"] == "MIT"
-    assert draft["hf"]["models"]["status"] == "verified_absent"
-    assert draft["hf"]["datasets"]["status"] == "probe_failed"
-    assert draft["hf"]["spaces"]["status"] == "candidates_unverified"
-    assert draft["hf"]["spaces"]["unrelated_candidates"][0]["id"] == "unrelated/q0-demo"
-    assert "probe_failed" in markdown
-    assert "verified_absent" in markdown
+    assert draft["github"] == []
+    assert draft["project_pages"] == []
+    assert {kind: bucket["status"] for kind, bucket in draft["hf"].items()} == {"models": "not_checked", "datasets": "not_checked", "spaces": "not_checked"}
+    assert draft["doi"][0]["doi"] == "10.1234/example.paper"
+    assert draft["arxiv"][0]["id"] == "2604.08999"
+    assert "verified_absent" not in markdown
+    assert "candidates_unverified" not in markdown
+    assert "not_checked" in markdown
 
 
 def test_raw_fast_evidence_bundle_localize_figures_refuses_unsafe_sources(tmp_path: Path) -> None:
@@ -2486,10 +2502,8 @@ def test_raw_fast_evidence_bundle_arxiv_doi_probe_schema_is_explicit() -> None:
 
     payload = raw_fast_evidence_bundle.build_resource_probe(
         "See arXiv:2604.08999 and DOI 10.1234/example.paper for details.",
-        {"links": []},
-        "https://example.test/paper.pdf",
+        {"links": [{"uri": "https://github.com/example/sidecar"}]},
         ["arxiv", "doi"],
-        timeout=1,
     )
     probes = {(item["type"], item.get("id") or item.get("doi")): item for item in payload["probes"]}
 
@@ -2499,60 +2513,23 @@ def test_raw_fast_evidence_bundle_arxiv_doi_probe_schema_is_explicit() -> None:
     assert probes[("arxiv", "2604.08999")]["evidence"]
     assert ("doi", "10.1234/example.paper") in probes
     assert probes[("doi", "10.1234/example.paper")]["status"] == "detected"
+    assert "https://github.com/example/sidecar" in payload["urls"]
+    assert "github_repos" not in payload
 
 
-def test_raw_fast_evidence_bundle_github_probe_collects_root_files_and_readme(monkeypatch: pytest.MonkeyPatch) -> None:
-    import base64
+def test_raw_fast_evidence_bundle_none_probe_keeps_url_inventory() -> None:
     import raw_fast_evidence_bundle
 
-    readme_content = base64.b64encode(
-        b"Fixture README sk-" + b"a" * 24 + b" details\nBenchmark artifacts are released for reproduction."
-    ).decode("ascii")
-    pyproject_content = base64.b64encode(
-        b"""
-[project]
-name = "sidecar-paper"
-dependencies = ["numpy"]
-
-[project.scripts]
-sidecar = "sidecar.cli:main"
-""".strip()
-    ).decode("ascii")
-
-    def fake_fetch_text(url: str, timeout: int) -> dict:
-        if url == "https://api.github.com/repos/example/sidecar-paper":
-            return {"ok": True, "status": 200, "text": json.dumps({"html_url": "https://github.com/example/sidecar-paper", "private": False, "fork": False, "archived": False, "disabled": False, "default_branch": "main", "license": {"spdx_id": "MIT"}, "description": "fixture", "stargazers_count": 7, "full_name": "example/sidecar-paper", "pushed_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"})}
-        if url == "https://api.github.com/repos/example/sidecar-paper/contents?ref=main":
-            return {"ok": True, "status": 200, "text": json.dumps([{"name": "README.md", "type": "file"}, {"name": "pyproject.toml", "type": "file"}, {"name": "src", "type": "dir"}])}
-        if url == "https://api.github.com/repos/example/sidecar-paper/readme?ref=main":
-            return {"ok": True, "status": 200, "text": json.dumps({"encoding": "base64", "content": readme_content})}
-        if url == "https://api.github.com/repos/example/sidecar-paper/branches/main":
-            return {"ok": True, "status": 200, "text": json.dumps({"commit": {"sha": "abc123def456"}})}
-        if url == "https://api.github.com/repos/example/sidecar-paper/contents/pyproject.toml?ref=main":
-            return {"ok": True, "status": 200, "text": json.dumps({"encoding": "base64", "content": pyproject_content})}
-        raise AssertionError(url)
-
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
-
-    payload = raw_fast_evidence_bundle.probe_github_repo("example/sidecar-paper", timeout=1)
+    payload = raw_fast_evidence_bundle.build_resource_probe(
+        "Project page: https://example.test/project and arXiv:2604.08999.",
+        {"links": [{"uri": "https://huggingface.co/example/model"}]},
+        ["none"],
+    )
 
     assert payload["ok"] is True
-    assert payload["evidence"]["root_files"] == ["README.md", "pyproject.toml", "src"]
-    assert payload["evidence"]["readme_excerpt"].startswith("Fixture README [REDACTED] details")
-    assert "sk-" not in payload["evidence"]["readme_excerpt"]
-    assert payload["evidence"]["commit"] == "abc123def456"
-    assert payload["evidence"]["pyproject"]["project_name"] == "sidecar-paper"
-    assert payload["evidence"]["pyproject"]["scripts"] == ["sidecar"]
-    assert payload["evidence"]["readme_resource_mentions"] == ["Benchmark artifacts are released for reproduction."]
-    assert payload["license"] == "MIT"
-
-    draft = raw_fast_evidence_bundle.summarize_resource_boundary({"ok": True, "probes": [payload]}, metadata={"title": "Sidecar Paper"})
-    markdown = raw_fast_evidence_bundle.render_resource_boundary_markdown(draft)
-    assert draft["github"][0]["commit"] == "abc123def456"
-    assert draft["github"][0]["pyproject"]["project_name"] == "sidecar-paper"
-    assert draft["github"][0]["readme_resource_mentions"] == ["Benchmark artifacts are released for reproduction."]
-    assert "commit=abc123def456" in markdown
-    assert "pyproject=sidecar-paper" in markdown
+    assert payload["skipped"] is True
+    assert payload["probes"] == []
+    assert payload["urls"] == ["https://example.test/project", "https://huggingface.co/example/model"]
 
 
 def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path) -> None:

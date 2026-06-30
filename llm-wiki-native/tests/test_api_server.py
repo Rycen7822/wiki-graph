@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -49,7 +50,21 @@ def _use_direct_threadpool(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_native.api.server.run_in_threadpool", direct_threadpool)
 
 
-def test_shadow_api_health_reports_native_port_and_ready(tmp_path) -> None:
+def test_native_api_no_longer_exposes_trace_route(tmp_path) -> None:
+    app = _app(tmp_path)
+    payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"]}
+
+    response = _request(app, "POST", "/native/query/trace", json=payload, raise_app_exceptions=False)
+
+    assert response.status_code == 404
+
+
+def test_native_api_tests_do_not_use_pre_cutover_shadow_vocabulary() -> None:
+    retired = "shadow" + "_api"
+    assert retired not in Path(__file__).read_text(encoding="utf-8")
+
+
+def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:
     app = _app(tmp_path)
 
     response = _request(app, "GET", "/health")
@@ -64,7 +79,7 @@ def test_shadow_api_health_reports_native_port_and_ready(tmp_path) -> None:
     }
 
 
-def test_shadow_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None:
+def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {
@@ -77,15 +92,14 @@ def test_shadow_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
     }
 
     data_response = _request(app, "POST", "/query/data", json=payload)
-    trace_response = _request(app, "POST", "/native/query/trace", json=payload)
 
     assert data_response.status_code == 200
-    assert data_response.json()["context_blocks"][0]["source_path"] == "alpha.md"
-    assert trace_response.status_code == 200
-    assert trace_response.json()["trace"]["mode"] == "mix"
+    body = data_response.json()
+    assert body["context_blocks"][0]["source_path"] == "alpha.md"
+    assert body["trace"]["mode"] == "mix"
 
 
-def test_shadow_api_returns_structured_400_for_validation_errors(tmp_path, monkeypatch) -> None:
+def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {
@@ -102,29 +116,29 @@ def test_shadow_api_returns_structured_400_for_validation_errors(tmp_path, monke
     assert "record_type" in response.json()["error"]
 
 
-def test_shadow_api_rejects_old_graph_mode_as_unsupported(tmp_path, monkeypatch) -> None:
+def test_native_api_rejects_old_graph_mode_as_unsupported(tmp_path, monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
     payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "mode": "local"}
 
-    response = _request(app, "POST", "/native/query/trace", json=payload, raise_app_exceptions=False)
+    response = _request(app, "POST", "/query/data", json=payload, raise_app_exceptions=False)
 
     assert response.status_code == 400
     assert "unsupported mode" in response.json()["error"]
 
 
-def test_shadow_api_requires_bearer_token_when_configured(tmp_path, monkeypatch) -> None:
+def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     monkeypatch.setenv("LLM_WIKI_NATIVE_API_KEY", "secret-token")
     app = _app(tmp_path)
     payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "top_k": 1}
 
-    assert _request(app, "POST", "/native/query/trace", json=payload, raise_app_exceptions=False).status_code == 401
-    assert _request(app, "POST", "/native/query/trace", json=payload, headers={"Authorization": "Bearer wrong"}, raise_app_exceptions=False).status_code == 401
-    assert _request(app, "POST", "/native/query/trace", json=payload, headers={"Authorization": "Bearer secret-token"}).status_code == 200
+    assert _request(app, "POST", "/query/data", json=payload, raise_app_exceptions=False).status_code == 401
+    assert _request(app, "POST", "/query/data", json=payload, headers={"Authorization": "Bearer wrong"}, raise_app_exceptions=False).status_code == 401
+    assert _request(app, "POST", "/query/data", json=payload, headers={"Authorization": "Bearer secret-token"}).status_code == 200
 
 
-def test_shadow_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> None:
+def test_native_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> None:
     _use_direct_threadpool(monkeypatch)
     calls = []
 
@@ -135,14 +149,14 @@ def test_shadow_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> 
 
     app = create_app(FakeEngine())
 
-    invalid = _request(app, "POST", "/native/query/trace", json={"workspace_id": "native-test", "query_vector": ["nan"]}, raise_app_exceptions=False)
+    invalid = _request(app, "POST", "/query/data", json={"workspace_id": "native-test", "query_vector": ["nan"]}, raise_app_exceptions=False)
     assert invalid.status_code == 400
     assert "finite" in invalid.json()["error"]
 
     response = _request(
         app,
         "POST",
-        "/native/query/trace",
+        "/query/data",
         json={
             "workspace_id": "native-test",
             "query_vector": [1.0, 0.0],
@@ -158,15 +172,15 @@ def test_shadow_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> 
     assert calls[-1]["record_types"] == ("entity", "relationship", "chunk", "section")
 
 
-def test_shadow_api_rejects_oversized_request_body(tmp_path) -> None:
+def test_native_api_rejects_oversized_request_body(tmp_path) -> None:
     app = _app(tmp_path)
 
-    response = _request(app, "POST", "/native/query/trace", content=b"{" + b" " * 1_000_001 + b"}", headers={"content-type": "application/json"}, raise_app_exceptions=False)
+    response = _request(app, "POST", "/query/data", content=b"{" + b" " * 1_000_001 + b"}", headers={"content-type": "application/json"}, raise_app_exceptions=False)
 
     assert response.status_code == 413
 
 
-def test_shadow_api_runs_sync_query_in_threadpool(monkeypatch) -> None:
+def test_native_api_runs_sync_query_in_threadpool(monkeypatch) -> None:
     called = {"threadpool": False}
 
     async def fake_run_in_threadpool(func, *args, **kwargs):
@@ -180,7 +194,7 @@ def test_shadow_api_runs_sync_query_in_threadpool(monkeypatch) -> None:
     monkeypatch.setattr("llm_wiki_native.api.server.run_in_threadpool", fake_run_in_threadpool)
     app = create_app(FakeEngine())
 
-    response = _request(app, "POST", "/native/query/trace", json={"workspace_id": "native-test", "query_vector": [1.0], "record_types": ["entity"]}, raise_app_exceptions=False)
+    response = _request(app, "POST", "/query/data", json={"workspace_id": "native-test", "query_vector": [1.0], "record_types": ["entity"]}, raise_app_exceptions=False)
 
     assert response.status_code == 200
     assert called["threadpool"] is True
