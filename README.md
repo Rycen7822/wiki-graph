@@ -26,14 +26,14 @@ Recommended conventions:
 
 Active production owner:
 
-- `scripts/batch_native_refresh.py` manages pending native refresh state, workspace preparation, and guarded native cutover.
-- `scripts/batch_wiki_integration.py` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
-- `scripts/wiki_search.py` queries the native service/runtime and can save evidence packs.
-- `llm-wiki-native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, pointer handling, and native tests.
+- `wiki_graph.ops.batch_native_refresh` manages pending native refresh state, workspace preparation, and guarded native cutover.
+- `wiki_graph.ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
+- `wiki_graph.ops.wiki_search` queries the native service/runtime and can save evidence packs.
+- `src/llm_wiki_native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, and pointer handling.
 
 Retired live-storage boundary:
 
-- `scripts/custom_kg_incremental.py` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
+- `wiki_graph.ops.custom_kg_incremental` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
 
 Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old `pending_wikigraph_refresh.json` writes, or direct `custom_kg` live-storage mutation into production paths.
 
@@ -42,7 +42,7 @@ Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old 
 Check native refresh state:
 
 ```bash
-python3 scripts/batch_native_refresh.py status \
+PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO"
@@ -51,7 +51,7 @@ python3 scripts/batch_native_refresh.py status \
 Check wiki-integration state:
 
 ```bash
-python3 scripts/batch_wiki_integration.py status \
+PYTHONPATH=src python3 -m wiki_graph.ops.batch_wiki_integration status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --reason threshold
@@ -60,7 +60,7 @@ python3 scripts/batch_wiki_integration.py status \
 Mark native refresh as pending when upstream integration or reviewed changes require a graph refresh:
 
 ```bash
-python3 scripts/batch_native_refresh.py mark-pending \
+PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -70,7 +70,7 @@ python3 scripts/batch_native_refresh.py mark-pending \
 Prepare a native workspace without cutover:
 
 ```bash
-python3 scripts/batch_native_refresh.py refresh \
+PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -80,7 +80,7 @@ python3 scripts/batch_native_refresh.py refresh \
 Cutover is intentionally explicit and should only be done after validation gates pass:
 
 ```bash
-python3 scripts/batch_native_refresh.py refresh \
+PYTHONPATH=src python3 -m wiki_graph.ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -90,7 +90,7 @@ python3 scripts/batch_native_refresh.py refresh \
 Query the native service/data endpoint:
 
 ```bash
-python3 scripts/wiki_search.py "your query" \
+PYTHONPATH=src python3 -m wiki_graph.ops.wiki_search "your query" \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --data-only
@@ -99,7 +99,7 @@ python3 scripts/wiki_search.py "your query" \
 Run the production-reference audit:
 
 ```bash
-python3 scripts/audit_native_production_refs.py --repo-root .
+PYTHONPATH=src python3 -m wiki_graph.ops.audit_native_production_refs --repo-root .
 ```
 
 ## Validation gates for changes
@@ -107,7 +107,7 @@ python3 scripts/audit_native_production_refs.py --repo-root .
 For changes touching native refresh, wiki integration, query/runtime code, or retired-surface audit guards, run the focused repo tests:
 
 ```bash
-python3 -m pytest \
+PYTHONPATH=src python3 -m pytest \
   tests/test_batch_native_refresh.py \
   tests/test_wiki_native_lib.py \
   tests/test_wiki_native_workflows.py \
@@ -120,23 +120,13 @@ python3 -m pytest \
 Run the unified test suite from the repository-root `tests/` directory, with the native package source directory on `PYTHONPATH`:
 
 ```bash
-PYTHONPATH=llm-wiki-native/src python3 -m pytest tests -q
+PYTHONPATH=src python3 -m pytest tests -q
 ```
 
 Run syntax and whitespace checks before committing:
 
 ```bash
-python3 -m py_compile \
-  scripts/audit_native_production_refs.py \
-  scripts/batch_native_refresh.py \
-  scripts/custom_kg_incremental.py \
-  scripts/custom_kg_vector_fill.py \
-  scripts/native_zvec_materialize.py \
-  scripts/wiki_native_cli.py \
-  scripts/wiki_native_wiki_integration_pending.py \
-  scripts/raw_fast_closeout.py \
-  scripts/raw_fast_evidence_bundle.py \
-  scripts/vector_cache.py
+PYTHONPATH=src python3 -m compileall -q src tests
 
 git diff --check
 ```
