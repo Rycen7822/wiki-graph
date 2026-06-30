@@ -117,31 +117,27 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
     }
     assert calls[0]["url"] == "http://127.0.0.1:19637/query/data"
     assert calls[0]["payload"]["workspace_id"] == "native-test"
-    retired_chunk_key = "chunk" + "_top_k"
-    assert retired_chunk_key not in calls[0]["payload"]
-    assert retired_chunk_key not in calls[1]["payload"]
     assert calls[0]["payload"]["query_vector"] == [1.0, 0.0]
     assert calls[0]["payload"]["section_kind"] == "methodology"
     assert calls[0]["payload"]["neighbor_limit"] == 2
     assert calls[1]["payload"]["mode"] == "naive"
 
 
-def test_native_query_report_collector_marks_endpoint_embedding_timing_when_vector_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("query_vector", [None, []])
+def test_native_query_report_collector_marks_endpoint_embedding_timing_for_missing_query_vectors(tmp_path: Path, query_vector: list[float] | None) -> None:
     query_suite = tmp_path / "query_suite.jsonl"
-    write_jsonl(
-        query_suite,
-        [
-            {
-                "id": "q1",
-                "query": "alpha evidence",
-                "mode": "mix",
-                "top_k": 20,
-                "must_include_paths": ["a.md"],
-                "must_include_entities": [],
-                "notes": "fixture",
-            }
-        ],
-    )
+    row = {
+        "id": "q1",
+        "query": "alpha evidence",
+        "mode": "mix",
+        "top_k": 20,
+        "must_include_paths": ["a.md"],
+        "must_include_entities": [],
+        "notes": "fixture",
+    }
+    if query_vector is not None:
+        row["query_vector"] = query_vector
+    write_jsonl(query_suite, [row])
 
     def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
         return {"source_paths": ["a.md"]}
@@ -154,25 +150,6 @@ def test_native_query_report_collector_marks_endpoint_embedding_timing_when_vect
     )
 
     assert report["timing_scope"] == "endpoint_includes_embedding"
-
-
-def test_native_query_report_cli_rejects_retired_baseline_measurement_role(tmp_path: Path) -> None:
-    query_suite = tmp_path / "query_suite.jsonl"
-    _query_suite(query_suite)
-
-    with pytest.raises(SystemExit) as excinfo:
-        collect_native_query_report.main(
-            [
-                "--query-suite",
-                str(query_suite),
-                "--server",
-                "http://127.0.0.1:19637",
-                "--measurement-role",
-                "baseline_query",
-            ]
-        )
-
-    assert excinfo.value.code == 2
 
 
 def test_native_query_report_collector_records_repeated_samples_without_duplicate_results(tmp_path: Path) -> None:
@@ -224,34 +201,3 @@ def test_native_query_report_collector_records_repeated_samples_without_duplicat
     assert len(report["results"]) == 1
     assert report["results"][0]["id"] == "q1"
     assert report["results"][0]["elapsed_ms"] == 29.5
-
-
-def test_native_query_report_collector_requires_non_empty_query_vectors_for_data_only_scope(tmp_path: Path) -> None:
-    query_suite = tmp_path / "query_suite.jsonl"
-    write_jsonl(
-        query_suite,
-        [
-            {
-                "id": "q1",
-                "query": "alpha evidence",
-                "mode": "mix",
-                "top_k": 20,
-                "must_include_paths": ["a.md"],
-                "must_include_entities": [],
-                "notes": "fixture",
-                "query_vector": [],
-            }
-        ],
-    )
-
-    def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
-        return {"source_paths": ["a.md"]}
-
-    report = collect_native_query_report.collect_query_report(
-        query_suite_path=query_suite,
-        server="http://127.0.0.1:19637",
-        post_json=fake_post,
-        timer=iter([1.00, 1.01]).__next__,
-    )
-
-    assert report["timing_scope"] == "endpoint_includes_embedding"

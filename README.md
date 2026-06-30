@@ -108,12 +108,32 @@ For changes touching native refresh, wiki integration, query/runtime code, or re
 
 ```bash
 python3 -m pytest \
+  tests/test_api_server.py \
+  tests/test_api_server_main.py \
+  tests/test_artifacts.py \
   tests/test_batch_native_refresh.py \
-  tests/test_wiki_native_lib.py \
-  tests/test_wiki_native_workflows.py \
+  tests/test_cli_build.py \
+  tests/test_contracts.py \
+  tests/test_custom_kg_manifest_workflows.py \
   tests/test_custom_kg_materialize.py \
-  tests/test_vector_cache.py \
+  tests/test_embedding_answer_clients.py \
+  tests/test_native_query_modes.py \
+  tests/test_native_query_report.py \
   tests/test_native_zvec_materialize.py \
+  tests/test_query_engine.py \
+  tests/test_raw_fast_workflows.py \
+  tests/test_raw_section_workflows.py \
+  tests/test_section_similarity_workflows.py \
+  tests/test_sqlite_graph.py \
+  tests/test_sqlite_vectors.py \
+  tests/test_sqlite_workspace.py \
+  tests/test_vector_cache.py \
+  tests/test_wiki_integration_workflows.py \
+  tests/test_wiki_native_docs_workflows.py \
+  tests/test_wiki_native_jsonl.py \
+  tests/test_wiki_native_lib.py \
+  tests/test_wiki_search_native_backend.py \
+  tests/test_zvec_workspace.py \
   -q
 ```
 

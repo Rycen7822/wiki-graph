@@ -13,6 +13,7 @@ __pycache__/
 tmp/
 .noemaloom/
 wiki_test/
+share/
 
 # Local reference checkouts
 reference/
