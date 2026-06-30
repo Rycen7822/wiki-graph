@@ -26,7 +26,7 @@ from wiki_graph.ops.wiki_native_lib import (
 )
 
 
-DEFAULT_NATIVE_WORKDIR = Path(__file__).resolve().parents[3]
+DEFAULT_NATIVE_WORKDIR = Path(__file__).resolve().parents[2]
 
 
 def add_common_paths(parser: argparse.ArgumentParser) -> None:

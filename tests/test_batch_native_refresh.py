@@ -8,10 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-OPS = SRC / "wiki_graph" / "ops"
+OPS = ROOT / "wiki_graph" / "ops"
 SCRIPTS = OPS
-sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(ROOT))
 
 from wiki_graph.ops import batch_native_refresh  # noqa: E402
 

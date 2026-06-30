@@ -14,20 +14,20 @@ from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
 EXACT_ACTIVE_SURFACES = (
-    "src/wiki_graph/ops/batch_native_refresh.py",
-    "src/wiki_graph/ops/batch_wiki_integration.py",
-    "src/wiki_graph/ops/custom_kg_incremental.py",
-    "src/wiki_graph/ops/custom_kg_vector_fill.py",
-    "src/wiki_graph/ops/native_zvec_materialize.py",
-    "src/wiki_graph/ops/raw_fast_closeout.py",
-    "src/wiki_graph/ops/raw_fast_evidence_bundle.py",
-    "src/wiki_graph/ops/vector_cache.py",
-    "src/wiki_graph/ops/wiki_native_cli.py",
-    "src/wiki_graph/ops/wiki_search.py",
+    "wiki_graph/ops/batch_native_refresh.py",
+    "wiki_graph/ops/batch_wiki_integration.py",
+    "wiki_graph/ops/custom_kg_incremental.py",
+    "wiki_graph/ops/custom_kg_vector_fill.py",
+    "wiki_graph/ops/native_zvec_materialize.py",
+    "wiki_graph/ops/raw_fast_closeout.py",
+    "wiki_graph/ops/raw_fast_evidence_bundle.py",
+    "wiki_graph/ops/vector_cache.py",
+    "wiki_graph/ops/wiki_native_cli.py",
+    "wiki_graph/ops/wiki_search.py",
 )
 ACTIVE_GLOBS = (
-    "src/wiki_graph/ops/wiki_native_*.py",
-    "src/llm_wiki_native/**/*.py",
+    "wiki_graph/ops/wiki_native_*.py",
+    "llm_wiki_native/**/*.py",
 )
 ACTIVE_IMPORT_MODULES = (
     "wiki_graph.ops.batch_native_refresh",
@@ -660,7 +660,7 @@ def print_json(payload: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit active native production refs")
-    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[3])
+    parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--repo-local-active-pointer", type=Path)
     parser.add_argument("--repo-local-query-payload", type=Path)
     args = parser.parse_args(argv)

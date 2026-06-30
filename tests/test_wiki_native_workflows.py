@@ -10,11 +10,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-OPS = SRC / "wiki_graph" / "ops"
+OPS = ROOT / "wiki_graph" / "ops"
 SCRIPTS = OPS
 RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
-sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(ROOT))
 
 from wiki_graph.ops import batch_native_refresh  # noqa: E402
 from wiki_graph.ops import batch_wiki_integration  # noqa: E402
@@ -432,7 +431,8 @@ def test_false_changed_only_flags_are_removed_from_cli_help() -> None:
         "extract_method_atoms.py",
         "extract_raw_sections.py",
     ]:
-        result = subprocess.run([sys.executable, str(SCRIPTS / script_name), "--help"], check=True, text=True, capture_output=True)
+        module_name = Path(script_name).stem
+        result = subprocess.run([sys.executable, "-m", f"wiki_graph.ops.{module_name}", "--help"], check=True, text=True, capture_output=True)
         assert "--changed-only" not in result.stdout
 
 
@@ -721,7 +721,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         fake_runner,
         "import os, sys\n"
         "from pathlib import Path\n"
-        f"sys.path.insert(0, {str(SRC)!r})\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
         "from wiki_graph.ops.wiki_native_lib import clear_pending_wiki_integration_after_success\n"
         "root = Path(os.environ['LLM_WIKI_ROOT'])\n"
         "state = Path(os.environ['LLM_WIKI_STATE_DIR'])\n"
@@ -2041,7 +2041,7 @@ def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_imag
 def test_raw_fast_evidence_bundle_probe_choices_are_current_only() -> None:
     source = (SCRIPTS / "raw_fast_evidence_bundle.py").read_text(encoding="utf-8")
     help_result = subprocess.run(
-        [sys.executable, str(SCRIPTS / "raw_fast_evidence_bundle.py"), "--help"],
+        [sys.executable, "-m", "wiki_graph.ops.raw_fast_evidence_bundle", "--help"],
         check=True,
         text=True,
         capture_output=True,

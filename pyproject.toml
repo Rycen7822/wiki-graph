@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = ["numpy", "starlette", "uvicorn", "zvec>=0.5.1,<0.6"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["llm_wiki_native*", "wiki_graph*"]
 
 [project.scripts]
 llm-wiki-native = "llm_wiki_native.cli:main"
