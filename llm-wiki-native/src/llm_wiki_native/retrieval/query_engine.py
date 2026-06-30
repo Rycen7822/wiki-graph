@@ -1,8 +1,7 @@
 """Data-only native query engine.
 
 This module intentionally accepts a precomputed query vector. Embedding calls,
-LLM answer generation, HTTP serving, and retired-backend compatibility adapters live in
-later layers.
+LLM answer generation, and HTTP serving live in the API/search layers.
 """
 
 from __future__ import annotations

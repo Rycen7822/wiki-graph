@@ -1,4 +1,3 @@
-import copy
 import json
 import sys
 import types
@@ -26,16 +25,6 @@ def _payload() -> dict:
             {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc discusses Topic X", "keywords": "DISCUSSES", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
         ],
     }
-
-
-def _assert_compact_vector_cache_report(report: dict) -> None:
-    vector_cache = report["vector_cache"]
-    assert set(vector_cache) == {"summary", "missing_counts", "missing_examples"}
-    assert vector_cache["summary"]["total"]["misses"] == 0
-    serialized = json.dumps(report, ensure_ascii=False)
-    assert '"resolved"' not in serialized
-    assert '"vector"' not in serialized
-    assert '"vector": [' not in serialized
 
 
 def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -303,37 +292,6 @@ def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> Non
     assert relationship["content"] == "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
 
 
-def test_full_materialization_blocker_treats_endpoint_order_content_change_as_vector_update() -> None:
-    payload = _payload()
-    payload["relationships"] = [
-        {
-            "src_id": "topic:z",
-            "tgt_id": "doc:a",
-            "description": "topic:z SOURCED_BY doc:a",
-            "keywords": "SOURCED_BY",
-            "source_id": "doc:a",
-            "weight": 1.0,
-            "file_path": "a.md",
-        }
-    ]
-    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2, embedding_params_version="v1")
-    previous = copy.deepcopy(desired)
-    key, previous_relationship = next(iter(previous["relationships"].items()))
-    previous_relationship["content"] = "SOURCED_BY\tdoc:a\ntopic:z\ntopic:z SOURCED_BY doc:a"
-    custom_kg_incremental._stamp_identity_and_hashes(
-        previous_relationship,
-        record_id=previous_relationship["record_id"],
-        canonical_id=key,
-    )
-
-    blockers = custom_kg_incremental.full_materialization_cache_only_blockers(previous, desired)
-
-    assert blockers["blocked"] is True
-    assert blockers["collections"] == {"relationships": {"add": 0, "vector_update": 1}}
-    assert blockers["diff"]["relationships"]["vector_update"] == 1
-    assert blockers["diff"]["relationships"]["metadata_update"] == 0
-
-
 def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> None:
     source = (Path(__file__).resolve().parents[1] / "scripts" / "custom_kg_incremental.py").read_text(encoding="utf-8")
     forbidden_symbols = [
@@ -354,6 +312,13 @@ def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> Non
         "CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE",
         "PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE",
         "CUSTOM_KG_STORAGE_AUDIT_RETIRED_MESSAGE",
+        "def diff_custom_kg_manifests(",
+        "def full_materialization_cache_only_blockers(",
+        "def compact_vector_cache_report(",
+        "def choose_refresh_mode(",
+        "def successful_manifest(",
+        "def write_successful_manifest(",
+        "def manifest_record_count(",
     ]
     assert [symbol for symbol in forbidden_symbols if symbol in source] == []
 
@@ -379,9 +344,6 @@ def test_retired_custom_kg_file_storage_materializer_module_is_removed() -> None
     import importlib.util
 
     assert importlib.util.find_spec("custom_kg_materialize") is None
-
-
-# Retired full-materialization runner behavior is covered by direct fail-closed tests below; old file-storage writer helpers fail closed.
 
 
 def test_custom_kg_incremental_export_manifest_cli_routes_to_export_runner(monkeypatch, tmp_path, capsys) -> None:

@@ -1,4 +1,4 @@
-"""Read-only loaders for existing llm-wiki wikigraph state artifacts."""
+"""Read-only loaders for native llm-wiki state artifacts."""
 
 from __future__ import annotations
 

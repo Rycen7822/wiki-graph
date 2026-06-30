@@ -30,7 +30,7 @@ from wiki_native_docs import (  # noqa: E402
 from wiki_native_ingest_text import make_ingest_text  # noqa: E402
 from wiki_native_jsonl import jsonl_read  # noqa: E402
 from wiki_native_lib import clear_pending_wiki_integration_after_success  # noqa: E402
-from wiki_native_query_events import init_manifest_db  # noqa: E402
+from wiki_native_query_events import init_query_events_db  # noqa: E402
 from wiki_native_query_response import (  # noqa: E402
     expand_native_data_response_with_section_neighbors,
     filter_native_data_response_by_section_kind,
@@ -170,24 +170,22 @@ def test_resolve_source_keeps_wiki_sources_inside_root_without_following_externa
     assert resolve_source(page, "../../../outside.md", root) is None
 
 
-def test_state_dirs_and_manifest_are_external_to_wiki_root(tmp_path: Path) -> None:
+def test_state_dirs_and_query_event_db_are_external_to_wiki_root(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "wikigraph"
+    workdir = tmp_path / "work" / "native"
     state = workdir / "state"
     ensure_state_dirs(state)
     assert (state / "edge_docs").is_dir()
     assert not (root / ".llm-wiki").exists()
-    db = init_manifest_db(state)
-    retired_backend = "light" + "rag"
+    db = init_query_events_db(state)
     assert db == state / "native_query_events.db"
     with sqlite3.connect(db) as conn:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
-        columns = {row[1] for row in conn.execute("pragma table_info(docs)")}
-    assert {"docs", "sync_events", "query_events"} <= tables
-    assert {"native_track_id", "native_doc_status"} <= columns
-    assert {"wikigraph_track_id", "wikigraph_doc_status"}.isdisjoint(columns)
-    assert f"{retired_backend}_track_id" not in columns
-    assert f"{retired_backend}_doc_status" not in columns
+        columns = {row[1] for row in conn.execute("pragma table_info(query_events)")}
+    assert tables == {"query_events", "sqlite_sequence"}
+    assert {"query", "mode", "rewritten_queries", "evidence_pack_path", "created_at"} <= columns
+    assert "docs" not in tables
+    assert "sync_events" not in tables
 
 
 def test_jsonl_read_streams_rows_in_order_and_skips_blank_lines(tmp_path: Path) -> None:
@@ -430,7 +428,6 @@ def test_false_changed_only_flags_are_removed_from_cli_help() -> None:
         "build_seed_edges.py",
         "extract_method_atoms.py",
         "extract_raw_sections.py",
-        "sync_virtual_docs.py",
     ]:
         result = subprocess.run([sys.executable, str(SCRIPTS / script_name), "--help"], check=True, text=True, capture_output=True)
         assert "--changed-only" not in result.stdout
@@ -1204,91 +1201,6 @@ def test_native_sync_db_sources_use_wikigraph_schema_names() -> None:
             assert token not in text
 
 
-def test_successful_manifest_stamps_metadata_without_mutating_desired_manifest() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, successful_manifest
-
-    payload = {
-        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "relationships": [],
-    }
-    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
-    original_metadata = dict(desired["metadata"])
-
-    final = successful_manifest(desired, import_mode="incremental", previous_manifest=desired)
-
-    assert desired["metadata"] == original_metadata
-    assert final["metadata"]["last_successful_import_mode"] == "incremental"
-    assert final["metadata"]["incremental_count_since_full"] == 1
-    assert final["chunks"] == desired["chunks"]
-    assert final["entities"] == desired["entities"]
-    assert final["relationships"] == desired["relationships"]
-
-
-# External tool-python version fallback was removed with the retired backend runner.
-
-
-def test_custom_kg_manifest_diff_tracks_add_update_delete() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests
-
-    old_payload = {
-        "chunks": [{"content": "Doc A v1", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "v1", "source_id": "doc:a", "file_path": "a.md"}],
-        "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "a.md"}],
-    }
-    new_payload = {
-        "chunks": [{"content": "Doc A v2", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [
-            {"entity_name": "doc:a", "entity_type": "DOC", "description": "v2", "source_id": "doc:a", "file_path": "a.md"},
-            {"entity_name": "topic:y", "entity_type": "TOPIC", "description": "new", "source_id": "doc:a", "file_path": "a.md"},
-        ],
-        "relationships": [],
-    }
-
-    diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-    )
-
-    assert diff["chunks"]["add"] == 1
-    assert diff["chunks"]["delete"] == 1
-    assert diff["entities"]["add"] == 1
-    assert diff["entities"]["update"] == 1
-    assert diff["relationships"]["delete"] == 1
-
-
-def test_custom_kg_diff_splits_metadata_only_relationship_and_entity_updates() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relationship_record_key
-
-    chunks = [
-        {"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
-        {"content": "Doc B", "source_id": "doc:b", "file_path": "b.md"},
-    ]
-    old_payload = {
-        "chunks": chunks,
-        "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
-        "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
-    }
-    new_payload = {
-        "chunks": chunks,
-        "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:b", "file_path": "new.md"}],
-        "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:b", "file_path": "new.md"}],
-    }
-
-    diff = diff_custom_kg_manifests(
-        build_custom_kg_manifest(old_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-        build_custom_kg_manifest(new_payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3),
-    )
-    rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
-
-    assert diff["entities"]["update_ids"] == ["topic:x"]
-    assert diff["entities"]["metadata_update_ids"] == ["topic:x"]
-    assert diff["entities"]["vector_update_ids"] == []
-    assert diff["relationships"]["update_ids"] == [rel_key]
-    assert diff["relationships"]["metadata_update_ids"] == [rel_key]
-    assert diff["relationships"]["vector_update_ids"] == []
-
-
 def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
     from custom_kg_incremental import build_custom_kg_manifest
 
@@ -1341,79 +1253,6 @@ def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_con
 
     assert next(iter(old_manifest["entities"].values()))["vector_hash"] == next(iter(new_manifest["entities"].values()))["vector_hash"]
     assert next(iter(old_manifest["relationships"].values()))["vector_hash"] == next(iter(new_manifest["relationships"].values()))["vector_hash"]
-
-
-def test_custom_kg_diff_derives_split_hashes_for_legacy_manifest_records() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, diff_custom_kg_manifests, relationship_record_key
-
-    chunks = [
-        {"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
-        {"content": "Doc B", "source_id": "doc:b", "file_path": "b.md"},
-    ]
-    old_manifest = build_custom_kg_manifest(
-        {
-            "chunks": chunks,
-            "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:a", "file_path": "old.md"}],
-            "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:a", "file_path": "old.md"}],
-        },
-        native_manifest_tool_version="1.5.0",
-        embedding_model="test",
-        embedding_dim=3,
-    )
-    new_manifest = build_custom_kg_manifest(
-        {
-            "chunks": chunks,
-            "entities": [{"entity_name": "topic:x", "entity_type": "TOPIC", "description": "same", "source_id": "doc:b", "file_path": "new.md"}],
-            "relationships": [{"src_id": "doc:a", "tgt_id": "topic:x", "description": "same edge", "keywords": "RELATED", "source_id": "doc:b", "file_path": "new.md"}],
-        },
-        native_manifest_tool_version="1.5.0",
-        embedding_model="test",
-        embedding_dim=3,
-    )
-    rel_key = relationship_record_key("doc:a", "topic:x", "RELATED")
-    for collection in ("entities", "relationships"):
-        for record in old_manifest[collection].values():
-            record.pop("vector_hash", None)
-            record.pop("metadata_hash", None)
-
-    diff = diff_custom_kg_manifests(old_manifest, new_manifest)
-
-    assert diff["entities"]["metadata_update_ids"] == ["topic:x"]
-    assert diff["entities"]["vector_update_ids"] == []
-    assert diff["relationships"]["metadata_update_ids"] == [rel_key]
-    assert diff["relationships"]["vector_update_ids"] == []
-
-
-# Direct storage patching via ExternalGraph APIs was removed with the retired live-storage runner.
-
-
-def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incrementals() -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, choose_refresh_mode
-
-    payload = {
-        "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "entities": [{"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
-        "relationships": [],
-    }
-    desired = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test", embedding_dim=3)
-
-    no_manifest = choose_refresh_mode(None, desired, native_preflight_ok=True, full_rebuild_interval=5)
-    assert no_manifest["selected_mode"] == "full_rebuild"
-    assert "missing_manifest" in no_manifest["reasons"]
-
-    previous = json.loads(json.dumps(desired))
-    previous["metadata"]["incremental_count_since_full"] = 4
-    fifth_incremental = choose_refresh_mode(previous, desired, native_preflight_ok=True, full_rebuild_interval=5)
-    assert fifth_incremental["selected_mode"] == "incremental"
-    assert fifth_incremental["next_incremental_count_since_full"] == 5
-
-    previous["metadata"]["incremental_count_since_full"] = 5
-    after_five = choose_refresh_mode(previous, desired, native_preflight_ok=True, full_rebuild_interval=5)
-    assert after_five["selected_mode"] == "full_rebuild"
-    assert "incremental_interval_reached" in after_five["reasons"]
-
-
-# Retired incremental apply runner behavior is covered by direct fail-closed tests; low-level diff helpers remain tested above.
 
 
 def test_section_similarity_embedding_text_uses_clean_section_content_without_sidecar_boilerplate() -> None:

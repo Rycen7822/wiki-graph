@@ -29,10 +29,6 @@ MAX_REQUEST_BODY_BYTES = 1_000_000
 MAX_QUERY_VECTOR_DIM = 8_192
 MAX_TOP_K = 100
 MAX_NEIGHBOR_LIMIT = 50
-UNSUPPORTED_DOCUMENT_ENDPOINT = {
-    "error": "unsupported",
-    "detail": "native workspaces are built from immutable artifacts; live document endpoints are disabled",
-}
 EMBEDDING_ENV_KEYS = (
     "LLM_WIKI_NATIVE_EMBEDDING_BASE_URL",
     "LLM_WIKI_NATIVE_EMBEDDING_MODEL",
@@ -249,9 +245,6 @@ def create_app(
         result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
         return JSONResponse({"trace": result["trace"]})
 
-    async def unsupported_documents(_request: Request) -> JSONResponse:
-        return JSONResponse(UNSUPPORTED_DOCUMENT_ENDPOINT, status_code=501)
-
     async def value_error(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -270,9 +263,6 @@ def create_app(
             Route("/query", query, methods=["POST"]),
             Route("/query/data", query_data, methods=["POST"]),
             Route("/native/query/trace", query_trace, methods=["POST"]),
-            Route("/documents/text", unsupported_documents, methods=["POST"]),
-            Route("/documents/texts", unsupported_documents, methods=["POST"]),
-            Route("/documents/track_status/{track_id:path}", unsupported_documents, methods=["GET"]),
         ],
         exception_handlers={RequestEntityTooLarge: request_too_large, NotImplementedError: not_implemented, ValueError: value_error, KeyError: key_error},
     )
