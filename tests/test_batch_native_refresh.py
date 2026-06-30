@@ -8,11 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops import batch_native_refresh  # noqa: E402
+from ops import batch_native_refresh  # noqa: E402
 
 
 def test_native_refresh_ledger_scope_is_distinct_from_wikigraph_batch_ledger(tmp_path) -> None:

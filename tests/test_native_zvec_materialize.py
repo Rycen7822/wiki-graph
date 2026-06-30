@@ -9,12 +9,12 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 NATIVE_SRC = ROOT
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops import native_zvec_materialize  # noqa: E402
+from ops import native_zvec_materialize  # noqa: E402
 
 
 def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
@@ -37,8 +37,8 @@ def test_custom_kg_vector_fill_module_is_native_safe_pure_helper() -> None:
 
 def test_native_materializer_uses_native_vector_fill_seam_not_mixed_custom_kg_module() -> None:
     text = (SCRIPTS / "native_zvec_materialize.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.custom_kg_vector_fill import fill_missing_manifest_vectors" in text
-    assert "from wiki_graph.ops.custom_kg_incremental import fill_missing_manifest_vectors" not in text
+    assert "from ops.custom_kg_vector_fill import fill_missing_manifest_vectors" in text
+    assert "from ops.custom_kg_incremental import fill_missing_manifest_vectors" not in text
 
 
 def test_custom_kg_file_backend_storage_applier_is_retired() -> None:

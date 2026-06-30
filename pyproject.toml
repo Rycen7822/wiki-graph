@@ -11,15 +11,15 @@ dependencies = ["numpy", "starlette", "uvicorn", "zvec>=0.5.1,<0.6"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["llm_wiki_native*", "wiki_graph*"]
+include = ["llm_wiki_native*", "ops*"]
 
 [project.scripts]
 llm-wiki-native = "llm_wiki_native.cli:main"
-wiki-graph-audit-native-refs = "wiki_graph.ops.audit_native_production_refs:main"
-wiki-graph-batch-native-refresh = "wiki_graph.ops.batch_native_refresh:main"
-wiki-graph-batch-wiki-integration = "wiki_graph.ops.batch_wiki_integration:main"
-wiki-graph-custom-kg = "wiki_graph.ops.custom_kg_incremental:main"
-wiki-graph-native-zvec-materialize = "wiki_graph.ops.native_zvec_materialize:main"
-wiki-graph-raw-fast-closeout = "wiki_graph.ops.raw_fast_closeout:main"
-wiki-graph-raw-fast-evidence-bundle = "wiki_graph.ops.raw_fast_evidence_bundle:main"
-wiki-graph-search = "wiki_graph.ops.wiki_search:main"
+wiki-graph-audit-native-refs = "ops.audit_native_production_refs:main"
+wiki-graph-batch-native-refresh = "ops.batch_native_refresh:main"
+wiki-graph-batch-wiki-integration = "ops.batch_wiki_integration:main"
+wiki-graph-custom-kg = "ops.custom_kg_incremental:main"
+wiki-graph-native-zvec-materialize = "ops.native_zvec_materialize:main"
+wiki-graph-raw-fast-closeout = "ops.raw_fast_closeout:main"
+wiki-graph-raw-fast-evidence-bundle = "ops.raw_fast_evidence_bundle:main"
+wiki-graph-search = "ops.wiki_search:main"

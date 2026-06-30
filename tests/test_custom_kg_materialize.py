@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops import custom_kg_incremental  # noqa: E402
-from wiki_graph.ops import custom_kg_vector_fill  # noqa: E402
-from wiki_graph.ops.custom_kg_incremental import build_custom_kg_manifest  # noqa: E402
-from wiki_graph.ops.vector_cache import VectorCache  # noqa: E402
+from ops import custom_kg_incremental  # noqa: E402
+from ops import custom_kg_vector_fill  # noqa: E402
+from ops.custom_kg_incremental import build_custom_kg_manifest  # noqa: E402
+from ops.vector_cache import VectorCache  # noqa: E402
 
 
 def _payload() -> dict:
@@ -298,7 +298,7 @@ def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> Non
 
 
 def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> None:
-    source = (Path(__file__).resolve().parents[1] / "wiki_graph" / "ops" / "custom_kg_incremental.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "ops" / "custom_kg_incremental.py").read_text(encoding="utf-8")
     forbidden_symbols = [
         "def audit_custom_kg_storage(",
         "def apply_patch_to_storage(",
@@ -350,7 +350,7 @@ def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> Non
 
 
 def test_retired_custom_kg_file_storage_materializer_module_is_removed() -> None:
-    module_path = Path(__file__).resolve().parents[1] / "wiki_graph" / "ops" / "custom_kg_materialize.py"
+    module_path = Path(__file__).resolve().parents[1] / "ops" / "custom_kg_materialize.py"
     assert not module_path.exists()
 
     import importlib.util

@@ -10,36 +10,36 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops import batch_native_refresh  # noqa: E402
-from wiki_graph.ops import batch_wiki_integration  # noqa: E402
-from wiki_graph.ops import raw_fast_closeout  # noqa: E402
-import wiki_graph.ops.validate_wiki as validate_wiki_cli  # noqa: E402
+from ops import batch_native_refresh  # noqa: E402
+from ops import batch_wiki_integration  # noqa: E402
+from ops import raw_fast_closeout  # noqa: E402
+import ops.validate_wiki as validate_wiki_cli  # noqa: E402
 
-from wiki_graph.ops.wiki_native_artifacts import build_seed_edges, extract_method_atoms, resolve_source  # noqa: E402
-from wiki_graph.ops.wiki_native_custom_kg_payload import build_custom_kg_payload  # noqa: E402
-from wiki_graph.ops.wiki_native_docs import (  # noqa: E402
+from ops.wiki_native_artifacts import build_seed_edges, extract_method_atoms, resolve_source  # noqa: E402
+from ops.wiki_native_custom_kg_payload import build_custom_kg_payload  # noqa: E402
+from ops.wiki_native_docs import (  # noqa: E402
     canonical_id_for,
     collect_source_docs,
     fallback_frontmatter_load,
     generated_docs_from_state,
     parse_frontmatter,
 )
-from wiki_graph.ops.wiki_native_ingest_text import make_ingest_text  # noqa: E402
-from wiki_graph.ops.wiki_native_jsonl import jsonl_read  # noqa: E402
-from wiki_graph.ops.wiki_native_lib import clear_pending_wiki_integration_after_success  # noqa: E402
-from wiki_graph.ops.wiki_native_query_events import init_query_events_db  # noqa: E402
-from wiki_graph.ops.wiki_native_query_response import (  # noqa: E402
+from ops.wiki_native_ingest_text import make_ingest_text  # noqa: E402
+from ops.wiki_native_jsonl import jsonl_read  # noqa: E402
+from ops.wiki_native_lib import clear_pending_wiki_integration_after_success  # noqa: E402
+from ops.wiki_native_query_events import init_query_events_db  # noqa: E402
+from ops.wiki_native_query_response import (  # noqa: E402
     expand_native_data_response_with_section_neighbors,
     filter_native_data_response_by_section_kind,
 )
-from wiki_graph.ops.wiki_native_raw_section_extract import extract_raw_sections  # noqa: E402
-from wiki_graph.ops.wiki_native_raw_sections import raw_section_query_for_kind, raw_section_specs_for_heading  # noqa: E402
-from wiki_graph.ops.wiki_native_section_similarity import (  # noqa: E402
+from ops.wiki_native_raw_section_extract import extract_raw_sections  # noqa: E402
+from ops.wiki_native_raw_sections import raw_section_query_for_kind, raw_section_specs_for_heading  # noqa: E402
+from ops.wiki_native_section_similarity import (  # noqa: E402
     _section_rank_lists,
     _section_rank_lists_scalar,
     build_section_similarity_edges,
@@ -49,9 +49,9 @@ from wiki_graph.ops.wiki_native_section_similarity import (  # noqa: E402
     section_similarity_report_summary,
     select_section_similarity_edges,
 )
-from wiki_graph.ops.wiki_native_state import ensure_state_dirs  # noqa: E402
-from wiki_graph.ops.wiki_native_validation import validate_wiki  # noqa: E402
-from wiki_graph.ops.wiki_native_wiki_checks import (  # noqa: E402
+from ops.wiki_native_state import ensure_state_dirs  # noqa: E402
+from ops.wiki_native_validation import validate_wiki  # noqa: E402
+from ops.wiki_native_wiki_checks import (  # noqa: E402
     VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION,
     audit_raw_note_section_contracts,
     structured_heading_warnings,
@@ -59,7 +59,7 @@ from wiki_graph.ops.wiki_native_wiki_checks import (  # noqa: E402
     validation_report_is_fresh,
     wiki_root_machine_pollution,
 )
-from wiki_graph.ops.wiki_native_wiki_integration_pending import (  # noqa: E402
+from ops.wiki_native_wiki_integration_pending import (  # noqa: E402
     DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
     load_pending_wiki_integration_ledger,
     mark_pending_wiki_integration,
@@ -226,7 +226,7 @@ def test_validate_wiki_report_uses_native_not_retired_output_fields(tmp_path: Pa
 
 
 def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wiki_graph.ops import wiki_native_wiki_checks
+    from ops import wiki_native_wiki_checks
 
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
@@ -432,12 +432,12 @@ def test_false_changed_only_flags_are_removed_from_cli_help() -> None:
         "extract_raw_sections.py",
     ]:
         module_name = Path(script_name).stem
-        result = subprocess.run([sys.executable, "-m", f"wiki_graph.ops.{module_name}", "--help"], check=True, text=True, capture_output=True)
+        result = subprocess.run([sys.executable, "-m", f"ops.{module_name}", "--help"], check=True, text=True, capture_output=True)
         assert "--changed-only" not in result.stdout
 
 
 def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wiki_graph.ops.native_runtime_env import env_int, load_env_file, redact_summary
+    from ops.native_runtime_env import env_int, load_env_file, redact_summary
 
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=secret-value\nEMBEDDING_DIM=1536\nBAD_INT=nope\n", encoding="utf-8")
@@ -545,7 +545,7 @@ def test_review_wiki_integration_status_routes_manual_review_items_without_old_g
 
 
 def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in_review_queue(tmp_path: Path) -> None:
-    from wiki_graph.ops.wiki_integration_plan import build_wiki_integration_plan
+    from ops.wiki_integration_plan import build_wiki_integration_plan
 
     root_a = sample_wiki(tmp_path / "a")
     root_b = sample_wiki(tmp_path / "b")
@@ -638,7 +638,7 @@ def test_clear_pending_wiki_integration_without_integrated_paths_marks_native_re
 def test_batch_wiki_integration_cli_status_mark_and_clear_are_external(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
-    module_cmd = [sys.executable, "-m", "wiki_graph.ops.batch_wiki_integration"]
+    module_cmd = [sys.executable, "-m", "ops.batch_wiki_integration"]
 
     mark = subprocess.run(
         [
@@ -704,8 +704,8 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
 
     assert ("/home/" + "xu/project/wiki/wikigraph") not in prompt
     assert f"Native refresh workdir: `{ROOT}`" in prompt
-    assert "python -m wiki_graph.ops.batch_wiki_integration clear-success" in prompt
-    assert "python -m wiki_graph.ops.batch_native_refresh status" in prompt
+    assert "python -m ops.batch_wiki_integration clear-success" in prompt
+    assert "python -m ops.batch_native_refresh status" in prompt
     assert "references/raw-fast-batch-wiki-integration.md" in prompt
     assert "references/wiki-core-operations.md" in prompt
     assert "references/wiki-operational-pitfalls.md" not in prompt
@@ -722,7 +722,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         "import os, sys\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(ROOT)!r})\n"
-        "from wiki_graph.ops.wiki_native_lib import clear_pending_wiki_integration_after_success\n"
+        "from ops.wiki_native_lib import clear_pending_wiki_integration_after_success\n"
         "root = Path(os.environ['LLM_WIKI_ROOT'])\n"
         "state = Path(os.environ['LLM_WIKI_STATE_DIR'])\n"
         "prompt_path = Path(os.environ['LLM_WIKI_INTEGRATION_PROMPT'])\n"
@@ -735,7 +735,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.batch_wiki_integration",
+            "ops.batch_wiki_integration",
             "auto-integrate",
             "--root",
             str(root),
@@ -775,7 +775,7 @@ def test_batch_wiki_integration_auto_integrate_records_failure_if_runner_leaves_
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.batch_wiki_integration",
+            "ops.batch_wiki_integration",
             "auto-integrate",
             "--root",
             str(root),
@@ -1050,7 +1050,7 @@ def test_custom_kg_payload_includes_raw_section_chunks_and_relationships(tmp_pat
 
 
 def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(tmp_path: Path) -> None:
-    from wiki_graph.ops.custom_kg_incremental import build_custom_kg_manifest, entity_record_id, relationship_record_id, stable_hash
+    from ops.custom_kg_incremental import build_custom_kg_manifest, entity_record_id, relationship_record_id, stable_hash
 
     payload = {
         "chunks": [
@@ -1114,8 +1114,8 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
 
 
 def test_custom_kg_manifest_matches_native_sanitized_chunk_ids_and_basenames() -> None:
-    from wiki_graph.ops import custom_kg_incremental
-    from wiki_graph.ops.custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, native_manifest_sanitize_text
+    from ops import custom_kg_incremental
+    from ops.custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, native_manifest_sanitize_text
 
     retired_backend = "light" + "rag"
     assert not hasattr(custom_kg_incremental, f"{retired_backend}_sanitize_text")
@@ -1179,7 +1179,7 @@ def test_native_sync_db_sources_use_wikigraph_schema_names() -> None:
 
 
 def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
-    from wiki_graph.ops.custom_kg_incremental import build_custom_kg_manifest
+    from ops.custom_kg_incremental import build_custom_kg_manifest
 
     payload = {
         "chunks": [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}],
@@ -1202,7 +1202,7 @@ def test_custom_kg_vector_hash_includes_embedding_contract() -> None:
 
 
 def test_custom_kg_metadata_only_change_preserves_vector_hash_with_embedding_contract() -> None:
-    from wiki_graph.ops.custom_kg_incremental import build_custom_kg_manifest
+    from ops.custom_kg_incremental import build_custom_kg_manifest
 
     chunks = [{"content": "Doc A", "source_id": "doc:a", "file_path": "a.md"}]
     old_manifest = build_custom_kg_manifest(
@@ -1342,7 +1342,7 @@ def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path)
 
 
 def test_build_section_similarity_graph_writes_section_similarity_index_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from wiki_graph.ops import build_section_similarity_graph
+    from ops import build_section_similarity_graph
 
     root = tmp_path / "wiki"
     state = tmp_path / "state"
@@ -1411,7 +1411,7 @@ def test_build_section_similarity_graph_reports_provider_failure_without_partial
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from wiki_graph.ops import build_section_similarity_graph
+    from ops import build_section_similarity_graph
 
     root = tmp_path / "wiki"
     state = tmp_path / "state"
@@ -1754,7 +1754,7 @@ def _write_tiny_pdf(path: Path) -> None:
 
 
 def test_raw_fast_evidence_bundle_title_guess_strips_markdown_heading_prefix() -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     assert raw_fast_evidence_bundle.title_from_text("## SWE-Marathon: Can Agents Work?\n\nAbstract") == "SWE-Marathon: Can Agents Work?"
 
@@ -1782,7 +1782,7 @@ def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docli
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_evidence_bundle",
+            "ops.raw_fast_evidence_bundle",
             "--url",
             source_pdf.as_uri(),
             "--kind",
@@ -1884,7 +1884,7 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_evidence_bundle",
+            "ops.raw_fast_evidence_bundle",
             "--url",
             source_pdf.as_uri(),
             "--kind",
@@ -1936,7 +1936,7 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
 
 
 def test_raw_fast_evidence_bundle_localize_figures_does_not_overwrite_existing_asset(tmp_path: Path) -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     root = sample_wiki(tmp_path)
     workdir = tmp_path / "bundle-sidecar-conflict"
@@ -1957,7 +1957,7 @@ def test_raw_fast_evidence_bundle_localize_figures_does_not_overwrite_existing_a
 
 
 def test_raw_fast_evidence_bundle_localize_figures_resolves_source_root_relative_paths(tmp_path: Path) -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     root = sample_wiki(tmp_path)
     workdir = tmp_path / "bundle-source-root-fig"
@@ -1986,7 +1986,7 @@ def test_raw_fast_evidence_bundle_localize_figures_resolves_source_root_relative
 
 
 def test_raw_fast_evidence_bundle_localize_figures_renders_pdf_source_figures_to_png(tmp_path: Path) -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     root = sample_wiki(tmp_path)
     workdir = tmp_path / "bundle-pdf-fig"
@@ -2020,7 +2020,7 @@ def test_raw_fast_evidence_bundle_localize_figures_renders_pdf_source_figures_to
 
 
 def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_image_tex_title(tmp_path: Path) -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     workdir = tmp_path / "bundle-api-title"
     write(
@@ -2041,7 +2041,7 @@ def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_imag
 def test_raw_fast_evidence_bundle_probe_choices_are_current_only() -> None:
     source = (SCRIPTS / "raw_fast_evidence_bundle.py").read_text(encoding="utf-8")
     help_result = subprocess.run(
-        [sys.executable, "-m", "wiki_graph.ops.raw_fast_evidence_bundle", "--help"],
+        [sys.executable, "-m", "ops.raw_fast_evidence_bundle", "--help"],
         check=True,
         text=True,
         capture_output=True,
@@ -2065,7 +2065,7 @@ def test_raw_fast_evidence_bundle_has_no_retired_deep_probe_helpers() -> None:
 
 
 def test_raw_fast_evidence_bundle_resource_boundary_defaults_to_not_checked_without_exact_link_report() -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     resource_probe = {
         "ok": True,
@@ -2092,7 +2092,7 @@ def test_raw_fast_evidence_bundle_resource_boundary_defaults_to_not_checked_with
 
 
 def test_raw_fast_evidence_bundle_localize_figures_refuses_unsafe_sources(tmp_path: Path) -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     root = sample_wiki(tmp_path)
     workdir = tmp_path / "bundle-localize"
@@ -2192,7 +2192,7 @@ def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadat
 
 
 def test_raw_fast_evidence_bundle_candidate_frontmatter_stays_compact() -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     fm = raw_fast_evidence_bundle.build_frontmatter(
         "Compact Candidate Paper",
@@ -2286,7 +2286,7 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_closeout",
+            "ops.raw_fast_closeout",
             "--root",
             str(root),
             "--state-dir",
@@ -2367,7 +2367,7 @@ def test_raw_fast_closeout_native_status_uses_batch_native_refresh(tmp_path: Pat
 
     command = calls[0]["command"]
     assert isinstance(command, list)
-    assert command[1:3] == ["-m", "wiki_graph.ops.batch_native_refresh"]
+    assert command[1:3] == ["-m", "ops.batch_native_refresh"]
     assert command[3] == "status"
     assert "--workdir" in command
     assert "--no-migrate-legacy" not in command
@@ -2427,7 +2427,7 @@ def test_raw_fast_closeout_native_refresh_runs_prepare_only(tmp_path: Path, monk
     result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
 
     command = calls[0]["command"]
-    assert command[1:3] == ["-m", "wiki_graph.ops.batch_native_refresh"]
+    assert command[1:3] == ["-m", "ops.batch_native_refresh"]
     assert command[3:5] == ["refresh", "--prepare-only"]
     assert result["ran"] is True
     assert result["prepared_only"] is True
@@ -2443,7 +2443,7 @@ def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: P
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_closeout",
+            "ops.raw_fast_closeout",
             "--root",
             str(root),
             "--state-dir",
@@ -2480,7 +2480,7 @@ def test_raw_fast_evidence_bundle_refuses_workdir_inside_wiki_root(tmp_path: Pat
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_evidence_bundle",
+            "ops.raw_fast_evidence_bundle",
             "--url",
             source_pdf.as_uri(),
             "--kind",
@@ -2504,7 +2504,7 @@ def test_raw_fast_evidence_bundle_refuses_workdir_inside_wiki_root(tmp_path: Pat
 
 
 def test_raw_fast_evidence_bundle_arxiv_doi_probe_schema_is_explicit() -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     payload = raw_fast_evidence_bundle.build_resource_probe(
         "See arXiv:2604.08999 and DOI 10.1234/example.paper for details.",
@@ -2524,7 +2524,7 @@ def test_raw_fast_evidence_bundle_arxiv_doi_probe_schema_is_explicit() -> None:
 
 
 def test_raw_fast_evidence_bundle_none_probe_keeps_url_inventory() -> None:
-    from wiki_graph.ops import raw_fast_evidence_bundle
+    from ops import raw_fast_evidence_bundle
 
     payload = raw_fast_evidence_bundle.build_resource_probe(
         "Project page: https://example.test/project and arXiv:2604.08999.",
@@ -2551,7 +2551,7 @@ def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path
         [
             sys.executable,
             "-m",
-            "wiki_graph.ops.raw_fast_closeout",
+            "ops.raw_fast_closeout",
             "--root",
             str(root),
             "--state-dir",
@@ -2583,7 +2583,7 @@ def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path
 
 
 def test_raw_fast_closeout_final_verify_only_waives_post_integration_non_raw_hits() -> None:
-    from wiki_graph.ops import raw_fast_closeout
+    from ops import raw_fast_closeout
 
     pre = {"raw_fast_ok": True, "non_raw_wiki_hits": [], "raw_fast_blockers": []}
     final = {"raw_fast_ok": False, "non_raw_wiki_hits": ["concepts/after.md"], "raw_fast_blockers": ["non_raw_wiki_hits"]}
