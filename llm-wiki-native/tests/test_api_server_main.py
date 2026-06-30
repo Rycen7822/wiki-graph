@@ -35,7 +35,7 @@ def test_embedding_provider_factory_accepts_compatible_binding_env() -> None:
 
 
 def test_run_server_loads_engine_builds_app_and_calls_runner(tmp_path) -> None:
-    pointer_path = tmp_path / "prepared_workspace.json"
+    pointer_path = tmp_path / "active_workspace.json"
     calls = {}
 
     class Engine:
@@ -60,8 +60,6 @@ def test_run_server_loads_engine_builds_app_and_calls_runner(tmp_path) -> None:
             str(pointer_path),
             "--state-dir",
             str(tmp_path / "state"),
-            "--allow-workspace-status",
-            "audited",
         ],
         engine_loader=engine_loader,
         runner=runner,
@@ -76,7 +74,7 @@ def test_run_server_loads_engine_builds_app_and_calls_runner(tmp_path) -> None:
     assert "/query/data" in {getattr(route, "path", None) for route in calls["app"].routes}
 
 
-def test_run_server_passes_allowed_workspace_statuses_to_default_loader(tmp_path, monkeypatch) -> None:
+def test_run_server_passes_active_default_to_default_loader(tmp_path, monkeypatch) -> None:
     pointer_path = tmp_path / "active_workspace.json"
     calls = {}
 
@@ -93,14 +91,12 @@ def test_run_server_passes_allowed_workspace_statuses_to_default_loader(tmp_path
         calls["host"] = host
         calls["port"] = port
 
-    monkeypatch.setattr(runtime, "load_engine_from_prepared_workspace", fake_loader)
+    monkeypatch.setattr(runtime, "load_engine_from_workspace_pointer", fake_loader, raising=False)
 
     result = server.run_server(
         [
             "--workspace-file",
             str(pointer_path),
-            "--allow-workspace-status",
-            "active",
         ],
         runner=runner,
         env={},
@@ -108,5 +104,39 @@ def test_run_server_passes_allowed_workspace_statuses_to_default_loader(tmp_path
 
     assert result == 0
     assert calls["workspace_file"] == pointer_path
-    assert calls["allowed_statuses"] == ("prepared", "active")
+    assert calls["allowed_statuses"] == ("active",)
     assert calls["app"].state.default_workspace_id == "active-workspace"
+
+
+def test_run_server_appends_explicit_prepared_status_for_staging_loader(tmp_path, monkeypatch) -> None:
+    pointer_path = tmp_path / "prepared_workspace.json"
+    calls = {}
+
+    class Engine:
+        default_workspace_id = "prepared-workspace"
+
+    def fake_loader(path: Path, *, allowed_statuses: tuple[str, ...]):
+        calls["workspace_file"] = path
+        calls["allowed_statuses"] = allowed_statuses
+        return Engine()
+
+    def runner(app, *, host: str, port: int):
+        calls["app"] = app
+
+    monkeypatch.setattr(runtime, "load_engine_from_workspace_pointer", fake_loader, raising=False)
+
+    result = server.run_server(
+        [
+            "--workspace-file",
+            str(pointer_path),
+            "--allow-workspace-status",
+            "prepared",
+        ],
+        runner=runner,
+        env={},
+    )
+
+    assert result == 0
+    assert calls["workspace_file"] == pointer_path
+    assert calls["allowed_statuses"] == ("active", "prepared")
+    assert calls["app"].state.default_workspace_id == "prepared-workspace"

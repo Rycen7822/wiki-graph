@@ -181,7 +181,7 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
     assert refresh_status["ok"] is True
     assert refresh_status["status"]["pending_count"] == 0
     assert refresh_status["status"]["should_refresh"] is False
-    active_loader = checks["active_pointer_loader_status_allowance"]
+    active_loader = checks["active_pointer_loader_default"]
     assert active_loader["ok"] is True
     assert active_loader["workspace_id"] == "package-independence-active"
     assert active_loader["status"] == "active"
@@ -957,15 +957,18 @@ def test_deprecated_build_evidence_pack_alias_is_removed_after_query_cli_cutover
 
 def test_clear_success_native_surface_has_no_legacy_backend_aliases() -> None:
     old_backend = "light" + "rag"
+    native_bypass_param = "mark_native" + "_pending"
+    native_bypass_flag = "--no-mark-native" + "-pending"
 
     signature = inspect.signature(wiki_native_lib.clear_pending_wiki_integration_after_success)
-    assert "mark_native_pending" in signature.parameters
+    assert native_bypass_param not in signature.parameters
     assert f"mark_{old_backend}_pending" not in signature.parameters
 
     text = (SCRIPTS / "batch_wiki_integration.py").read_text(encoding="utf-8")
-    assert "--no-mark-native-pending" in text
+    assert native_bypass_flag not in text
     assert f"--no-mark-{old_backend}-pending" not in text
     assert f"mark_{old_backend}_pending=" not in text
+    assert native_bypass_param + "=" not in text
 
 
 def test_low_level_wiki_integration_clear_has_no_graph_pending_hook() -> None:

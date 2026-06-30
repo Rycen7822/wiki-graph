@@ -12,7 +12,7 @@ from typing import Any
 
 EMBEDDING_PROFILES = {
     "conservative": {"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"},
-    "shadow-medium": {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"},
+    "balanced-medium": {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"},
     "operator-fast": {"EMBEDDING_FUNC_MAX_ASYNC": "4", "EMBEDDING_BATCH_NUM": "32", "MAX_PARALLEL_INSERT": "2"},
 }
 DEFAULT_EMBEDDING_PROFILE = "conservative"

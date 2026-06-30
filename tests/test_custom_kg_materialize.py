@@ -125,12 +125,15 @@ def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
 
 
 def test_embedding_profile_env_defaults_and_rejects_unknown() -> None:
+    old_medium_profile = "shadow" + "-medium"
     assert custom_kg_vector_fill.embedding_profile_env("conservative") == {
         "EMBEDDING_FUNC_MAX_ASYNC": "1",
         "EMBEDDING_BATCH_NUM": "10",
         "MAX_PARALLEL_INSERT": "1",
     }
-    assert custom_kg_vector_fill.embedding_profile_env("shadow-medium")["EMBEDDING_BATCH_NUM"] == "20"
+    assert custom_kg_vector_fill.embedding_profile_env("balanced-medium")["EMBEDDING_BATCH_NUM"] == "20"
+    with pytest.raises(ValueError, match="unknown embedding profile"):
+        custom_kg_vector_fill.embedding_profile_env(old_medium_profile)
     with pytest.raises(ValueError, match="unknown embedding profile"):
         custom_kg_vector_fill.embedding_profile_env("surprise-fast")
 
@@ -165,10 +168,10 @@ def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_pat
         cache,
         workdir=tmp_path,
         embed_texts_func=fake_embed,
-        embedding_profile="shadow-medium",
+        embedding_profile="balanced-medium",
     )
 
-    assert report["embedding_profile"] == "shadow-medium"
+    assert report["embedding_profile"] == "balanced-medium"
     assert report["batch_size"] == 20
     assert report["concurrency"] == {"embedding_func_max_async": 2, "max_parallel_insert": 1}
     assert report["total_batches"] == 1

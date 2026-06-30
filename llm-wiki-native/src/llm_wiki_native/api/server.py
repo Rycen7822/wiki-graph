@@ -272,14 +272,14 @@ def run_server(
     parser.add_argument("--port", type=int, default=DEFAULT_NATIVE_PORT)
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--workspace-file", type=Path, required=True)
-    parser.add_argument("--allow-workspace-status", action="append", default=[])
+    parser.add_argument("--allow-workspace-status", action="append", default=[], help="Explicitly allow an additional workspace pointer status for staging/debug runs")
     args = parser.parse_args(argv)
-    allowed_statuses = ("prepared", *tuple(args.allow_workspace_status))
+    allowed_statuses = tuple(dict.fromkeys(("active", *tuple(args.allow_workspace_status))))
     if engine_loader is None:
-        from llm_wiki_native.runtime import load_engine_from_prepared_workspace
+        from llm_wiki_native.runtime import load_engine_from_workspace_pointer
 
         def engine_loader(path: Path) -> Any:
-            return load_engine_from_prepared_workspace(path, allowed_statuses=allowed_statuses)
+            return load_engine_from_workspace_pointer(path, allowed_statuses=allowed_statuses)
 
     engine = engine_loader(args.workspace_file)
     default_workspace_id = getattr(engine, "default_workspace_id", None)

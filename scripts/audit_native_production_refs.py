@@ -199,7 +199,7 @@ def _repo_local_active_pointer_query_check(
 ) -> dict[str, Any]:
     check_name = "repo_local_active_pointer_query"
     try:
-        from llm_wiki_native.runtime import load_engine_from_prepared_workspace
+        from llm_wiki_native.runtime import load_engine_from_workspace_pointer
 
         pointer = json.loads(Path(active_pointer_path).read_text(encoding="utf-8"))
         if not isinstance(pointer, dict):
@@ -216,11 +216,7 @@ def _repo_local_active_pointer_query_check(
             loader_kwargs["sqlite_workspace_factory"] = sqlite_workspace_factory
         if zvec_workspace_factory is not None:
             loader_kwargs["zvec_workspace_factory"] = zvec_workspace_factory
-        engine = load_engine_from_prepared_workspace(
-            Path(active_pointer_path),
-            allowed_statuses=("prepared", "active"),
-            **loader_kwargs,
-        )
+        engine = load_engine_from_workspace_pointer(Path(active_pointer_path), **loader_kwargs)
         result = engine.query(
             workspace_id,
             str(payload.get("query") or ""),
@@ -342,7 +338,7 @@ def _package_independence_runtime_smoke(
             }
         )
     try:
-        from llm_wiki_native.runtime import load_engine_from_prepared_workspace
+        from llm_wiki_native.runtime import load_engine_from_workspace_pointer
 
         class _LoaderDb:
             pass
@@ -378,15 +374,14 @@ def _package_independence_runtime_smoke(
                 calls["read_only"] = read_only
                 return _LoaderZvec()
 
-            engine = load_engine_from_prepared_workspace(
+            engine = load_engine_from_workspace_pointer(
                 pointer_path,
-                allowed_statuses=("prepared", "active"),
                 sqlite_workspace_factory=sqlite_factory,
                 zvec_workspace_factory=zvec_factory,
             )
             checks.append(
                 {
-                    "name": "active_pointer_loader_status_allowance",
+                    "name": "active_pointer_loader_default",
                     "ok": (
                         getattr(engine, "default_workspace_id", None) == "package-independence-active"
                         and calls == {"sqlite_path": sqlite_path, "zvec_path": zvec_path, "read_only": True}
@@ -398,7 +393,7 @@ def _package_independence_runtime_smoke(
     except Exception as exc:
         checks.append(
             {
-                "name": "active_pointer_loader_status_allowance",
+                "name": "active_pointer_loader_default",
                 "ok": False,
                 "exception_type": type(exc).__name__,
                 "message": str(exc),
