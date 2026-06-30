@@ -213,12 +213,6 @@ def main() -> int:
     add_common_paths(clear_parser)
     clear_parser.add_argument("--reason", default="external-success")
     clear_parser.add_argument("--integrated-path", action="append", default=[])
-    clear_parser.add_argument(
-        "--no-mark-native-pending",
-        dest="no_mark_native_pending",
-        action="store_true",
-        help="Clear only; do not carry integrated raw notes into the native graph pending ledger",
-    )
 
     args = parser.parse_args()
     root = args.root.resolve()
@@ -277,7 +271,7 @@ def main() -> int:
                 return 11
         return 0
     if args.command == "clear-success":
-        print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason, mark_native_pending=not args.no_mark_native_pending))
+        print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason))
         return 0
     return 2
 

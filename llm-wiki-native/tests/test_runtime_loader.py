@@ -5,19 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from llm_wiki_native.runtime import load_engine_from_prepared_workspace
+from llm_wiki_native import runtime
 
 
-def test_load_engine_from_prepared_workspace_uses_read_only_zvec_factory(tmp_path) -> None:
-    pointer_path = tmp_path / "prepared_workspace.json"
+def test_load_engine_from_workspace_pointer_uses_read_only_zvec_factory_for_active_default(tmp_path) -> None:
+    pointer_path = tmp_path / "active_workspace.json"
     sqlite_path = tmp_path / "records.sqlite"
     zvec_path = tmp_path / "zvec_records"
     pointer_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "workspace_id": "native-test",
-                "status": "prepared",
+                "workspace_id": "native-active",
+                "status": "active",
                 "sqlite_path": str(sqlite_path),
                 "zvec_path": str(zvec_path),
             }
@@ -41,7 +41,7 @@ def test_load_engine_from_prepared_workspace_uses_read_only_zvec_factory(tmp_pat
         calls["read_only"] = read_only
         return Zvec()
 
-    engine = load_engine_from_prepared_workspace(
+    engine = runtime.load_engine_from_workspace_pointer(
         pointer_path,
         sqlite_workspace_factory=sqlite_factory,
         zvec_workspace_factory=zvec_factory,
@@ -54,30 +54,38 @@ def test_load_engine_from_prepared_workspace_uses_read_only_zvec_factory(tmp_pat
     }
     assert isinstance(engine.db, DB)
     assert isinstance(engine.zvec_workspace, Zvec)
-    assert engine.default_workspace_id == "native-test"
+    assert engine.default_workspace_id == "native-active"
 
 
-def test_load_engine_from_prepared_workspace_requires_prepared_pointer(tmp_path) -> None:
+def test_load_engine_from_workspace_pointer_rejects_prepared_by_default(tmp_path) -> None:
     pointer_path = tmp_path / "prepared_workspace.json"
     pointer_path.write_text(
-        json.dumps({"schema_version": 1, "workspace_id": "native-test", "status": "building"}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": "native-prepared",
+                "status": "prepared",
+                "sqlite_path": str(tmp_path / "records.sqlite"),
+                "zvec_path": str(tmp_path / "zvec_records"),
+            }
+        ),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="prepared"):
-        load_engine_from_prepared_workspace(pointer_path)
+    with pytest.raises(ValueError, match="workspace pointer status must be one of: active"):
+        runtime.load_engine_from_workspace_pointer(pointer_path)
 
 
-def test_load_engine_from_prepared_workspace_accepts_explicit_active_status(tmp_path) -> None:
-    pointer_path = tmp_path / "active_workspace.json"
+def test_load_engine_from_workspace_pointer_accepts_prepared_when_explicitly_allowed(tmp_path) -> None:
+    pointer_path = tmp_path / "prepared_workspace.json"
     sqlite_path = tmp_path / "records.sqlite"
     zvec_path = tmp_path / "zvec_records"
     pointer_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "workspace_id": "native-active",
-                "status": "active",
+                "workspace_id": "native-prepared",
+                "status": "prepared",
                 "sqlite_path": str(sqlite_path),
                 "zvec_path": str(zvec_path),
             }
@@ -91,11 +99,11 @@ def test_load_engine_from_prepared_workspace_accepts_explicit_active_status(tmp_
     class Zvec:
         pass
 
-    engine = load_engine_from_prepared_workspace(
+    engine = runtime.load_engine_from_workspace_pointer(
         pointer_path,
-        allowed_statuses=("prepared", "active"),
+        allowed_statuses=("active", "prepared"),
         sqlite_workspace_factory=lambda path: DB(),
         zvec_workspace_factory=lambda path, *, read_only: Zvec(),
     )
 
-    assert engine.default_workspace_id == "native-active"
+    assert engine.default_workspace_id == "native-prepared"

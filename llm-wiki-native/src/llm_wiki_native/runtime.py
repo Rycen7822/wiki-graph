@@ -1,4 +1,4 @@
-"""Runtime loading helpers for prepared native zvec workspaces."""
+"""Runtime loading helpers for native zvec workspace pointers."""
 
 from __future__ import annotations
 
@@ -10,20 +10,20 @@ from llm_wiki_native.retrieval.query_engine import NativeQueryEngine
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 
 
-def load_engine_from_prepared_workspace(
+def load_engine_from_workspace_pointer(
     pointer_path: Path,
     *,
-    allowed_statuses: tuple[str, ...] = ("prepared",),
+    allowed_statuses: tuple[str, ...] = ("active",),
     sqlite_workspace_factory: Callable[[Path], Any] = SQLiteWorkspace,
     zvec_workspace_factory: Callable[..., Any] | None = None,
 ) -> NativeQueryEngine:
     pointer = _read_pointer(Path(pointer_path))
     if pointer.get("schema_version") != 1:
-        raise ValueError("prepared workspace pointer schema_version must be 1")
+        raise ValueError("workspace pointer schema_version must be 1")
     status = str(pointer.get("status", ""))
     if status not in set(allowed_statuses):
         allowed = ", ".join(allowed_statuses)
-        raise ValueError(f"prepared workspace pointer status must be one of: {allowed}")
+        raise ValueError(f"workspace pointer status must be one of: {allowed}")
     sqlite_path = Path(str(pointer["sqlite_path"]))
     zvec_path = Path(str(pointer["zvec_path"]))
     db = sqlite_workspace_factory(sqlite_path)
@@ -40,8 +40,8 @@ def load_engine_from_prepared_workspace(
 def _read_pointer(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("prepared workspace pointer must be a JSON object")
+        raise ValueError("workspace pointer must be a JSON object")
     for key in ("workspace_id", "sqlite_path", "zvec_path"):
         if not payload.get(key):
-            raise ValueError(f"prepared workspace pointer missing {key}")
+            raise ValueError(f"workspace pointer missing {key}")
     return payload

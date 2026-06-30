@@ -154,13 +154,8 @@ def clear_pending_wiki_integration_after_success(
     state_dir: Path,
     integrated_paths: list[str] | None = None,
     reason: str = "integration",
-    mark_native_pending: bool = True,
 ) -> dict[str, Any]:
-    """Clear wiki integration pending and mark the native refresh ledger.
-
-    When ``mark_native_pending`` is true, cleared wiki work is carried into the
-    native graph refresh pending ledger.
-    """
+    """Clear wiki integration pending and carry cleared work into native refresh pending."""
 
     result = _clear_pending_wiki_integration_pending_after_success(
         root,
@@ -169,7 +164,7 @@ def clear_pending_wiki_integration_after_success(
         reason=reason,
     )
     marked_native_pending: list[dict[str, Any]] = []
-    if mark_native_pending and int(result.get("cleared_count") or 0) > 0:
+    if int(result.get("cleared_count") or 0) > 0:
         marked_native_pending.append(
             mark_native_refresh_pending(
                 state_dir,
