@@ -11,7 +11,7 @@ from wiki_native_jsonl import jsonl_read
 from wiki_native_raw_sections import raw_section_id_from_content, raw_section_kind_from_content
 
 
-def expand_wikigraph_data_response_with_section_neighbors(
+def expand_native_data_response_with_section_neighbors(
     response: dict[str, Any],
     state_dir: Path,
     neighbor_k: int = 5,
@@ -74,7 +74,7 @@ def expand_wikigraph_data_response_with_section_neighbors(
     return cloned
 
 
-def filter_wikigraph_data_response_by_section_kind(response: dict[str, Any], section_kind: str) -> dict[str, Any]:
+def filter_native_data_response_by_section_kind(response: dict[str, Any], section_kind: str) -> dict[str, Any]:
     kind = section_kind.strip().lower()
     cloned = json.loads(json.dumps(response, ensure_ascii=False))
     data = cloned.get("data")

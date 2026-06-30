@@ -14,67 +14,55 @@ RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki"
 sys.path.insert(0, str(SCRIPTS))
 
 import batch_native_refresh  # noqa: E402
-import batch_wikigraph_refresh  # noqa: E402
 import batch_wiki_integration  # noqa: E402
 import raw_fast_closeout  # noqa: E402
 import validate_wiki as validate_wiki_cli  # noqa: E402
 
-from wiki_wikigraph_compat_lib import (  # noqa: E402
-    _section_rank_lists,
-    _section_rank_lists_scalar,
-    build_custom_kg_payload,
-    build_section_similarity_edges,
-    build_seed_edges,
+from wiki_native_artifacts import build_seed_edges, extract_method_atoms, resolve_source  # noqa: E402
+from wiki_native_custom_kg_payload import build_custom_kg_payload  # noqa: E402
+from wiki_native_docs import (  # noqa: E402
     canonical_id_for,
     collect_source_docs,
-    ensure_state_dirs,
-    extract_method_atoms,
-    expand_wikigraph_data_response_with_section_neighbors,
-    extract_raw_sections,
     fallback_frontmatter_load,
-    filter_wikigraph_data_response_by_section_kind,
     generated_docs_from_state,
-    init_manifest_db,
-    DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
-    clear_pending_wiki_integration_after_success,
-    load_pending_wiki_integration_ledger,
-    make_ingest_text,
-    mark_pending_wiki_integration,
     parse_frontmatter,
-    pending_wiki_integration_status,
-    audit_raw_note_section_contracts,
-    raw_section_query_for_kind,
-    raw_section_specs_for_heading,
-    resolve_source,
+)
+from wiki_native_ingest_text import make_ingest_text  # noqa: E402
+from wiki_native_jsonl import jsonl_read  # noqa: E402
+from wiki_native_lib import clear_pending_wiki_integration_after_success  # noqa: E402
+from wiki_native_query_events import init_manifest_db  # noqa: E402
+from wiki_native_query_response import (  # noqa: E402
+    expand_native_data_response_with_section_neighbors,
+    filter_native_data_response_by_section_kind,
+)
+from wiki_native_raw_section_extract import extract_raw_sections  # noqa: E402
+from wiki_native_raw_sections import raw_section_query_for_kind, raw_section_specs_for_heading  # noqa: E402
+from wiki_native_section_similarity import (  # noqa: E402
+    _section_rank_lists,
+    _section_rank_lists_scalar,
+    build_section_similarity_edges,
+    build_section_similarity_edges_from_index,
     section_similarity_embedding_text,
+    section_similarity_index_summary,
     section_similarity_report_summary,
     select_section_similarity_edges,
+)
+from wiki_native_state import ensure_state_dirs  # noqa: E402
+from wiki_native_validation import validate_wiki  # noqa: E402
+from wiki_native_wiki_checks import (  # noqa: E402
+    VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION,
+    audit_raw_note_section_contracts,
     structured_heading_warnings,
-    validate_wiki,
+    validation_freshness_context,
+    validation_report_is_fresh,
     wiki_root_machine_pollution,
 )
-from wiki_wikigraph_refresh_pending import (  # noqa: E402
-    DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD,
-    clear_wikigraph_refresh_pending_after_success,
-    load_wikigraph_refresh_ledger,
-    mark_wikigraph_refresh_pending,
-    pending_wikigraph_refresh_status,
+from wiki_native_wiki_integration_pending import (  # noqa: E402
+    DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
+    load_pending_wiki_integration_ledger,
+    mark_pending_wiki_integration,
+    pending_wiki_integration_status,
 )
-
-
-def _retired_full_import_commands() -> list[list[str]]:
-    return [batch_wikigraph_refresh.retired_wikigraph_cold_import_command()]
-
-
-def _refresh_command_groups(artifact_commands: list[list[str]]) -> dict[str, list[list[str]]]:
-    return {"artifact": artifact_commands, "full_import": _retired_full_import_commands()}
-
-
-def test_refresh_tests_patch_command_groups_not_obsolete_flat_builder() -> None:
-    text = Path(__file__).read_text(encoding="utf-8")
-    target = "build_" + "refresh_commands"
-    assert f'monkeypatch.setattr(batch_wikigraph_refresh, "{target}"' not in text
-    assert f"monkeypatch.setattr(batch_wikigraph_refresh, '{target}'" not in text
 
 
 def write(path: Path, text: str) -> None:
@@ -191,522 +179,18 @@ def test_state_dirs_and_manifest_are_external_to_wiki_root(tmp_path: Path) -> No
     assert not (root / ".llm-wiki").exists()
     db = init_manifest_db(state)
     retired_backend = "light" + "rag"
-    assert db == state / "wikigraph_sync.db"
+    assert db == state / "native_query_events.db"
     with sqlite3.connect(db) as conn:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
         columns = {row[1] for row in conn.execute("pragma table_info(docs)")}
     assert {"docs", "sync_events", "query_events"} <= tables
-    assert {"wikigraph_track_id", "wikigraph_doc_status"} <= columns
+    assert {"native_track_id", "native_doc_status"} <= columns
+    assert {"wikigraph_track_id", "wikigraph_doc_status"}.isdisjoint(columns)
     assert f"{retired_backend}_track_id" not in columns
     assert f"{retired_backend}_doc_status" not in columns
 
 
-def test_query_event_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_query_events
-
-    assert wiki_wikigraph_compat_lib.slugify is wiki_native_query_events.slugify
-    assert wiki_wikigraph_compat_lib.init_manifest_db is wiki_native_query_events.init_manifest_db
-    assert wiki_wikigraph_compat_lib.save_evidence_pack is wiki_native_query_events.save_evidence_pack
-    assert wiki_wikigraph_compat_lib.add_query_event is wiki_native_query_events.add_query_event
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_query_events import" in text
-    for name in ("slugify", "init_manifest_db", "save_evidence_pack", "add_query_event"):
-        assert f"def {name}(" not in text
-
-
-def test_raw_section_contract_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_raw_sections
-
-    assert wiki_wikigraph_compat_lib.RAW_SECTION_SPECS is wiki_native_raw_sections.RAW_SECTION_SPECS
-    assert wiki_wikigraph_compat_lib.RAW_NOTE_CONTRACT_SECTION_KINDS is wiki_native_raw_sections.RAW_NOTE_CONTRACT_SECTION_KINDS
-    assert wiki_wikigraph_compat_lib.raw_section_specs_for_heading is wiki_native_raw_sections.raw_section_specs_for_heading
-    assert wiki_wikigraph_compat_lib.raw_section_query_for_kind is wiki_native_raw_sections.raw_section_query_for_kind
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_raw_sections import" in text
-    for pattern in (
-        "RAW_SECTION_SPECS = [",
-        "RAW_SECTION_QUERY_ALIASES = {",
-        "RAW_NOTE_CONTRACT_SECTION_KINDS = [",
-        "def normalized_heading_key(",
-        "def raw_section_specs_for_heading(",
-        "def raw_section_query_for_kind(",
-    ):
-        assert pattern not in text
-
-
-def test_raw_section_extract_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_raw_section_extract
-
-    assert wiki_wikigraph_compat_lib.extract_raw_note_sections is wiki_native_raw_section_extract.extract_raw_note_sections
-    assert wiki_wikigraph_compat_lib.raw_section_markdown is wiki_native_raw_section_extract.raw_section_markdown
-    assert wiki_wikigraph_compat_lib.extract_raw_sections is wiki_native_raw_section_extract.extract_raw_sections
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_raw_section_extract import" in text
-    for pattern in (
-        "def extract_raw_note_sections(",
-        "def raw_section_markdown(",
-        "def extract_raw_sections(",
-    ):
-        assert pattern not in text
-
-
-def test_document_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_docs
-
-    assert wiki_wikigraph_compat_lib.WikiDoc is wiki_native_docs.WikiDoc
-    assert wiki_wikigraph_compat_lib.COMPILED_DIR_TYPES is wiki_native_docs.COMPILED_DIR_TYPES
-    assert wiki_wikigraph_compat_lib.collect_source_docs is wiki_native_docs.collect_source_docs
-    assert wiki_wikigraph_compat_lib.generated_docs_from_state is wiki_native_docs.generated_docs_from_state
-    assert wiki_wikigraph_compat_lib.parse_frontmatter is wiki_native_docs.parse_frontmatter
-    assert wiki_wikigraph_compat_lib.display_scalar is wiki_native_docs.display_scalar
-    assert wiki_wikigraph_compat_lib.sha256_text is wiki_native_docs.sha256_text
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_docs import" in text
-    for pattern in (
-        "COMPILED_DIR_TYPES = {",
-        "META_FILES = [",
-        "class WikiDoc",
-        "def generated_doc_filename(",
-        "def sha256_text(",
-        "def read_text(",
-        "def fallback_frontmatter_load(",
-        "def parse_frontmatter(",
-        "def display_scalar(",
-        "def canonical_id_for(",
-        "def doc_type_for(",
-        "def title_for(",
-        "def make_wiki_doc(",
-        "def raw_clip_files(",
-        "def collect_source_docs(",
-        "def markdown_sections(",
-        "def section_text(",
-        "def generated_docs_from_state(",
-        "def generated_doc_id(",
-    ):
-        assert pattern not in text
-
-
-def test_state_dir_helper_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_state
-
-    assert wiki_wikigraph_compat_lib.STATE_SUBDIRS is wiki_native_state.STATE_SUBDIRS
-    assert wiki_wikigraph_compat_lib.ensure_state_dirs is wiki_native_state.ensure_state_dirs
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_state import" in text
-    assert "STATE_SUBDIRS = [" not in text
-    assert "def ensure_state_dirs(" not in text
-
-
-def test_ingest_text_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_ingest_text
-
-    assert wiki_wikigraph_compat_lib.as_list is wiki_native_ingest_text.as_list
-    assert wiki_wikigraph_compat_lib.find_wikilinks is wiki_native_ingest_text.find_wikilinks
-    assert wiki_wikigraph_compat_lib.first_sentences is wiki_native_ingest_text.first_sentences
-    assert wiki_wikigraph_compat_lib.source_urls is wiki_native_ingest_text.source_urls
-    assert wiki_wikigraph_compat_lib.compact_body_for_ingest is wiki_native_ingest_text.compact_body_for_ingest
-    assert wiki_wikigraph_compat_lib.limited_scalar is wiki_native_ingest_text.limited_scalar
-    assert wiki_wikigraph_compat_lib.make_ingest_text is wiki_native_ingest_text.make_ingest_text
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_ingest_text import" in text
-    for pattern in (
-        "def as_list(",
-        "def find_wikilinks(",
-        "def first_sentences(",
-        "def source_urls(",
-        "def compact_body_for_ingest(",
-        "def limited_scalar(",
-        "def make_ingest_text(",
-    ):
-        assert pattern not in text
-
-
-def test_jsonl_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_jsonl
-
-    assert wiki_wikigraph_compat_lib.jsonl_read is wiki_native_jsonl.jsonl_read
-    assert wiki_wikigraph_compat_lib.jsonl_write is wiki_native_jsonl.jsonl_write
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_jsonl import" in text
-    assert "def jsonl_read(" not in text
-    assert "def jsonl_write(" not in text
-
-
-def test_query_response_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_query_response
-
-    retired_backend = "light" + "rag"
-    assert wiki_wikigraph_compat_lib.expand_wikigraph_data_response_with_section_neighbors is wiki_native_query_response.expand_wikigraph_data_response_with_section_neighbors
-    assert wiki_wikigraph_compat_lib.filter_wikigraph_data_response_by_section_kind is wiki_native_query_response.filter_wikigraph_data_response_by_section_kind
-    assert not hasattr(wiki_wikigraph_compat_lib, f"expand_{retired_backend}_data_response_with_section_neighbors")
-    assert not hasattr(wiki_wikigraph_compat_lib, f"filter_{retired_backend}_data_response_by_section_kind")
-    assert not hasattr(wiki_native_query_response, f"expand_{retired_backend}_data_response_with_section_neighbors")
-    assert not hasattr(wiki_native_query_response, f"filter_{retired_backend}_data_response_by_section_kind")
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_query_response import" in text
-    assert "expand_wikigraph_data_response_with_section_neighbors" in text
-    assert "filter_wikigraph_data_response_by_section_kind" in text
-    assert f"def expand_{retired_backend}_data_response_with_section_neighbors(" not in text
-    assert f"def filter_{retired_backend}_data_response_by_section_kind(" not in text
-
-
-def test_section_similarity_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_section_similarity
-
-    for name in (
-        "_section_rank_lists",
-        "_section_rank_lists_scalar",
-        "build_section_similarity_edges",
-        "build_section_similarity_edges_from_index",
-        "cosine_similarity",
-        "section_similarity_edge_to_custom_kg_relationship",
-        "section_similarity_embedding_text",
-        "section_similarity_index_summary",
-        "section_similarity_report_summary",
-        "select_section_similarity_edges",
-        "write_section_similarity_index",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_section_similarity, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_section_similarity import" in text
-    for pattern in (
-        "def section_similarity_embedding_text(",
-        "def _section_rank_lists_scalar(",
-        "def _section_rank_lists(",
-        "def write_section_similarity_index(",
-        "def build_section_similarity_edges_from_index(",
-        "def build_section_similarity_edges(",
-        "def section_similarity_edge_to_custom_kg_relationship(",
-        "def section_similarity_report_summary(",
-        "def select_section_similarity_edges(",
-    ):
-        assert pattern not in text
-
-
-def test_custom_kg_payload_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_custom_kg_payload
-
-    for name in (
-        "build_custom_kg_payload",
-        "custom_kg_doc_description",
-        "custom_kg_entity_type",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_custom_kg_payload, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_custom_kg_payload import" in text
-    for pattern in (
-        "def custom_kg_entity_type(",
-        "def custom_kg_doc_description(",
-        "def build_custom_kg_payload(",
-    ):
-        assert pattern not in text
-
-
-def test_cli_defaults_and_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_cli
-
-    for name in (
-        "DEFAULT_SERVER",
-        "DEFAULT_STATE_DIR",
-        "DEFAULT_WIKI_ROOT",
-        "DEFAULT_WORKDIR",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) == getattr(wiki_native_cli, name)
-    for name in ("common_paths_parser", "print_json", "release_process_memory"):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_cli, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_cli import" in text
-    for pattern in (
-        "DEFAULT_WIKI_ROOT =",
-        "DEFAULT_WORKDIR =",
-        "def common_paths_parser(",
-        "def print_json(",
-        "def release_process_memory(",
-    ):
-        assert pattern not in text
-
-
-def test_artifact_builder_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_artifacts
-
-    for name in (
-        "WIKI_SOURCE_ROOT_PREFIXES",
-        "build_seed_edges",
-        "extract_method_atoms",
-        "resolve_source",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_artifacts, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_artifacts import" in text
-    for pattern in (
-        "def resolve_source(",
-        "def _resolve_source_cached(",
-        "def _lexical_norm(",
-        "def _is_lexically_under(",
-        "def bullet_items(",
-        "def method_type_for(",
-        "def extract_method_atoms(",
-        "def method_atom_markdown(",
-        "def build_seed_edges(",
-        "def edge_markdown(",
-        "def write_text_if_changed(",
-    ):
-        assert pattern not in text
-
-
-def test_wiki_check_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_wiki_checks
-
-    for name in (
-        "POLLUTION_DIRECT_NAMES",
-        "POLLUTION_RECURSIVE_NAMES",
-        "VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION",
-        "audit_raw_note_section_contracts",
-        "compiled_pages",
-        "index_stats",
-        "indexed_markdown_pages",
-        "is_structured_raw_note",
-        "now_stamp",
-        "structured_heading_warnings",
-        "validation_freshness_context",
-        "validation_input_fingerprints",
-        "validation_report_is_fresh",
-        "wiki_root_machine_pollution",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_wiki_checks, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_wiki_checks import" in text
-    for pattern in (
-        "VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION =",
-        "POLLUTION_DIRECT_NAMES =",
-        "POLLUTION_RECURSIVE_NAMES =",
-        "def now_stamp(",
-        "def validation_report_is_fresh(",
-        "def validation_input_fingerprints(",
-        "def validation_freshness_context(",
-        "def wiki_root_machine_pollution(",
-        "def compiled_pages(",
-        "def indexed_markdown_pages(",
-        "def index_stats(",
-        "def is_structured_raw_note(",
-        "def structured_heading_warnings(",
-        "def audit_raw_note_section_contracts(",
-    ):
-        assert pattern not in text
-
-
-def test_wiki_integration_pending_helpers_reexport_from_native_owner() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_native_wiki_integration_pending
-
-    for name in (
-        "PENDING_WIKI_INTEGRATION_LEDGER",
-        "DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD",
-        "WIKI_INTEGRATION_ACTIONABLE_STATUSES",
-        "WIKI_INTEGRATION_REVIEW_STATUSES",
-        "WIKI_INTEGRATION_TERMINAL_STATUSES",
-        "default_pending_wiki_integration_ledger",
-        "load_pending_wiki_integration_ledger",
-        "mark_pending_wiki_integration",
-        "pending_wiki_integration_ledger_path",
-        "pending_wiki_integration_status",
-        "record_pending_wiki_integration_failure",
-        "save_pending_wiki_integration_ledger",
-    ):
-        assert getattr(wiki_wikigraph_compat_lib, name) is getattr(wiki_native_wiki_integration_pending, name)
-
-    assert (
-        wiki_wikigraph_compat_lib.clear_pending_wiki_integration_after_success
-        is not wiki_native_wiki_integration_pending.clear_pending_wiki_integration_after_success
-    )
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_native_wiki_integration_pending import" in text
-    assert (
-        "clear_pending_wiki_integration_after_success as _native_clear_pending_wiki_integration_after_success"
-        in text
-    )
-    for pattern in (
-        "PENDING_WIKI_INTEGRATION_LEDGER =",
-        "DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD =",
-        "WIKI_INTEGRATION_ACTIONABLE_STATUSES =",
-        "WIKI_INTEGRATION_REVIEW_STATUSES =",
-        "WIKI_INTEGRATION_TERMINAL_STATUSES =",
-        "def pending_wiki_integration_ledger_path(",
-        "def default_pending_wiki_integration_ledger(",
-        "def load_pending_wiki_integration_ledger(",
-        "def save_pending_wiki_integration_ledger(",
-        "def mark_pending_wiki_integration(",
-        "def pending_wiki_integration_status(",
-        "def record_pending_wiki_integration_failure(",
-    ):
-        assert pattern not in text
-
-
-def test_wikigraph_refresh_pending_owner_is_not_reexported_through_compatibility_facade() -> None:
-    import wiki_wikigraph_compat_lib
-    import wiki_wikigraph_refresh_pending
-
-    old_backend = "light" + "rag"
-    old_module = f"wiki_{old_backend}_refresh_pending"
-    new_module = "wiki_wikigraph_refresh_pending"
-
-    assert not (SCRIPTS / f"{old_module}.py").exists()
-    assert (SCRIPTS / f"{new_module}.py").exists()
-
-    for name in (
-        "clear_wikigraph_refresh_pending_after_success",
-        "default_wikigraph_refresh_ledger",
-        "wikigraph_refresh_import_summary",
-        "load_wikigraph_refresh_ledger",
-        "mark_wikigraph_refresh_pending",
-        "pending_wikigraph_refresh_ledger_path",
-        "pending_wikigraph_refresh_status",
-        "record_wikigraph_refresh_failure",
-        "save_wikigraph_refresh_ledger",
-        "wiki_markdown_latest_mtime",
-        "PENDING_WIKIGRAPH_REFRESH_LEDGER",
-        "DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD",
-    ):
-        assert hasattr(wiki_wikigraph_refresh_pending, name)
-        assert not hasattr(wiki_wikigraph_compat_lib, name)
-
-    for old_name in (
-        f"PENDING_{old_backend.upper()}_REFRESH_LEDGER",
-        f"DEFAULT_PENDING_{old_backend.upper()}_REFRESH_THRESHOLD",
-        f"clear_{old_backend}_refresh_pending_after_success",
-        f"default_{old_backend}_refresh_ledger",
-        f"{old_backend}_refresh_import_summary",
-        f"load_{old_backend}_refresh_ledger",
-        f"mark_{old_backend}_refresh_pending",
-        f"pending_{old_backend}_refresh_ledger_path",
-        f"pending_{old_backend}_refresh_status",
-        f"record_{old_backend}_refresh_failure",
-        f"save_{old_backend}_refresh_ledger",
-    ):
-        assert not hasattr(wiki_wikigraph_compat_lib, old_name)
-
-    module_text = (SCRIPTS / f"{new_module}.py").read_text(encoding="utf-8")
-    for pattern in (
-        "PENDING_WIKIGRAPH_REFRESH_LEDGER =",
-        "DEFAULT_PENDING_WIKIGRAPH_REFRESH_THRESHOLD =",
-        "def pending_wikigraph_refresh_ledger_path(",
-        "def default_wikigraph_refresh_ledger(",
-        "def load_wikigraph_refresh_ledger(",
-        "def save_wikigraph_refresh_ledger(",
-        "def wikigraph_refresh_import_summary(",
-        "def _parse_refresh_time(",
-        "wiki_markdown_latest_mtime",
-        "def mark_wikigraph_refresh_pending(",
-        "def pending_wikigraph_refresh_status(",
-        "def clear_wikigraph_refresh_pending_after_success(",
-        "def record_wikigraph_refresh_failure(",
-    ):
-        assert pattern in module_text
-    assert "import wiki_wikigraph_compat_lib" not in module_text
-    assert "from wiki_wikigraph_compat_lib import" not in module_text
-    assert old_backend not in module_text
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert f"from {new_module} import" not in text
-    assert f"from {old_module} import" not in text
-    for pattern in (
-        f"PENDING_{old_backend.upper()}_REFRESH_LEDGER =",
-        f"DEFAULT_PENDING_{old_backend.upper()}_REFRESH_THRESHOLD =",
-        f"def pending_{old_backend}_refresh_ledger_path(",
-        f"def default_{old_backend}_refresh_ledger(",
-        f"def load_{old_backend}_refresh_ledger(",
-        f"def save_{old_backend}_refresh_ledger(",
-        f"def {old_backend}_refresh_import_summary(",
-        "def _parse_refresh_time(",
-        "def wiki_markdown_latest_mtime(",
-        f"def mark_{old_backend}_refresh_pending(",
-        f"def pending_{old_backend}_refresh_status(",
-        f"def clear_{old_backend}_refresh_pending_after_success(",
-        f"def record_{old_backend}_refresh_failure(",
-    ):
-        assert pattern not in text
-
-
-def test_old_http_query_compatibility_module_is_removed() -> None:
-    import wiki_wikigraph_compat_lib
-
-    old_backend = "light" + "rag"
-    module_name = f"wiki_{old_backend}_http"
-    sys.modules.pop(module_name, None)
-
-    assert not (SCRIPTS / f"{module_name}.py").exists()
-    with pytest.raises(ModuleNotFoundError):
-        __import__(module_name)
-
-    retired_http_helpers = {
-        "health",
-        "http_json",
-        f"load_{old_backend}_api_key",
-        f"query_{old_backend}",
-        f"query_{old_backend}_data",
-        "TERMINAL_STATUSES",
-        "SUCCESS_STATUSES",
-        "insert_texts",
-        "track_status",
-        "wait_for_track",
-        "manifest_rows",
-        "upsert_doc_event",
-        "write_manifest_jsonl",
-        f"sync_docs_to_{old_backend}",
-    }
-    for name in retired_http_helpers:
-        assert not hasattr(wiki_wikigraph_compat_lib, name)
-
-    text = (SCRIPTS / "wiki_wikigraph_compat_lib.py").read_text(encoding="utf-8")
-    assert f"from wiki_{old_backend}_http import" not in text
-    for pattern in (
-        f"def load_{old_backend}_api_key(",
-        "def http_json(",
-        "def health(",
-        f"def query_{old_backend}(",
-        f"def query_{old_backend}_data(",
-        "TERMINAL_STATUSES =",
-        "SUCCESS_STATUSES =",
-        "def insert_texts(",
-        "def track_status(",
-        "def wait_for_track(",
-        "def manifest_rows(",
-        "def upsert_doc_event(",
-        "def write_manifest_jsonl(",
-        f"def sync_docs_to_{old_backend}(",
-    ):
-        assert pattern not in text
-
-
 def test_jsonl_read_streams_rows_in_order_and_skips_blank_lines(tmp_path: Path) -> None:
-    from wiki_wikigraph_compat_lib import jsonl_read
 
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a": 1}\n\n  {"b": 2}  \n', encoding="utf-8")
@@ -769,15 +253,13 @@ def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
 
 
 def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path: Path) -> None:
-    import wiki_wikigraph_compat_lib
-
     root = validation_reuse_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
     workdir = tmp_path / "work" / "wikigraph"
 
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
-    current = wiki_wikigraph_compat_lib.validation_freshness_context(root, state, workdir)
-    freshness = wiki_wikigraph_compat_lib.validation_report_is_fresh(
+    current = validation_freshness_context(root, state, workdir)
+    freshness = validation_report_is_fresh(
         report,
         current,
         required_surfaces=["index", "compiled", "_meta", "raw"],
@@ -785,7 +267,7 @@ def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path
     )
 
     assert freshness == {"fresh": True, "rejections": []}
-    assert report["schema_version"] == wiki_wikigraph_compat_lib.VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
+    assert report["schema_version"] == VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
     assert report["root"] == str(root.resolve())
     assert report["state_dir"] == str(state.resolve())
     assert report["workdir"] == str(workdir.resolve())
@@ -872,27 +354,6 @@ def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path,
     assert "fingerprint_mismatch:index.md" in payload["validation_reuse"]["rejections"]
 
 
-def test_validation_split_module_reexports_existing_public_functions() -> None:
-    import wiki_native_validation
-
-    old_backend = "light" + "rag"
-    compat_module_name = "wiki_wikigraph_compat_lib"
-    validation_module_name = f"wiki_{old_backend}_validation"
-    compat_lib = importlib.import_module(compat_module_name)
-
-    assert not (SCRIPTS / f"{validation_module_name}.py").exists()
-    sys.modules.pop(validation_module_name, None)
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(validation_module_name)
-
-    assert compat_lib.validate_wiki is wiki_native_validation.validate_wiki
-    assert compat_lib.secret_hits is wiki_native_validation.secret_hits
-
-    text = (SCRIPTS / f"{compat_module_name}.py").read_text(encoding="utf-8")
-    assert "from wiki_native_validation import secret_hits, validate_wiki" in text
-    assert f"from {validation_module_name} import secret_hits, validate_wiki" not in text
-
-
 def _fresh_validation_report_inputs() -> tuple[dict[str, object], dict[str, object]]:
     fingerprint = {"sha256": "abc123", "size": 12, "mtime_ns": 345}
     report = {
@@ -918,11 +379,9 @@ def _fresh_validation_report_inputs() -> tuple[dict[str, object], dict[str, obje
 
 
 def test_validation_report_freshness_accepts_matching_report() -> None:
-    import wiki_wikigraph_compat_lib
-
     report, current = _fresh_validation_report_inputs()
 
-    result = wiki_wikigraph_compat_lib.validation_report_is_fresh(
+    result = validation_report_is_fresh(
         report,
         current,
         required_surfaces=["compiled", "_meta"],
@@ -956,12 +415,10 @@ def test_validation_report_freshness_accepts_matching_report() -> None:
     ],
 )
 def test_validation_report_freshness_rejects_stale_or_unsafe_reports(mutator, required_surfaces: list[str], reason: str, expected_rejection: str) -> None:
-    import wiki_wikigraph_compat_lib
-
     report, current = _fresh_validation_report_inputs()
     mutator(report, current)
 
-    result = wiki_wikigraph_compat_lib.validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
+    result = validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
 
     assert result["fresh"] is False
     assert expected_rejection in result["rejections"]
@@ -1028,65 +485,9 @@ def test_build_evidence_pack_alias_preserves_output_and_records_query_event(
     assert set(payload) == {"evidence_pack"}
     pack = Path(payload["evidence_pack"])
     assert pack.exists()
-    with sqlite3.connect(state / "wikigraph_sync.db") as conn:
+    with sqlite3.connect(state / "native_query_events.db") as conn:
         rows = conn.execute("SELECT query, mode, evidence_pack_path FROM query_events").fetchall()
     assert rows == [("alias query", "mix", str(pack))]
-
-
-# Retired wikigraph pending writes are no longer part of production behavior.
-
-def test_pending_wikigraph_refresh_status_reads_existing_ledger_without_writes(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    ensure_state_dirs(state)
-    ledger_path = state / "pending_wikigraph_refresh.json"
-    ledger_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "threshold": 2,
-                "last_successful_refresh_at": None,
-                "last_successful_raw_count": None,
-                "last_successful_import_payload": {},
-                "pending": [
-                    {"raw_path": "raw/clip/2601/26010101_Foo-Paper.md", "title": "Foo Paper"},
-                    {"raw_path": "raw/clip/2601/26010102_Bar-Paper.md", "title": "Bar Paper"},
-                ],
-                "dirty": True,
-                "last_failed_refresh": None,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
-
-    assert status["retired"] is True
-    assert status["pending_count"] == 2
-    assert status["threshold"] == 2
-    assert status["would_refresh_if_unblocked"] is True
-    assert status["should_refresh"] is False
-    assert status["next_required_action"] == "native_refresh"
-    assert json.loads(ledger_path.read_text(encoding="utf-8"))["dirty"] is True
-    with pytest.raises(RuntimeError, match="ledger writes are retired"):
-        mark_wikigraph_refresh_pending(state, root, raw_path="raw/clip/2601/26010103_Baz.md")
-    with pytest.raises(RuntimeError, match="ledger writes are retired"):
-        clear_wikigraph_refresh_pending_after_success(root, state)
-
-
-def test_pending_wikigraph_refresh_status_is_readonly_when_state_is_absent(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "absent" / "state"
-
-    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
-
-    assert status["retired"] is True
-    assert status["should_refresh"] is False
-    assert status["pending_count"] == 0
-    assert status["raw_fast_pending_wiki_integration_count"] == 0
-    assert not state.exists()
 
 
 def test_mark_pending_wiki_integration_tracks_raw_fast_queue_without_wiki_pollution(tmp_path: Path) -> None:
@@ -1160,37 +561,17 @@ def test_pending_wiki_integration_status_uses_persisted_threshold(tmp_path: Path
     assert "pending_threshold_reached" in status["reasons"]
 
 
-def test_terminal_wiki_integration_statuses_do_not_trigger_threshold_or_wikigraph_block(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    for idx in range(10):
-        mark_pending_wiki_integration(state, root, raw_path=f"raw/clip/2601/260103{idx:02d}_Duplicate.md", title=f"Duplicate {idx}", status="skipped_duplicate")
-
-    wiki_status = pending_wiki_integration_status(root, state)
-    graph_status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
-
-    assert wiki_status["pending_count"] == 10
-    assert wiki_status["actionable_pending_count"] == 0
-    assert wiki_status["terminal_pending_count"] == 10
-    assert wiki_status["should_integrate"] is False
-    assert graph_status["blocked_by_pending_wiki_integration"] is False
-    assert graph_status["raw_fast_pending_wiki_integration_count"] == 0
-
-
-def test_review_wiki_integration_status_blocks_wikigraph_with_manual_review_action(tmp_path: Path) -> None:
+def test_review_wiki_integration_status_routes_manual_review_items_without_old_graph_status(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
     mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010400_Needs-Review.md", title="Needs Review", status="needs_review")
 
     wiki_status = pending_wiki_integration_status(root, state, reason="pre-query")
-    graph_status = pending_wikigraph_refresh_status(root, state, reason="pre-query")
 
     assert wiki_status["actionable_pending_count"] == 0
     assert wiki_status["review_pending_count"] == 1
     assert "pending_items_need_review" in wiki_status["reasons"]
-    assert graph_status["blocked_by_pending_wiki_integration"] is True
-    assert graph_status["next_required_action"] == "manual_review"
-    assert graph_status["raw_fast_pending_wiki_integration_count"] == 1
+    assert wiki_status["next_required_action"] == "manual_review"
 
 
 def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in_review_queue(tmp_path: Path) -> None:
@@ -1282,9 +663,6 @@ def test_clear_pending_wiki_integration_without_integrated_paths_marks_native_re
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
     assert not (state / "pending_wikigraph_refresh.json").exists()
     assert len(batch_native_refresh.pending_entries(state)) == 1
-
-
-# Retired batch_wikigraph_refresh behavior is now covered by tests/test_wikigraph_refresh.py.
 
 
 def test_batch_wiki_integration_cli_status_mark_and_clear_are_external(tmp_path: Path) -> None:
@@ -1699,7 +1077,7 @@ def test_custom_kg_payload_includes_raw_section_chunks_and_relationships(tmp_pat
 
 
 def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(tmp_path: Path) -> None:
-    from custom_kg_incremental import build_custom_kg_manifest, relation_vdb_id, stable_hash
+    from custom_kg_incremental import build_custom_kg_manifest, entity_record_id, relationship_record_id, stable_hash
 
     payload = {
         "chunks": [
@@ -1737,7 +1115,7 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
     assert manifest["entities"]["topic:x"]["source_chunk_id"] == chunk_id
     topic = manifest["entities"]["topic:x"]
     assert topic["record_type"] == "entity"
-    assert topic["record_id"] == topic["vdb_id"]
+    assert topic["record_id"] == entity_record_id("topic:x")
     assert topic["canonical_id"] == "topic:x"
     assert topic["vector_text_hash"] == stable_hash(topic["content"])
     assert "UNKNOWN" not in json.dumps(manifest, ensure_ascii=False)
@@ -1749,21 +1127,21 @@ def test_custom_kg_manifest_resolves_sources_and_preserves_typed_relationships(t
     assert old_rel["description"] == "old"
     assert old_rel["src_id"] == "topic:x"
     assert old_rel["tgt_id"] == "doc:a"
-    assert old_rel["vdb_id"] == relation_vdb_id("topic:x", "doc:a", "OLD")
+    assert old_rel["record_id"] == relationship_record_id("topic:x", "doc:a", "OLD")
     assert new_rel["description"] == "new"
     assert new_rel["src_id"] == "doc:a"
     assert new_rel["tgt_id"] == "topic:x"
     assert new_rel["source_chunk_id"] == chunk_id
-    assert new_rel["vdb_id"] == relation_vdb_id("doc:a", "topic:x", "NEW")
+    assert new_rel["record_id"] == relationship_record_id("doc:a", "topic:x", "NEW")
     assert new_rel["record_type"] == "relationship"
-    assert new_rel["record_id"] == new_rel["vdb_id"]
     assert new_rel["canonical_id"] == new_rel["chunk_key"]
+    assert "vdb_id" not in json.dumps(manifest, ensure_ascii=False)
     assert new_rel["vector_text_hash"] == stable_hash(new_rel["content"])
 
 
-def test_custom_kg_manifest_matches_wikigraph_sanitized_chunk_ids_and_basenames() -> None:
+def test_custom_kg_manifest_matches_native_sanitized_chunk_ids_and_basenames() -> None:
     import custom_kg_incremental
-    from custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, wikigraph_sanitize_text
+    from custom_kg_incremental import build_custom_kg_manifest, compute_mdhash_id, native_manifest_sanitize_text
 
     retired_backend = "light" + "rag"
     assert not hasattr(custom_kg_incremental, f"{retired_backend}_sanitize_text")
@@ -1781,11 +1159,11 @@ def test_custom_kg_manifest_matches_wikigraph_sanitized_chunk_ids_and_basenames(
     }
 
     manifest = build_custom_kg_manifest(payload, native_manifest_tool_version="1.5.0", embedding_model="test-embed", embedding_dim=3)
-    sanitized = wikigraph_sanitize_text(raw_content)
+    sanitized = native_manifest_sanitize_text(raw_content)
     chunk_id = compute_mdhash_id(sanitized, prefix="chunk-")
 
     assert sanitized == "A & B"
-    assert custom_kg_incremental.wikigraph_normalize_file_path("nested/doc.[native-iet].md") == "doc.md"
+    assert custom_kg_incremental.native_manifest_normalize_file_path("nested/doc.[native-iet].md") == "doc.md"
     assert set(manifest["chunks"]) == {chunk_id}
     assert manifest["chunks"][chunk_id]["content"] == sanitized
     assert manifest["chunks"][chunk_id]["file_path"] == "doc.md"
@@ -1805,55 +1183,6 @@ def test_custom_kg_incremental_source_uses_native_runtime_wording() -> None:
     assert "def _resolve_wikigraph_tool_version_arg" not in text
     assert '"wikigraph_tool_version":' not in text
     assert "wikigraph-custom-kg" not in text
-
-
-def test_import_custom_kg_source_uses_wikigraph_external_graph_wording() -> None:
-    text = (SCRIPTS / "import_custom_kg.py").read_text(encoding="utf-8")
-    retired_backend = "light" + "rag"
-
-    assert retired_backend not in text.lower()
-    assert "wikigraph" in text.lower()
-
-
-def test_wikigraph_compat_tests_use_wikigraph_workdir_fixture_paths() -> None:
-    text = (Path(__file__).read_text(encoding="utf-8"))
-    retired_backend = "light" + "rag"
-    retired_path_fragment = f'"work" / "{retired_backend}"'
-
-    assert retired_path_fragment not in text
-    assert '"work" / "wikigraph"' in text
-
-
-def test_wikigraph_compat_tests_use_wikigraph_status_key_names() -> None:
-    text = Path(__file__).read_text(encoding="utf-8")
-    retired_backend = "light" + "rag"
-    forbidden_tokens = [
-        f"test_{retired_backend}",
-        f"{retired_backend}_status",
-        f"{retired_backend}_state_dir",
-        f"{retired_backend}_workdir",
-        f"{retired_backend}_unresolved",
-        f"{retired_backend}_block",
-        f"{retired_backend}_manifest",
-    ]
-
-    for token in forbidden_tokens:
-        assert token not in text
-
-
-def test_wikigraph_compat_tests_construct_fake_external_module_names() -> None:
-    text = Path(__file__).read_text(encoding="utf-8")
-    retired_backend = "light" + "rag"
-    fake_class_token = "Fake" + "Light" + "RAG"
-    forbidden_tokens = [
-        f"fake_{retired_backend}",
-        fake_class_token,
-        f'types.ModuleType("{retired_backend}',
-        f'sys.modules, "{retired_backend}',
-    ]
-
-    for token in forbidden_tokens:
-        assert token not in text
 
 
 def test_native_sync_db_sources_use_wikigraph_schema_names() -> None:
@@ -2087,21 +1416,6 @@ def test_incremental_refresh_mode_requires_manifest_and_full_after_five_incremen
 # Retired incremental apply runner behavior is covered by direct fail-closed tests; low-level diff helpers remain tested above.
 
 
-def test_custom_kg_storage_audit_is_retired_without_reading_old_storage(tmp_path: Path) -> None:
-    from custom_kg_incremental import audit_custom_kg_storage
-
-    storage = tmp_path / "rag_storage"
-    storage.mkdir()
-    (storage / "graph_chunk_entity_relation.graphml").write_text("not graphml", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="retired"):
-        audit_custom_kg_storage(storage, {"chunks": {}, "entities": {}, "relationships": {}})
-
-    source = (SCRIPTS / "custom_kg_incremental.py").read_text(encoding="utf-8")
-    forbidden = ["_load_vdb", "_load_kv", "nx.read_graphml", "CUSTOM_KG_STORAGE_AUDIT_FILES", "storage_audit_ok", "current_storage_audit_failed"]
-    assert [token for token in forbidden if token in source] == []
-
-
 def test_section_similarity_embedding_text_uses_clean_section_content_without_sidecar_boilerplate() -> None:
     section = {
         "section_id": "raw_section:26010101_Foo-Paper:future",
@@ -2154,7 +1468,6 @@ def test_build_section_similarity_edges_keeps_sparse_mutual_edges_and_excludes_s
 
 
 def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path) -> None:
-    from wiki_wikigraph_compat_lib import build_section_similarity_edges_from_index, section_similarity_index_summary
 
     sections = [
         {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
@@ -2214,7 +1527,6 @@ def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path)
 
 def test_build_section_similarity_graph_writes_section_similarity_index_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import build_section_similarity_graph
-    from wiki_wikigraph_compat_lib import jsonl_read, section_similarity_index_summary
 
     root = tmp_path / "wiki"
     state = tmp_path / "state"
@@ -2539,14 +1851,14 @@ def test_section_kind_query_prefix_and_response_filter_target_raw_section_chunks
         },
         "status": "ok",
     }
-    filtered = filter_wikigraph_data_response_by_section_kind(response, "methodology")
+    filtered = filter_native_data_response_by_section_kind(response, "methodology")
     chunks = filtered["data"]["chunks"]
     assert len(chunks) == 1
     assert chunks[0]["file_path"] == "raw_section_docs/a.md"
     assert response["data"]["chunks"][1]["file_path"] == "raw_section_docs/b.md"
 
 
-def test_expand_wikigraph_data_response_with_section_neighbors_keeps_direct_hits_separate(tmp_path: Path) -> None:
+def test_expand_native_data_response_with_section_neighbors_keeps_direct_hits_separate(tmp_path: Path) -> None:
     state = tmp_path / "state"
     ensure_state_dirs(state)
     write(
@@ -2575,52 +1887,13 @@ def test_expand_wikigraph_data_response_with_section_neighbors_keeps_direct_hits
             ]
         }
     }
-    expanded = expand_wikigraph_data_response_with_section_neighbors(response, state, neighbor_k=1, section_kind="future")
+    expanded = expand_native_data_response_with_section_neighbors(response, state, neighbor_k=1, section_kind="future")
     neighbors = expanded["data"]["section_neighbor_expansions"]
     assert len(neighbors) == 1
     assert neighbors[0]["seed_section_id"] == "raw_section:a:future"
     assert neighbors[0]["neighbor_section_id"] == "raw_section:b:future"
     assert neighbors[0]["cosine"] == 0.88
     assert expanded["data"]["chunks"] == response["data"]["chunks"]
-
-
-def test_import_custom_kg_run_import_retired_before_storage_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import asyncio
-    import import_custom_kg
-
-    root = sample_wiki(tmp_path)
-    workdir = tmp_path / "work" / "wikigraph"
-    state_dir = workdir / "state"
-    ensure_state_dirs(state_dir)
-
-    def fail_if_called(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("build_rag should not be called by retired cold import")
-
-    monkeypatch.setattr(import_custom_kg, "build_rag", fail_if_called)
-    args = types.SimpleNamespace(
-        root=root,
-        workdir=workdir,
-        state_dir=state_dir,
-        limit_docs=None,
-        limit_edges=None,
-        dry_run=False,
-        server_host="127.0.0.1",
-        server_port=9621,
-        allow_server_running=False,
-    )
-
-    with pytest.raises(RuntimeError, match="custom KG cold import is retired"):
-        asyncio.run(import_custom_kg.run_import(args))
-
-    assert not (state_dir / "custom_kg_manifest.json").exists()
-    assert not (state_dir / "custom_kg_import_report.json").exists()
-
-
-def test_import_custom_kg_build_rag_is_retired_without_constructing_external_graph(tmp_path: Path) -> None:
-    from import_custom_kg import build_rag
-
-    with pytest.raises(RuntimeError, match="object construction is retired"):
-        build_rag(tmp_path)
 
 
 def test_generated_virtual_doc_builders_remove_stale_markdown(tmp_path: Path) -> None:
@@ -3625,15 +2898,3 @@ def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tm
     assert native_status["standalone_native_should_refresh"] is True
     assert "graph-ready pending `0`, `should_refresh=false`" in entry
     assert "standalone native ledger pending `1`, `should_refresh=true`" in entry
-
-
-def test_threshold_wikigraph_status_skips_prequery_freshness_scan(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    mark_pending_wiki_integration(state, root, raw_path="raw/clip/2601/26010113_Pending.md", title="Pending")
-
-    status = pending_wikigraph_refresh_status(root, state, reason="threshold")
-
-    assert status["blocked_by_pending_wiki_integration"] is True
-    assert status["latest_wiki_markdown_mtime"] is None
-    assert status["import_report"] == {}

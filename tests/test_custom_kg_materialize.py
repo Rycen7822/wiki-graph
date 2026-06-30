@@ -12,7 +12,6 @@ sys.path.insert(0, str(SCRIPTS))
 import custom_kg_incremental  # noqa: E402
 import custom_kg_vector_fill  # noqa: E402
 from custom_kg_incremental import build_custom_kg_manifest  # noqa: E402
-from custom_kg_materialize import materialize_file_storage_from_manifest  # noqa: E402
 from vector_cache import VectorCache  # noqa: E402
 
 
@@ -137,14 +136,14 @@ def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
 
 
 def test_embedding_profile_env_defaults_and_rejects_unknown() -> None:
-    assert custom_kg_incremental.embedding_profile_env("conservative") == {
+    assert custom_kg_vector_fill.embedding_profile_env("conservative") == {
         "EMBEDDING_FUNC_MAX_ASYNC": "1",
         "EMBEDDING_BATCH_NUM": "10",
         "MAX_PARALLEL_INSERT": "1",
     }
-    assert custom_kg_incremental.embedding_profile_env("shadow-medium")["EMBEDDING_BATCH_NUM"] == "20"
+    assert custom_kg_vector_fill.embedding_profile_env("shadow-medium")["EMBEDDING_BATCH_NUM"] == "20"
     with pytest.raises(ValueError, match="unknown embedding profile"):
-        custom_kg_incremental.embedding_profile_env("surprise-fast")
+        custom_kg_vector_fill.embedding_profile_env("surprise-fast")
 
 
 def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_path) -> None:
@@ -171,7 +170,7 @@ def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_pat
         assert texts == ["Doc A content"]
         return [[0.1, 0.2]]
 
-    report = custom_kg_incremental.fill_missing_manifest_vectors(
+    report = custom_kg_vector_fill.fill_missing_manifest_vectors(
         manifest,
         vector_report,
         cache,
@@ -323,7 +322,7 @@ def test_full_materialization_blocker_treats_endpoint_order_content_change_as_ve
     previous_relationship["content"] = "SOURCED_BY\tdoc:a\ntopic:z\ntopic:z SOURCED_BY doc:a"
     custom_kg_incremental._stamp_identity_and_hashes(
         previous_relationship,
-        record_id=previous_relationship["vdb_id"],
+        record_id=previous_relationship["record_id"],
         canonical_id=key,
     )
 
@@ -335,72 +334,54 @@ def test_full_materialization_blocker_treats_endpoint_order_content_change_as_ve
     assert blockers["diff"]["relationships"]["metadata_update"] == 0
 
 
-def test_materialize_file_storage_from_manifest_is_retired_without_writing_storage(tmp_path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
-    storage_dir = tmp_path / "shadow_storage"
+def test_custom_kg_incremental_exposes_only_native_manifest_cli_surface() -> None:
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "custom_kg_incremental.py").read_text(encoding="utf-8")
+    forbidden_symbols = [
+        "def audit_custom_kg_storage(",
+        "def apply_patch_to_storage(",
+        "def run_apply(",
+        "def run_full_materialization_no_swap(",
+        "def run_finalize_prepared_swap(",
+        "def embed_texts_openai_compatible(",
+        "def fill_missing_manifest_vectors(",
+        "def entity_vdb_id(",
+        "def relation_vdb_id(",
+        "def wikigraph_sanitize_text(",
+        "def wikigraph_normalize_file_path(",
+        "vdb_id",
+        "VDB",
+        "GraphML",
+        "CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE",
+        "PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE",
+        "CUSTOM_KG_STORAGE_AUDIT_RETIRED_MESSAGE",
+    ]
+    assert [symbol for symbol in forbidden_symbols if symbol in source] == []
 
-    with pytest.raises(RuntimeError, match="retired"):
-        materialize_file_storage_from_manifest(manifest, {"chunks": {}, "entities": {}, "relationships": {}}, storage_dir)
+    parser_commands = [
+        'sub.add_parser("plan"',
+        'sub.add_parser("audit-storage"',
+        'sub.add_parser("apply"',
+        'sub.add_parser("finalize-prepared-swap"',
+        'sub.add_parser("materialize-full"',
+        "--allow-current-storage-audit-failure",
+        "--seed-from-storage",
+        "--tracking-update-mode",
+    ]
+    assert [symbol for symbol in parser_commands if symbol in source] == []
+    assert 'sub.add_parser("export-manifest"' in source
+    assert 'sub.add_parser("audit-manifest-content"' in source
 
-    assert not storage_dir.exists()
+
+def test_retired_custom_kg_file_storage_materializer_module_is_removed() -> None:
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "custom_kg_materialize.py"
+    assert not module_path.exists()
+
+    import importlib.util
+
+    assert importlib.util.find_spec("custom_kg_materialize") is None
 
 
 # Retired full-materialization runner behavior is covered by direct fail-closed tests below; old file-storage writer helpers fail closed.
-
-
-def test_run_finalize_prepared_swap_is_retired_without_reading_prepared_bundle(tmp_path) -> None:
-    args = types.SimpleNamespace(
-        root=tmp_path / "wiki",
-        state_dir=tmp_path / "state",
-        workdir=tmp_path / "workdir",
-        prepared_report=tmp_path / "state" / "prepared.json",
-        server_host="127.0.0.1",
-        server_port=9621,
-        allow_server_running=False,
-        allow_current_storage_audit_failure=True,
-        force_shadow_audit=False,
-    )
-
-    with pytest.raises(RuntimeError, match="prepared wikigraph storage activation is retired"):
-        custom_kg_incremental.run_finalize_prepared_swap(args)
-
-    assert not args.workdir.exists()
-    assert not args.prepared_report.exists()
-
-
-def test_custom_kg_incremental_materialize_full_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
-    called = {}
-
-    def fake_runner(args):
-        called["materialize_full"] = True
-        return {"ok": True, "import_mode": "full_materialization", "embedding_profile": args.embedding_profile}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_full_materialization_no_swap", fake_runner)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "materialize-full",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--no-swap",
-            "--embedding-profile",
-            "shadow-medium",
-            "--prepare-swap",
-            "--allow-current-storage-audit-failure",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 1
-    out = json.loads(capsys.readouterr().out)
-    assert out["error"] == "RuntimeError"
-    assert "materialize-full CLI is retired" in out["message"]
-    assert called == {}
 
 
 def test_custom_kg_incremental_export_manifest_cli_routes_to_export_runner(monkeypatch, tmp_path, capsys) -> None:
@@ -493,145 +474,3 @@ def test_custom_kg_incremental_audit_manifest_content_cli_routes_to_audit_runner
         "limit_edges": 3,
     }
     assert json.loads(capsys.readouterr().out)["command"] == "audit-manifest-content"
-
-
-def test_custom_kg_incremental_apply_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
-    called = {}
-
-    async def fake_apply(_args):
-        called["apply"] = True
-        return {"swapped": True}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_apply", fake_apply)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "apply",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--no-swap",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 1
-    out = json.loads(capsys.readouterr().out)
-    assert out["error"] == "RuntimeError"
-    assert "apply CLI is retired" in out["message"]
-    assert called == {}
-
-
-def test_custom_kg_incremental_finalize_prepared_swap_cli_is_retired(monkeypatch, tmp_path, capsys) -> None:
-    called = {}
-
-    def fake_finalize(_args):
-        called["finalize"] = True
-        return {"swapped": True}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_finalize_prepared_swap", fake_finalize)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "finalize-prepared-swap",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--prepared-report",
-            str(tmp_path / "state" / "prepared.json"),
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 1
-    out = json.loads(capsys.readouterr().out)
-    assert out["error"] == "RuntimeError"
-    assert "finalize-prepared-swap CLI is retired" in out["message"]
-    assert called == {}
-
-
-def test_custom_kg_incremental_direct_live_storage_runners_are_retired(tmp_path) -> None:
-    import asyncio
-
-    root = tmp_path / "wiki"
-    state_dir = tmp_path / "state"
-    workdir = tmp_path / "work"
-    root.mkdir()
-    state_dir.mkdir()
-    workdir.mkdir()
-    materialize_args = types.SimpleNamespace(
-        root=root,
-        state_dir=state_dir,
-        workdir=workdir,
-        vector_cache=tmp_path / "cache.sqlite",
-        storage_dir=tmp_path / "shadow_full",
-        delete_shadow_on_no_swap=False,
-        limit_docs=None,
-        limit_edges=None,
-        seed_from_storage=False,
-        seed_storage_dir=None,
-        fill_missing_vectors=False,
-        prepare_swap=False,
-        allow_current_storage_audit_failure=False,
-        smoke_query=[],
-        smoke_mode="mix",
-        smoke_top_k=5,
-        smoke_chunk_top_k=5,
-    )
-    apply_args = types.SimpleNamespace(
-        root=root,
-        state_dir=state_dir,
-        workdir=workdir,
-        limit_docs=None,
-        limit_edges=None,
-        full_rebuild_interval=5,
-        force_incremental=False,
-        server_host="127.0.0.1",
-        server_port=9621,
-        allow_server_running=False,
-        no_swap=True,
-        prepare_swap=False,
-        delete_shadow_on_no_swap=True,
-        write_manifest_without_swap=False,
-        tracking_update_mode="full",
-    )
-
-    with pytest.raises(RuntimeError, match="live-storage runner is retired"):
-        custom_kg_incremental.run_full_materialization_no_swap(materialize_args)
-    with pytest.raises(RuntimeError, match="live-storage runner is retired"):
-        asyncio.run(custom_kg_incremental.run_apply(apply_args))
-    with pytest.raises(RuntimeError, match="live-storage runner is retired"):
-        asyncio.run(custom_kg_incremental.apply_patch_to_storage(tmp_path / "shadow", {}, {}, workdir=workdir))
-    assert not (tmp_path / "shadow_full").exists()
-    assert not (tmp_path / "shadow").exists()
-    assert not (workdir / "rag_storage").exists()
-
-
-def test_custom_kg_incremental_old_plan_and_storage_audit_cli_are_retired(monkeypatch, tmp_path, capsys) -> None:
-    for command in ("plan", "audit-storage"):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "custom_kg_incremental.py",
-                command,
-                "--root",
-                str(tmp_path / "wiki"),
-                "--state-dir",
-                str(tmp_path / "state"),
-                "--workdir",
-                str(tmp_path / "work"),
-            ],
-        )
-        assert custom_kg_incremental.main() == 1
-        out = json.loads(capsys.readouterr().out)
-        assert out["error"] == "RuntimeError"
-        assert "retired" in out["message"]

@@ -12,7 +12,7 @@ from typing import Any
 
 from wiki_native_state import ensure_state_dirs
 
-WIKIGRAPH_SYNC_DB_FILENAME = "wikigraph_sync.db"
+NATIVE_QUERY_EVENTS_DB_FILENAME = "native_query_events.db"
 
 
 def _now_stamp() -> str:
@@ -30,7 +30,7 @@ def slugify(text: str, max_len: int = 80) -> str:
 
 def init_manifest_db(state_dir: Path) -> Path:
     _ensure_state_dirs(state_dir)
-    db = state_dir / WIKIGRAPH_SYNC_DB_FILENAME
+    db = state_dir / NATIVE_QUERY_EVENTS_DB_FILENAME
     with sqlite3.connect(db) as conn:
         conn.executescript(
             """
@@ -41,8 +41,8 @@ def init_manifest_db(state_dir: Path) -> Path:
               sha256 TEXT NOT NULL,
               title TEXT,
               updated TEXT,
-              wikigraph_track_id TEXT,
-              wikigraph_doc_status TEXT,
+              native_track_id TEXT,
+              native_doc_status TEXT,
               last_synced_at TEXT,
               deleted INTEGER DEFAULT 0
             );

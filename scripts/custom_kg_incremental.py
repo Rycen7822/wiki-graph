@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Custom KG manifest and vector-contract helpers for native llm-wiki refresh.
 
-Production refresh now materializes native zvec workspaces from state artifacts.
+Production refresh materializes native zvec workspaces from state artifacts.
 This module owns deterministic custom KG manifest generation, diff/hash helpers,
-and native manifest contract checks. Live file-storage apply, full
-materialization, import planning, and activation entrypoints are retired and fail
-closed before touching backend storage.
+and native manifest contract checks.
 """
 
 from __future__ import annotations
@@ -20,16 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from native_runtime_env import env_int
-from custom_kg_vector_fill import (
-    DEFAULT_EMBEDDING_PROFILE,
-    EMBEDDING_PROFILES,
-    embed_texts_openai_compatible as _native_embed_texts_openai_compatible,
-    embedding_profile_env,
-    embedding_profile_report,
-    fill_missing_manifest_vectors as _native_fill_missing_manifest_vectors,
-)
-
-
 from wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
@@ -46,14 +34,6 @@ MANIFEST_SCHEMA_VERSION = 1
 RELATIONSHIP_VECTOR_CONTENT_ALGORITHM = "llm-wiki-typed-directed-relationship:v1"
 MANIFEST_FILENAME = "custom_kg_manifest.json"
 DEFAULT_FULL_REBUILD_INTERVAL = 5
-PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE = (
-    "prepared wikigraph storage activation is retired; use batch_native_refresh.py refresh --cutover "
-    "or a dedicated audited native promotion slice instead of activating the retired file backend"
-)
-CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE = (
-    "custom KG live-storage runner is retired after native zvec production cutover; "
-    "use export-manifest plus native_zvec_materialize.py preflight/build for native staging"
-)
 _CONTROL_CHAR_PATTERN_ALL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _SURROGATE_PATTERN = re.compile(r"[\ud800-\udfff]")
 _PLACEHOLDER_DOCUMENT_SOURCES = {"", "unknown", "unknown_source", "none", "null"}
@@ -75,7 +55,7 @@ def compute_mdhash_id(content: str, prefix: str = "") -> str:
     return prefix + digest
 
 
-def entity_vdb_id(entity_name: str) -> str:
+def entity_record_id(entity_name: str) -> str:
     return compute_mdhash_id(entity_name, prefix="ent-")
 
 
@@ -86,7 +66,7 @@ def _relation_key_part(value: Any, *, field: str) -> str:
     return text
 
 
-def relation_vdb_id(src_id: str, tgt_id: str, keywords: str) -> str:
+def relationship_record_id(src_id: str, tgt_id: str, keywords: str) -> str:
     if keywords in (None, ""):
         raise ValueError("relationship keywords are required for typed directed relation IDs")
     return compute_mdhash_id(
@@ -102,7 +82,7 @@ def relation_vdb_id(src_id: str, tgt_id: str, keywords: str) -> str:
 
 
 def relation_chunk_key(src_id: str, tgt_id: str) -> str:
-    """Compatibility graph/storage pair key for the one-edge-per-pair graph."""
+    """Stable endpoint-pair key used for source chunk grouping."""
 
     return GRAPH_FIELD_SEP.join(sorted((src_id, tgt_id)))
 
@@ -116,9 +96,8 @@ def relationship_vector_content(src_id: str, tgt_id: str, keywords: str, descrip
 def relationship_record_key(src_id: str, tgt_id: str, keywords: str) -> str:
     """Manifest key for a typed, directed relationship record.
 
-    The GraphML edge layer is still one undirected edge per endpoint pair,
-    but VDB records and relation chunk tracking must preserve distinct relation
-    semantics so typed edges do not silent-last-win collapse.
+    The key includes direction and relationship keywords so distinct typed
+    relationships between the same endpoints remain separate native records.
     """
 
     return GRAPH_FIELD_SEP.join(
@@ -143,7 +122,7 @@ def split_source_ids(source_id: Any) -> list[str]:
     return [part for part in str(source_id).split(GRAPH_FIELD_SEP) if part]
 
 
-def wikigraph_sanitize_text(text: Any, replacement_char: str = "") -> str:
+def native_manifest_sanitize_text(text: Any, replacement_char: str = "") -> str:
     """Normalize custom_kg chunk text before hashing/storage using native code only."""
 
     value = "" if text is None else str(text)
@@ -158,7 +137,7 @@ def wikigraph_sanitize_text(text: Any, replacement_char: str = "") -> str:
     return value.strip()
 
 
-def wikigraph_normalize_file_path(file_path: Any) -> str:
+def native_manifest_normalize_file_path(file_path: Any) -> str:
     """Normalize stored custom_kg file paths using native code only."""
 
     source = str(file_path or "").strip()
@@ -239,14 +218,6 @@ def write_manifest(state_dir: Path, manifest: dict[str, Any]) -> Path:
     return path
 
 
-
-
-
-
-
-
-
-
 def manifest_record_count(manifest: dict[str, Any]) -> dict[str, int]:
     return {
         "chunks": len(manifest.get("chunks", {})),
@@ -318,11 +289,11 @@ def build_custom_kg_manifest(
     source_to_chunk: dict[str, str] = {}
     chunk_sources: dict[str, list[str]] = {}
     for index, chunk_data in enumerate(payload.get("chunks", [])):
-        content = wikigraph_sanitize_text(chunk_data["content"])
+        content = native_manifest_sanitize_text(chunk_data["content"])
         logical_source_id = str(chunk_data.get("source_id") or chunk_data.get("full_doc_id") or "UNKNOWN")
         chunk_id = compute_mdhash_id(content, prefix="chunk-")
         full_doc_id = str(chunk_data.get("full_doc_id") or logical_source_id)
-        file_path = wikigraph_normalize_file_path(chunk_data.get("file_path") or "custom_kg")
+        file_path = native_manifest_normalize_file_path(chunk_data.get("file_path") or "custom_kg")
         chunk_order_index = int(chunk_data.get("chunk_order_index", index))
         record = {
             "record_type": "chunk",
@@ -354,12 +325,11 @@ def build_custom_kg_manifest(
         source_chunk_id = source_to_chunk.get(logical_source_id, "UNKNOWN")
         description = str(entity_data.get("description", "No description provided"))
         entity_type = str(entity_data.get("entity_type", "UNKNOWN"))
-        file_path = wikigraph_normalize_file_path(entity_data.get("file_path", "custom_kg"))
-        vdb_id = entity_vdb_id(entity_name)
+        file_path = native_manifest_normalize_file_path(entity_data.get("file_path", "custom_kg"))
+        record_id = entity_record_id(entity_name)
         record = {
             "record_type": "entity",
             "entity_name": entity_name,
-            "vdb_id": vdb_id,
             "entity_type": entity_type,
             "description": description,
             "source_logical_id": logical_source_id,
@@ -368,7 +338,7 @@ def build_custom_kg_manifest(
             "content": entity_name + "\n" + description,
             **embedding_contract,
         }
-        _stamp_identity_and_hashes(record, record_id=vdb_id, canonical_id=entity_name)
+        _stamp_identity_and_hashes(record, record_id=record_id, canonical_id=entity_name)
         entities[entity_name] = record
 
     deduped_relationships: dict[str, dict[str, Any]] = {}
@@ -387,14 +357,13 @@ def build_custom_kg_manifest(
         source_chunk_id = source_to_chunk.get(logical_source_id, "UNKNOWN")
         description = str(relationship_data["description"])
         keywords = str(relationship_data["keywords"])
-        file_path = wikigraph_normalize_file_path(relationship_data.get("file_path", "custom_kg"))
+        file_path = native_manifest_normalize_file_path(relationship_data.get("file_path", "custom_kg"))
         weight = relationship_data.get("weight", 1.0)
-        vdb_id = relation_vdb_id(src_id, tgt_id, keywords)
+        record_id = relationship_record_id(src_id, tgt_id, keywords)
         record = {
             "record_type": "relationship",
             "rel_key": [src_id, tgt_id],
             "chunk_key": key,
-            "vdb_id": vdb_id,
             "src_id": src_id,
             "tgt_id": tgt_id,
             "description": description,
@@ -406,7 +375,7 @@ def build_custom_kg_manifest(
             "content": relationship_vector_content(src_id, tgt_id, keywords, description),
             **embedding_contract,
         }
-        _stamp_identity_and_hashes(record, record_id=vdb_id, canonical_id=key)
+        _stamp_identity_and_hashes(record, record_id=record_id, canonical_id=key)
         relationships[key] = record
 
     return {
@@ -545,46 +514,6 @@ def compact_vector_cache_report(vector_report: dict[str, Any], *, missing_exampl
     }
 
 
-def embed_texts_openai_compatible(
-    texts: list[str],
-    *,
-    workdir: Path,
-    embedding_model: str,
-    embedding_dim: int,
-    timeout: int | None = None,
-) -> list[list[float]]:
-    """Compatibility wrapper for the native-safe vector fill module."""
-
-    return _native_embed_texts_openai_compatible(
-        texts,
-        workdir=workdir,
-        embedding_model=embedding_model,
-        embedding_dim=embedding_dim,
-        timeout=timeout,
-    )
-
-
-def fill_missing_manifest_vectors(
-    manifest: dict[str, Any],
-    vector_report: dict[str, Any],
-    cache: Any,
-    *,
-    workdir: Path,
-    embed_texts_func: Any | None = None,
-    embedding_profile: str | None = None,
-) -> dict[str, Any]:
-    """Compatibility wrapper that preserves monkeypatching of the module embedder."""
-
-    return _native_fill_missing_manifest_vectors(
-        manifest,
-        vector_report,
-        cache,
-        workdir=workdir,
-        embed_texts_func=embed_texts_func or embed_texts_openai_compatible,
-        embedding_profile=embedding_profile,
-    )
-
-
 def choose_refresh_mode(
     previous_manifest: dict[str, Any] | None,
     desired_manifest: dict[str, Any],
@@ -668,49 +597,8 @@ def write_successful_manifest(
 # Storage audit helpers
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-CUSTOM_KG_STORAGE_AUDIT_RETIRED_MESSAGE = (
-    "audit_custom_kg_storage is retired after native zvec production cutover; "
-    "old file-backend GraphML/VDB/KV storage is no longer a production verification surface"
-)
-
-def audit_custom_kg_storage(
-    storage_dir: Path,
-    manifest: dict[str, Any] | None = None,
-    *,
-    max_samples: int = 10,
-) -> dict[str, Any]:
-    """Fail closed before reading retired file-backend storage."""
-
-    raise RuntimeError(CUSTOM_KG_STORAGE_AUDIT_RETIRED_MESSAGE)
-
 # ---------------------------------------------------------------------------
 # Incremental patch implementation
-
-
-async def apply_patch_to_storage(
-    shadow_storage_dir: Path,
-    old_manifest: dict[str, Any],
-    desired_manifest: dict[str, Any],
-    *,
-    workdir: Path,
-    tracking_update_mode: str = "full",
-) -> dict[str, Any]:
-    """Fail closed for the retired ExternalGraph storage patch helper."""
-
-    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
 
 
 def build_desired_manifest(root: Path, state_dir: Path, *, limit_docs: int | None = None, limit_edges: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -824,29 +712,6 @@ def run_export_manifest(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def plan_incremental_import(root: Path, state_dir: Path, workdir: Path, *, full_rebuild_interval: int = DEFAULT_FULL_REBUILD_INTERVAL) -> dict[str, Any]:
-    raise RuntimeError(
-        "custom KG incremental import planner is retired after native zvec production cutover; "
-        "use export-manifest plus native_zvec_materialize.py preflight/build"
-    )
-
-
-async def run_apply(args: argparse.Namespace) -> dict[str, Any]:
-    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
-
-
-def run_full_materialization_no_swap(args: argparse.Namespace) -> dict[str, Any]:
-    """Fail closed for the retired full-materialization runner."""
-
-    raise RuntimeError(CUSTOM_KG_LIVE_STORAGE_RUNNER_RETIRED_MESSAGE)
-
-
-def run_finalize_prepared_swap(args: argparse.Namespace) -> dict[str, Any]:
-    """Retired direct activation entrypoint kept only to fail closed."""
-
-    raise RuntimeError(PREPARED_WIKIGRAPH_SWAP_ACTIVATION_RETIRED_MESSAGE)
-
-
 # ---------------------------------------------------------------------------
 # CLI
 
@@ -861,10 +726,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Custom KG manifest helpers for llm-wiki native refresh")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    plan_parser = sub.add_parser("plan", help="Retired command; use export-manifest plus native_zvec_materialize.py")
-    add_common_paths(plan_parser)
-    plan_parser.add_argument("--full-rebuild-interval", type=int, default=DEFAULT_FULL_REBUILD_INTERVAL)
-
     export_parser = sub.add_parser("export-manifest", help="Write desired custom KG manifest to state without storage mutation")
     add_common_paths(export_parser)
     export_parser.add_argument("--limit-docs", type=int, default=None)
@@ -875,68 +736,8 @@ def main() -> int:
     audit_manifest_parser.add_argument("--limit-docs", type=int, default=None)
     audit_manifest_parser.add_argument("--limit-edges", type=int, default=None)
 
-    audit_parser = sub.add_parser("audit-storage", help="Retired command; native refresh audits native artifacts")
-    add_common_paths(audit_parser)
-    audit_parser.add_argument("--manifest", type=Path, default=None)
-    audit_parser.add_argument("--storage-dir", type=Path, default=None)
-
-    apply_parser = sub.add_parser("apply", help="Retired command; native staging uses export-manifest plus native_zvec_materialize.py")
-    add_common_paths(apply_parser)
-    apply_parser.add_argument("--full-rebuild-interval", type=int, default=DEFAULT_FULL_REBUILD_INTERVAL)
-    apply_parser.add_argument("--limit-docs", type=int, default=None)
-    apply_parser.add_argument("--limit-edges", type=int, default=None)
-    apply_parser.add_argument("--server-host", default="127.0.0.1")
-    apply_parser.add_argument("--server-port", type=int, default=9621)
-    apply_parser.add_argument("--allow-server-running", action="store_true")
-    apply_parser.add_argument("--force-incremental", action="store_true")
-    apply_parser.add_argument("--no-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before apply")
-    apply_parser.add_argument("--prepare-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before apply")
-    apply_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
-    apply_parser.add_argument("--write-manifest-without-swap", action="store_true")
-    apply_parser.add_argument("--tracking-update-mode", choices=["full", "delta"], default="full", help="Retired compatibility flag; command fails before tracking updates")
-
-    finalize_parser = sub.add_parser("finalize-prepared-swap", help="Retired command; native refresh cutover owns production activation")
-    add_common_paths(finalize_parser)
-    finalize_parser.add_argument("--prepared-report", type=Path, default=None)
-    finalize_parser.add_argument("--server-host", default="127.0.0.1")
-    finalize_parser.add_argument("--server-port", type=int, default=9621)
-    finalize_parser.add_argument("--allow-server-running", action="store_true")
-    finalize_parser.add_argument("--force-shadow-audit", action="store_true", help="Retired compatibility flag; command fails before auditing")
-    finalize_parser.add_argument(
-        "--allow-current-storage-audit-failure",
-        action="store_true",
-        help="Retired compatibility flag accepted only so the command can fail closed before activation",
-    )
-
-    materialize_parser = sub.add_parser("materialize-full", help="Retired command; native staging uses export-manifest plus native_zvec_materialize.py")
-    add_common_paths(materialize_parser)
-    materialize_parser.add_argument("--limit-docs", type=int, default=None)
-    materialize_parser.add_argument("--limit-edges", type=int, default=None)
-    materialize_parser.add_argument("--vector-cache", type=Path, default=None)
-    materialize_parser.add_argument("--storage-dir", type=Path, default=None)
-    materialize_parser.add_argument("--seed-from-storage", action="store_true", help="Retired compatibility flag; command fails before seeding")
-    materialize_parser.add_argument("--seed-storage-dir", type=Path, default=None, help="Retired compatibility path; command fails before use")
-    materialize_parser.add_argument("--fill-missing-vectors", action="store_true", help="Retired compatibility flag; command fails before embedding")
-    materialize_parser.add_argument("--embedding-profile", choices=sorted(EMBEDDING_PROFILES), default=DEFAULT_EMBEDDING_PROFILE, help="Named embedding env profile for --fill-missing-vectors; default stays conservative")
-    materialize_parser.add_argument(
-        "--allow-current-storage-audit-failure",
-        action="store_true",
-        help="Retired compatibility flag accepted only so the command can fail closed before materialization",
-    )
-    materialize_parser.add_argument("--smoke-query", action="append", default=[], help="Retired compatibility flag; command fails before query smokes")
-    materialize_parser.add_argument("--smoke-mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix", "bypass"])
-    materialize_parser.add_argument("--smoke-top-k", type=int, default=5)
-    materialize_parser.add_argument("--smoke-chunk-top-k", type=int, default=5)
-    materialize_parser.add_argument("--no-swap", action="store_true", required=True, help="Retained for retired CLI compatibility; command fails before materialization")
-    materialize_parser.add_argument("--prepare-swap", action="store_true", help="Retained for retired CLI compatibility; command fails before materialization")
-    materialize_parser.add_argument("--delete-shadow-on-no-swap", action="store_true")
-
     args = parser.parse_args()
     try:
-        if args.command == "plan":
-            raise RuntimeError(
-                "plan CLI is retired; use export-manifest plus native_zvec_materialize.py preflight/build"
-            )
         if args.command == "export-manifest":
             print_json(run_export_manifest(args))
             return 0
@@ -944,25 +745,6 @@ def main() -> int:
             result = run_audit_manifest_content(args)
             print_json(result)
             return 0 if result["ok"] else 1
-        if args.command == "audit-storage":
-            raise RuntimeError(
-                "audit-storage CLI is retired; use native_zvec_materialize.py preflight/build artifacts instead"
-            )
-        if args.command == "apply":
-            raise RuntimeError(
-                "apply CLI is retired; use export-manifest plus native_zvec_materialize.py "
-                "preflight/build for native staging"
-            )
-        if args.command == "finalize-prepared-swap":
-            raise RuntimeError(
-                "finalize-prepared-swap CLI is retired; use batch_native_refresh.py cutover "
-                "or a dedicated audited native promotion slice instead of activating the retired file backend"
-            )
-        if args.command == "materialize-full":
-            raise RuntimeError(
-                "materialize-full CLI is retired; use export-manifest plus native_zvec_materialize.py "
-                "preflight/build for native staging"
-            )
     except Exception as exc:
         print_json({"error": type(exc).__name__, "message": str(exc)})
         return 1

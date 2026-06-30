@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect wikigraph query latency reports from a saved query suite."""
+"""Collect native query latency reports from a saved query suite."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Collect wikigraph query report artifacts")
+    parser = argparse.ArgumentParser(description="Collect native query report artifacts")
     parser.add_argument("--query-suite", type=Path, required=True)
     parser.add_argument("--server", required=True)
     parser.add_argument("--workspace-id")
