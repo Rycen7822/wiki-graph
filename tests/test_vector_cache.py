@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops.vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
+from ops.vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
 
 
 def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
@@ -33,9 +33,9 @@ def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
 
 
 def test_vector_cache_has_no_retired_storage_seed_api() -> None:
-    from wiki_graph.ops import vector_cache
+    from ops import vector_cache
 
-    source = (Path(__file__).resolve().parents[1] / "wiki_graph" / "ops" / "vector_cache.py").read_text(encoding="utf-8")
+    source = (Path(__file__).resolve().parents[1] / "ops" / "vector_cache.py").read_text(encoding="utf-8")
     assert not hasattr(vector_cache, "seed_vector_cache_from_storage")
     assert "def seed_vector_cache_from_storage(" not in source
     assert "SEED_VECTOR_CACHE_FROM_STORAGE_RETIRED_MESSAGE" not in source

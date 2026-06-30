@@ -11,13 +11,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "wiki_graph" / "ops"
+OPS = ROOT / "ops"
 SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from wiki_graph.ops import batch_native_refresh  # noqa: E402
-from wiki_graph.ops import wiki_native_lib  # noqa: E402
-from wiki_graph.ops import wiki_native_wiki_integration_pending  # noqa: E402
+from ops import batch_native_refresh  # noqa: E402
+from ops import wiki_native_lib  # noqa: E402
+from ops import wiki_native_wiki_integration_pending  # noqa: E402
 
 PURE_NATIVE_FACADE_SCRIPTS = [
     "audit_raw_note_sections.py",
@@ -115,19 +115,19 @@ def test_retired_external_compatibility_name_registry_is_removed() -> None:
 
 
 def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> None:
-    audit_native_production_refs = importlib.import_module("wiki_graph.ops.audit_native_production_refs")
+    audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 
     report = audit_native_production_refs.audit_active_production_refs(ROOT)
 
     assert report["ok"] is True
     assert report["offenders"] == []
-    assert "wiki_graph/ops/batch_native_refresh.py" not in report["allowed_refs"]
-    assert "wiki_graph/ops/wiki_search.py" in report["checked_paths"]
-    assert "wiki_graph/ops/sync_virtual_docs.py" not in report["checked_paths"]
-    assert "wiki_graph/ops/custom_kg_incremental.py" in report["checked_paths"]
-    assert "wiki_graph/ops/vector_cache.py" in report["checked_paths"]
-    assert "wiki_graph/ops/native_zvec_materialize.py" in report["checked_paths"]
-    assert "wiki_graph/ops/raw_fast_evidence_bundle.py" in report["checked_paths"]
+    assert "ops/batch_native_refresh.py" not in report["allowed_refs"]
+    assert "ops/wiki_search.py" in report["checked_paths"]
+    assert "ops/sync_virtual_docs.py" not in report["checked_paths"]
+    assert "ops/custom_kg_incremental.py" in report["checked_paths"]
+    assert "ops/vector_cache.py" in report["checked_paths"]
+    assert "ops/native_zvec_materialize.py" in report["checked_paths"]
+    assert "ops/raw_fast_evidence_bundle.py" in report["checked_paths"]
     assert "llm_wiki_native/api/server.py" in report["checked_paths"]
     assert "compat_registry_module" not in report["marker_labels"]
     assert "registry_function_prefix" not in report["marker_labels"]
@@ -150,7 +150,7 @@ def test_active_native_diagnostics_do_not_import_retired_compat_name_registry() 
 
 
 def test_audit_native_production_refs_imports_active_modules_with_retired_package_blocked() -> None:
-    audit_native_production_refs = importlib.import_module("wiki_graph.ops.audit_native_production_refs")
+    audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 
     report = audit_native_production_refs.audit_active_production_refs(ROOT)
     package_independence = report["package_independence"]
@@ -158,15 +158,15 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
     assert package_independence["ok"] is True
     imported = {row["module"] for row in package_independence["imports"]}
     assert {
-        "wiki_graph.ops.batch_native_refresh",
-        "wiki_graph.ops.custom_kg_incremental",
-        "wiki_graph.ops.custom_kg_vector_fill",
-        "wiki_graph.ops.native_zvec_materialize",
-        "wiki_graph.ops.raw_fast_closeout",
-        "wiki_graph.ops.raw_fast_evidence_bundle",
-        "wiki_graph.ops.vector_cache",
-        "wiki_graph.ops.wiki_native_cli",
-        "wiki_graph.ops.wiki_search",
+        "ops.batch_native_refresh",
+        "ops.custom_kg_incremental",
+        "ops.custom_kg_vector_fill",
+        "ops.native_zvec_materialize",
+        "ops.raw_fast_closeout",
+        "ops.raw_fast_evidence_bundle",
+        "ops.vector_cache",
+        "ops.wiki_native_cli",
+        "ops.wiki_search",
         "llm_wiki_native.api.server",
         "llm_wiki_native.retrieval.query_engine",
         "llm_wiki_native.runtime",
@@ -207,7 +207,7 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
 def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_retired_package_blocked(
     tmp_path: Path,
 ) -> None:
-    audit_native_production_refs = importlib.import_module("wiki_graph.ops.audit_native_production_refs")
+    audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
     pointer_path = tmp_path / "active_workspace.json"
     sqlite_path = tmp_path / "native.sqlite"
     zvec_path = tmp_path / "zvec_records"
@@ -304,7 +304,7 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
 
 
 def test_audit_native_production_refs_cli_outputs_structured_report(capsys: pytest.CaptureFixture[str]) -> None:
-    audit_native_production_refs = importlib.import_module("wiki_graph.ops.audit_native_production_refs")
+    audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 
     result = audit_native_production_refs.main(["--repo-root", str(ROOT)])
     payload = json.loads(capsys.readouterr().out)
@@ -344,7 +344,7 @@ def test_native_facade_exports_pure_artifact_helpers_for_active_scripts() -> Non
 
 
 def test_native_query_events_module_owns_active_query_helpers() -> None:
-    native_query_events = importlib.import_module("wiki_graph.ops.wiki_native_query_events")
+    native_query_events = importlib.import_module("ops.wiki_native_query_events")
 
     assert wiki_native_lib.save_evidence_pack is native_query_events.save_evidence_pack
     assert wiki_native_lib.add_query_event is native_query_events.add_query_event
@@ -361,11 +361,11 @@ def test_native_query_events_module_owns_active_query_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_query_events import add_query_event, save_evidence_pack" in facade_text
+    assert "from ops.wiki_native_query_events import add_query_event, save_evidence_pack" in facade_text
 
 
 def test_save_evidence_pack_accepts_string_references_from_answer_route(tmp_path: Path) -> None:
-    native_query_events = importlib.import_module("wiki_graph.ops.wiki_native_query_events")
+    native_query_events = importlib.import_module("ops.wiki_native_query_events")
 
     pack = native_query_events.save_evidence_pack(
         tmp_path / "state",
@@ -384,7 +384,7 @@ def test_save_evidence_pack_accepts_string_references_from_answer_route(tmp_path
 
 
 def test_native_cli_module_owns_defaults_and_common_helpers(capsys: pytest.CaptureFixture[str]) -> None:
-    native_cli = importlib.import_module("wiki_graph.ops.wiki_native_cli")
+    native_cli = importlib.import_module("ops.wiki_native_cli")
 
     for name in (
         "DEFAULT_SERVER",
@@ -419,7 +419,7 @@ def test_native_cli_module_owns_defaults_and_common_helpers(capsys: pytest.Captu
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_cli import" in facade_text
+    assert "from ops.wiki_native_cli import" in facade_text
 
 
 def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None:
@@ -435,7 +435,7 @@ def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None
     code = (
         "import json, sys; "
         f"sys.path.insert(0, {str(ROOT)!r}); "
-        "from wiki_graph.ops import wiki_native_cli; "
+        "from ops import wiki_native_cli; "
         "print(json.dumps({"
         "'root': str(wiki_native_cli.DEFAULT_WIKI_ROOT), "
         "'state': str(wiki_native_cli.DEFAULT_STATE_DIR), "
@@ -487,7 +487,7 @@ def test_wikigraph_compat_facade_module_is_removed_after_native_cutover() -> Non
 
 
 def test_native_artifacts_module_owns_source_and_builder_helpers() -> None:
-    native_artifacts = importlib.import_module("wiki_graph.ops.wiki_native_artifacts")
+    native_artifacts = importlib.import_module("ops.wiki_native_artifacts")
 
     for name in ("build_seed_edges", "extract_method_atoms", "resolve_source"):
         assert getattr(wiki_native_lib, name) is getattr(native_artifacts, name)
@@ -505,11 +505,11 @@ def test_native_artifacts_module_owns_source_and_builder_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_artifacts import" in facade_text
+    assert "from ops.wiki_native_artifacts import" in facade_text
 
 
 def test_native_wiki_checks_module_owns_validation_and_audit_helpers() -> None:
-    native_wiki_checks = importlib.import_module("wiki_graph.ops.wiki_native_wiki_checks")
+    native_wiki_checks = importlib.import_module("ops.wiki_native_wiki_checks")
 
     for name in (
         "audit_raw_note_section_contracts",
@@ -538,11 +538,11 @@ def test_native_wiki_checks_module_owns_validation_and_audit_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_wiki_checks import" in facade_text
+    assert "from ops.wiki_native_wiki_checks import" in facade_text
 
 
 def test_native_wiki_integration_pending_module_owns_active_pending_helpers() -> None:
-    native_pending = importlib.import_module("wiki_graph.ops.wiki_native_wiki_integration_pending")
+    native_pending = importlib.import_module("ops.wiki_native_wiki_integration_pending")
 
     assert (
         wiki_native_lib.DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD
@@ -582,12 +582,12 @@ def test_native_wiki_integration_pending_module_owns_active_pending_helpers() ->
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_wiki_integration_pending import" in facade_text
+    assert "from ops.wiki_native_wiki_integration_pending import" in facade_text
     assert "_legacy_clear_pending_wiki_integration_after_success" not in facade_text
 
 
 def test_native_raw_sections_module_owns_active_raw_section_helpers() -> None:
-    native_raw_sections = importlib.import_module("wiki_graph.ops.wiki_native_raw_sections")
+    native_raw_sections = importlib.import_module("ops.wiki_native_raw_sections")
 
     assert wiki_native_lib.RAW_NOTE_CONTRACT_SECTION_KINDS is native_raw_sections.RAW_NOTE_CONTRACT_SECTION_KINDS
     assert wiki_native_lib.RAW_NOTE_CONTRACT_REQUIRED_KINDS is native_raw_sections.RAW_NOTE_CONTRACT_REQUIRED_KINDS
@@ -601,11 +601,11 @@ def test_native_raw_sections_module_owns_active_raw_section_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_raw_sections import" in facade_text
+    assert "from ops.wiki_native_raw_sections import" in facade_text
 
 
 def test_native_raw_section_extract_module_owns_active_extract_helpers() -> None:
-    native_extract = importlib.import_module("wiki_graph.ops.wiki_native_raw_section_extract")
+    native_extract = importlib.import_module("ops.wiki_native_raw_section_extract")
 
     assert wiki_native_lib.extract_raw_sections is native_extract.extract_raw_sections
 
@@ -613,16 +613,16 @@ def test_native_raw_section_extract_module_owns_active_extract_helpers() -> None
     assert "def extract_raw_note_sections(" in module_text
     assert "def raw_section_markdown(" in module_text
     assert "def extract_raw_sections(" in module_text
-    assert "from wiki_graph.ops.wiki_native_raw_sections import" in module_text
+    assert "from ops.wiki_native_raw_sections import" in module_text
     assert "import wiki_wikigraph_compat_lib" not in module_text
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_raw_section_extract import extract_raw_sections" in facade_text
+    assert "from ops.wiki_native_raw_section_extract import extract_raw_sections" in facade_text
 
 
 def test_native_docs_module_owns_active_document_helpers() -> None:
-    native_docs = importlib.import_module("wiki_graph.ops.wiki_native_docs")
+    native_docs = importlib.import_module("ops.wiki_native_docs")
 
     assert wiki_native_lib.WikiDoc is native_docs.WikiDoc
     assert wiki_native_lib.COMPILED_DIR_TYPES is native_docs.COMPILED_DIR_TYPES
@@ -651,11 +651,11 @@ def test_native_docs_module_owns_active_document_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_docs import" in facade_text
+    assert "from ops.wiki_native_docs import" in facade_text
 
 
 def test_native_state_module_owns_state_dir_helper(tmp_path: Path) -> None:
-    native_state = importlib.import_module("wiki_graph.ops.wiki_native_state")
+    native_state = importlib.import_module("ops.wiki_native_state")
 
     assert wiki_native_lib.ensure_state_dirs is native_state.ensure_state_dirs
     state = tmp_path / "state"
@@ -670,11 +670,11 @@ def test_native_state_module_owns_state_dir_helper(tmp_path: Path) -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_state import ensure_state_dirs" in facade_text
+    assert "from ops.wiki_native_state import ensure_state_dirs" in facade_text
 
 
 def test_native_ingest_text_module_owns_active_text_helpers() -> None:
-    native_text = importlib.import_module("wiki_graph.ops.wiki_native_ingest_text")
+    native_text = importlib.import_module("ops.wiki_native_ingest_text")
 
     assert wiki_native_lib.as_list is native_text.as_list
     assert wiki_native_lib.find_wikilinks is native_text.find_wikilinks
@@ -694,11 +694,11 @@ def test_native_ingest_text_module_owns_active_text_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_ingest_text import" in facade_text
+    assert "from ops.wiki_native_ingest_text import" in facade_text
 
 
 def test_native_jsonl_module_owns_active_jsonl_helpers(tmp_path: Path) -> None:
-    native_jsonl = importlib.import_module("wiki_graph.ops.wiki_native_jsonl")
+    native_jsonl = importlib.import_module("ops.wiki_native_jsonl")
 
     assert wiki_native_lib.jsonl_read is native_jsonl.jsonl_read
     assert wiki_native_lib.jsonl_write is native_jsonl.jsonl_write
@@ -714,11 +714,11 @@ def test_native_jsonl_module_owns_active_jsonl_helpers(tmp_path: Path) -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_jsonl import jsonl_read, jsonl_write" in facade_text
+    assert "from ops.wiki_native_jsonl import jsonl_read, jsonl_write" in facade_text
 
 
 def test_native_query_response_module_owns_section_response_helpers() -> None:
-    native_response = importlib.import_module("wiki_graph.ops.wiki_native_query_response")
+    native_response = importlib.import_module("ops.wiki_native_query_response")
 
     module_text = (SCRIPTS / "wiki_native_query_response.py").read_text(encoding="utf-8")
     retired_backend = "light" + "rag"
@@ -728,8 +728,8 @@ def test_native_query_response_module_owns_section_response_helpers() -> None:
     assert "def filter_wikigraph_data_response_by_section_kind(" not in module_text
     assert f"def expand_{retired_backend}_data_response_with_section_neighbors(" not in module_text
     assert f"def filter_{retired_backend}_data_response_by_section_kind(" not in module_text
-    assert "from wiki_graph.ops.wiki_native_jsonl import jsonl_read" in module_text
-    assert "from wiki_graph.ops.wiki_native_raw_sections import" in module_text
+    assert "from ops.wiki_native_jsonl import jsonl_read" in module_text
+    assert "from ops.wiki_native_raw_sections import" in module_text
     assert "import wiki_wikigraph_compat_lib" not in module_text
     assert "from wiki_wikigraph_compat_lib import" not in module_text
     assert callable(native_response.expand_native_data_response_with_section_neighbors)
@@ -739,7 +739,7 @@ def test_native_query_response_module_owns_section_response_helpers() -> None:
 
 
 def test_native_section_similarity_module_owns_graph_helpers() -> None:
-    native_similarity = importlib.import_module("wiki_graph.ops.wiki_native_section_similarity")
+    native_similarity = importlib.import_module("ops.wiki_native_section_similarity")
 
     for name in (
         "build_section_similarity_edges",
@@ -770,11 +770,11 @@ def test_native_section_similarity_module_owns_graph_helpers() -> None:
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_section_similarity import" in facade_text
+    assert "from ops.wiki_native_section_similarity import" in facade_text
 
 
 def test_native_custom_kg_payload_module_owns_payload_helpers() -> None:
-    native_payload = importlib.import_module("wiki_graph.ops.wiki_native_custom_kg_payload")
+    native_payload = importlib.import_module("ops.wiki_native_custom_kg_payload")
 
     for name in (
         "build_custom_kg_payload",
@@ -790,15 +790,15 @@ def test_native_custom_kg_payload_module_owns_payload_helpers() -> None:
         "def build_custom_kg_payload(",
     ):
         assert pattern in module_text
-    assert "from wiki_graph.ops.wiki_native_docs import" in module_text
-    assert "from wiki_graph.ops.wiki_native_ingest_text import" in module_text
-    assert "from wiki_graph.ops.wiki_native_jsonl import" in module_text
-    assert "from wiki_graph.ops.wiki_native_section_similarity import" in module_text
+    assert "from ops.wiki_native_docs import" in module_text
+    assert "from ops.wiki_native_ingest_text import" in module_text
+    assert "from ops.wiki_native_jsonl import" in module_text
+    assert "from ops.wiki_native_section_similarity import" in module_text
     assert "import wiki_wikigraph_compat_lib" not in module_text
     assert "from wiki_wikigraph_compat_lib import" not in module_text
 
     facade_text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
-    assert "from wiki_graph.ops.wiki_native_custom_kg_payload import" in facade_text
+    assert "from ops.wiki_native_custom_kg_payload import" in facade_text
 
 
 def test_native_facade_exports_pure_validation_helpers() -> None:
@@ -822,7 +822,7 @@ def test_selected_active_script_help_text_is_native_only() -> None:
 
 
 def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    native_runtime_env = importlib.import_module("wiki_graph.ops.native_runtime_env")
+    native_runtime_env = importlib.import_module("ops.native_runtime_env")
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=secret-value\nEMBEDDING_DIM=1536\nBAD_INT=nope\n", encoding="utf-8")
     monkeypatch.setenv("EMBEDDING_DIM", "3072")
@@ -850,7 +850,7 @@ def test_active_section_similarity_builder_imports_native_runtime_env() -> None:
     text = (SCRIPTS / "build_section_similarity_graph.py").read_text(encoding="utf-8")
     old_backend = "light" + "rag"
 
-    assert "from wiki_graph.ops.native_runtime_env import load_env_file, redact_summary" in text
+    assert "from ops.native_runtime_env import load_env_file, redact_summary" in text
     assert f"from {old_backend}_runtime_env import" not in text
 
 
@@ -859,7 +859,7 @@ def test_custom_kg_scripts_import_native_runtime_env() -> None:
 
     for script_name in ["custom_kg_incremental.py"]:
         text = (SCRIPTS / script_name).read_text(encoding="utf-8")
-        assert "from wiki_graph.ops.native_runtime_env import" in text
+        assert "from ops.native_runtime_env import" in text
         assert f"from {old_backend}_runtime_env import" not in text
 
 
@@ -868,7 +868,7 @@ def test_custom_kg_scripts_import_native_facade() -> None:
 
     for script_name in ["custom_kg_incremental.py"]:
         text = (SCRIPTS / script_name).read_text(encoding="utf-8")
-        assert "from wiki_graph.ops.wiki_native_lib import" in text
+        assert "from ops.wiki_native_lib import" in text
         assert f"from wiki_{old_backend}_lib import" not in text
 
 
@@ -905,7 +905,7 @@ def test_retired_baseline_and_shadow_query_tools_are_removed_after_native_cutove
         assert importlib.util.find_spec(module_name) is None
 
     assert (SCRIPTS / "collect_native_query_report.py").exists()
-    assert importlib.util.find_spec("wiki_graph.ops.collect_native_query_report") is not None
+    assert importlib.util.find_spec("ops.collect_native_query_report") is not None
 
 
 def test_old_runtime_env_compatibility_module_is_removed() -> None:
@@ -920,7 +920,7 @@ def test_old_runtime_env_compatibility_module_is_removed() -> None:
 
 
 def test_native_validation_module_owns_validation_implementation() -> None:
-    native_validation = importlib.import_module("wiki_graph.ops.wiki_native_validation")
+    native_validation = importlib.import_module("ops.wiki_native_validation")
 
     assert wiki_native_lib.validate_wiki is native_validation.validate_wiki
     assert wiki_native_lib.secret_hits is native_validation.secret_hits
@@ -928,7 +928,7 @@ def test_native_validation_module_owns_validation_implementation() -> None:
     text = (SCRIPTS / "wiki_native_validation.py").read_text(encoding="utf-8")
     assert "def validate_wiki(" in text
     assert "def secret_hits(" in text
-    assert "import wiki_graph.ops.wiki_native_lib as lib" in text
+    assert "import ops.wiki_native_lib as lib" in text
     assert "from wiki_wikigraph_compat_lib import" not in text
     assert "import wiki_wikigraph_compat_lib" not in text
 
@@ -948,7 +948,7 @@ def test_native_facade_imports_validation_from_native_owner() -> None:
     text = (SCRIPTS / "wiki_native_lib.py").read_text(encoding="utf-8")
     old_backend = "light" + "rag"
 
-    assert "from wiki_graph.ops.wiki_native_validation import secret_hits, validate_wiki" in text
+    assert "from ops.wiki_native_validation import secret_hits, validate_wiki" in text
     assert f"from wiki_{old_backend}_validation import" not in text
 
 

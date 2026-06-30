@@ -26,14 +26,14 @@ Recommended conventions:
 
 Active production owner:
 
-- `wiki_graph.ops.batch_native_refresh` manages pending native refresh state, workspace preparation, and guarded native cutover.
-- `wiki_graph.ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
-- `wiki_graph.ops.wiki_search` queries the native service/runtime and can save evidence packs.
+- `ops.batch_native_refresh` manages pending native refresh state, workspace preparation, and guarded native cutover.
+- `ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
+- `ops.wiki_search` queries the native service/runtime and can save evidence packs.
 - `llm_wiki_native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, and pointer handling.
 
 Retired live-storage boundary:
 
-- `wiki_graph.ops.custom_kg_incremental` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
+- `ops.custom_kg_incremental` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
 
 Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old `pending_wikigraph_refresh.json` writes, or direct `custom_kg` live-storage mutation into production paths.
 
@@ -42,7 +42,7 @@ Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old 
 Check native refresh state:
 
 ```bash
-python3 -m wiki_graph.ops.batch_native_refresh status \
+python3 -m ops.batch_native_refresh status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO"
@@ -51,7 +51,7 @@ python3 -m wiki_graph.ops.batch_native_refresh status \
 Check wiki-integration state:
 
 ```bash
-python3 -m wiki_graph.ops.batch_wiki_integration status \
+python3 -m ops.batch_wiki_integration status \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --reason threshold
@@ -60,7 +60,7 @@ python3 -m wiki_graph.ops.batch_wiki_integration status \
 Mark native refresh as pending when upstream integration or reviewed changes require a graph refresh:
 
 ```bash
-python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
+python3 -m ops.batch_native_refresh mark-pending \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -70,7 +70,7 @@ python3 -m wiki_graph.ops.batch_native_refresh mark-pending \
 Prepare a native workspace without cutover:
 
 ```bash
-python3 -m wiki_graph.ops.batch_native_refresh refresh \
+python3 -m ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -80,7 +80,7 @@ python3 -m wiki_graph.ops.batch_native_refresh refresh \
 Cutover is intentionally explicit and should only be done after validation gates pass:
 
 ```bash
-python3 -m wiki_graph.ops.batch_native_refresh refresh \
+python3 -m ops.batch_native_refresh refresh \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --workdir "$WIKI_GRAPH_REPO" \
@@ -90,7 +90,7 @@ python3 -m wiki_graph.ops.batch_native_refresh refresh \
 Query the native service/data endpoint:
 
 ```bash
-python3 -m wiki_graph.ops.wiki_search "your query" \
+python3 -m ops.wiki_search "your query" \
   --root "$LLM_WIKI_ROOT" \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --data-only
@@ -99,7 +99,7 @@ python3 -m wiki_graph.ops.wiki_search "your query" \
 Run the production-reference audit:
 
 ```bash
-python3 -m wiki_graph.ops.audit_native_production_refs --repo-root .
+python3 -m ops.audit_native_production_refs --repo-root .
 ```
 
 ## Validation gates for changes
@@ -126,7 +126,7 @@ python3 -m pytest tests -q
 Run syntax and whitespace checks before committing:
 
 ```bash
-python3 -m compileall -q llm_wiki_native wiki_graph tests
+python3 -m compileall -q llm_wiki_native ops tests
 
 git diff --check
 ```
