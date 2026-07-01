@@ -13,6 +13,17 @@ dependencies = ["numpy", "starlette", "uvicorn", "zvec>=0.5.1,<0.6"]
 where = ["."]
 include = ["llm_wiki_native*", "ops*"]
 
+[tool.pytest.ini_options]
+markers = [
+  "unit: fast in-process tests with fake dependencies",
+  "integration: multi-component integration tests",
+  "subprocess: tests that spawn subprocesses",
+  "requires_zvec: tests requiring the real zvec package/runtime",
+  "requires_fitz: tests requiring PyMuPDF/fitz",
+  "slow: tests that are intentionally slower than the focused unit suite",
+  "external_skill: tests depending on an external Hermes skill asset",
+]
+
 [project.scripts]
 llm-wiki-native = "llm_wiki_native.cli:main"
 wiki-graph-audit-native-refs = "ops.audit_native_production_refs:main"
