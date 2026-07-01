@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
@@ -24,6 +26,21 @@ def test_create_workspace_initializes_schema_and_status(tmp_path) -> None:
 
     assert db.get_workspace_status("native-test") == "audited"
     assert db.audit_counts("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})["ok"] is True
+
+
+def test_open_existing_read_only_reads_without_allowing_writes(tmp_path) -> None:
+    db_path = tmp_path / "native.sqlite"
+    writable = SQLiteWorkspace(db_path)
+    writable.create_workspace("native-test", "manifest-hash")
+    writable.put_record(_workspace_record("native-test"))
+    writable.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0})
+
+    read_only = SQLiteWorkspace.open_existing(db_path, read_only=True)
+
+    assert read_only.get_workspace_status("native-test") == "audited"
+    assert read_only.get_record("native-test", "chunk", "chunk-a")["vector_text"]
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        read_only.create_workspace("should-fail", "manifest-hash")
 
 
 def test_workspace_audit_reports_record_count_mismatch(tmp_path) -> None:
