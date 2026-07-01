@@ -124,6 +124,33 @@ def test_build_workspace_from_state_library_materializes_manifest_and_edges_with
     assert [item["neighbor_id"] for item in db.neighbors("native-test", "doc:a")] == ["doc:b", "tag:x"]
 
 
+def test_build_workspace_materializes_source_root_lexical_spans(tmp_path) -> None:
+    state = _sample_state(tmp_path)
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "_meta").mkdir(parents=True)
+    (wiki_root / "concepts").mkdir(parents=True)
+    (wiki_root / "_meta" / "raw-clip-map.md").write_text(
+        "# Raw Clip Map\n\n- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle\n",
+        encoding="utf-8",
+    )
+    (wiki_root / "concepts" / "table-demo.md").write_text(
+        "---\ntitle: Table Demo\n---\n# Table Demo\n\n## Results\n\n| Method | Result |\n|---|---|\n| Alpha | TableOnlyNeedle |\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "native.sqlite"
+
+    report = build_workspace_from_state(state, db_path, "native-test", source_root=wiki_root)
+
+    db = SQLiteWorkspace(db_path)
+    assert report["lexical_span_count"] >= 2
+    map_hits = db.query_lexical_spans("native-test", "MapOnlyNeedle", limit=5)
+    table_hits = db.query_lexical_spans("native-test", "TableOnlyNeedle", limit=5)
+    assert map_hits[0]["span_kind"] == "map.row"
+    assert map_hits[0]["source_path"] == "_meta/raw-clip-map.md"
+    assert table_hits[0]["span_kind"] == "table.row"
+    assert table_hits[0]["source_path"] == "concepts/table-demo.md"
+
+
 def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"

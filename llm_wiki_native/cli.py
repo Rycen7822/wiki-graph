@@ -15,6 +15,7 @@ from llm_wiki_native.artifacts import load_custom_kg_manifest, load_raw_sections
 from llm_wiki_native.build import materialize_zvec_records, raise_if_missing_vectors
 from llm_wiki_native.manifest import manifest_summary, materialize_manifest, materialize_raw_sections
 from llm_wiki_native.pointers import finalize_prepared_workspace, rollback_active_workspace
+from llm_wiki_native.retrieval.lexical import materialize_lexical_spans, spans_from_native_records, spans_from_source_root
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from llm_wiki_native.storage.zvec_records import ZvecRecord
 
@@ -137,6 +138,7 @@ def build_workspace_from_state(
     zvec_path: Path | None = None,
     prepared_workspace_path: Path | None = None,
     zvec_workspace_factory: Callable[[Path, int], Any] | None = None,
+    source_root: Path | None = None,
 ) -> dict[str, Any]:
     if prepared_workspace_path is not None and zvec_path is None:
         raise ValueError("prepared_workspace_path requires zvec_path")
@@ -169,6 +171,11 @@ def build_workspace_from_state(
         ),
     }
     _materialize_edges(db, workspace_id, manifest, section_edges)
+    if source_root is not None:
+        lexical_spans = spans_from_source_root(Path(source_root), workspace_id)
+    else:
+        lexical_spans = spans_from_native_records(workspace_id, manifest, raw_sections)
+    lexical_span_count = materialize_lexical_spans(db, workspace_id, lexical_spans)
     zvec_report = None
     if zvec_path is not None:
         records = materialize_zvec_records(
@@ -208,6 +215,8 @@ def build_workspace_from_state(
         "source_manifest_hash": source_manifest_hash,
         "counts": counts,
         "edge_count": db.count_edges(workspace_id),
+        "lexical_span_count": lexical_span_count,
+        "source_root": str(source_root) if source_root is not None else None,
         "audit": db.audit_counts(workspace_id, expected),
         "vector_audit": vector_audit,
         "status": db.get_workspace_status(workspace_id),
@@ -223,6 +232,8 @@ def build_workspace_from_state(
             "zvec_path": str(zvec_path),
             "source_manifest_hash": source_manifest_hash,
             "counts": counts,
+            "lexical_span_count": lexical_span_count,
+            "source_root": str(source_root) if source_root is not None else None,
             "zvec": zvec_report,
         }
         _write_json_atomic(Path(prepared_workspace_path), pointer)
@@ -238,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--db", type=Path, required=True)
     build.add_argument("--workspace-id", required=True)
     build.add_argument("--zvec-workspace", type=Path, required=True)
+    build.add_argument("--root", type=Path, help="Optional source wiki root for lexical sidecar spans")
     build.add_argument("--prepared-workspace-file", type=Path)
     finalize = sub.add_parser("finalize-prepared", help="Promote a prepared native workspace pointer to active")
     finalize.add_argument("--prepared-workspace-file", type=Path, required=True)
@@ -255,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             args.workspace_id,
             zvec_path=args.zvec_workspace,
             prepared_workspace_path=args.prepared_workspace_file,
+            source_root=args.root,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0

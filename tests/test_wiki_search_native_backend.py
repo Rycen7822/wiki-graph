@@ -155,6 +155,7 @@ def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monk
         workdir=tmp_path,
         server="http://127.0.0.1:9621",
         neighbor_k=5,
+        response_profile="debug",
     )
 
     result = wiki_search.run_query(args, "alpha")
@@ -169,6 +170,7 @@ def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monk
                 "mode": "mix",
                 "top_k": 1,
                 "neighbor_limit": 5,
+                "response_profile": "debug",
                 "workspace_id": "native-test",
                 "query_vector": [1.0, 0.0],
             },

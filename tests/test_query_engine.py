@@ -57,6 +57,47 @@ def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None
     assert result["trace"]["vector_hit_count"] == 1
 
 
+def test_hybrid_query_reranks_lexical_exact_map_row_over_weaker_zvec_hit(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.put_record(native_record("native-test", "chunk", "chunk-weak", "Weak semantic chunk", source_path="concepts/weak.md"))
+    db.put_vector("native-test", "chunk", "chunk-weak", "chunk-weak:vector", [1.0, 0.0])
+    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0}, require_vectors=True)
+    db.put_lexical_span(
+        "native-test",
+        span_id="span:raw-map-row",
+        source_path="_meta/raw-clip-map.md",
+        source_id="meta:raw-clip-map",
+        source_role="meta_map",
+        span_kind="map.row",
+        heading_path=["Raw Clip Map"],
+        start_line=4,
+        end_line=4,
+        text="- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
+        metadata={"map": "raw-clip"},
+    )
+    zvec = _ZvecWorkspace([_ZvecHit("chunk", "chunk-weak", score=100.0)])
+    engine = NativeQueryEngine(db, zvec_workspace=zvec)
+
+    result = engine.query(
+        "native-test",
+        "MapOnlyNeedle raw map",
+        [1.0, 0.0],
+        mode="mix",
+        top_k=2,
+        record_types=("chunk",),
+        lexical_top_k=3,
+    )
+
+    assert result["trace"]["route_counts"] == {"zvec": 1, "lexical": 1}
+    assert result["hits"][0]["record_type"] == "lexical_span"
+    assert result["hits"][0]["record_id"] == "span:raw-map-row"
+    assert result["hits"][0]["record"]["source_path"] == "_meta/raw-clip-map.md"
+    assert "lexical_fts" in result["hits"][0]["routes"] or "lexical_like" in result["hits"][0]["routes"]
+    assert result["hits"][0]["score_breakdown"]["source_role"] > 0
+    assert result["hits"][1]["record_id"] == "chunk-weak"
+
+
 def test_query_engine_routes_mix_to_zvec_hybrid_when_workspace_is_supplied() -> None:
     class Hit:
         doc_id = "chunk:chunk-a"
@@ -226,3 +267,55 @@ def test_record_identity_requires_zvec_hit_fields() -> None:
 
     with pytest.raises(ValueError, match="zvec hit missing record_type/record_id fields"):
         _record_identity_from_hit("chunk__Y2h1bmstYQ", {"record_type": "chunk"})
+
+
+def test_read_span_rereads_current_source_and_relocates_exact_text(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.mark_audited("native-test", {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0})
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "notes").mkdir(parents=True)
+    source = wiki_root / "notes" / "alpha.md"
+    source.write_text("# Alpha\n\nStable evidence line\nTail\n", encoding="utf-8")
+    db.put_lexical_span(
+        "native-test",
+        span_id="span:current",
+        source_path="notes/alpha.md",
+        source_id="wiki:alpha",
+        source_role="wiki",
+        span_kind="doc.paragraph",
+        heading_path=["Alpha"],
+        start_line=3,
+        end_line=3,
+        text="Stable evidence line",
+        metadata={},
+    )
+    db.put_lexical_span(
+        "native-test",
+        span_id="span:moved",
+        source_path="notes/alpha.md",
+        source_id="wiki:alpha",
+        source_role="wiki",
+        span_kind="doc.paragraph",
+        heading_path=["Alpha"],
+        start_line=2,
+        end_line=2,
+        text="Relocated evidence line",
+        metadata={},
+    )
+    source.write_text("# Alpha\n\nStable evidence line\nInserted\nRelocated evidence line\n", encoding="utf-8")
+    engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace(), source_root=wiki_root)
+
+    current = engine.read_span("native-test", "span:current")
+    moved = engine.read_span("native-test", "span:moved")
+    snapshot = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace()).read_span("native-test", "span:moved")
+
+    assert current["source_status"] == "current"
+    assert current["text"] == "Stable evidence line"
+    assert current["start_line"] == 3
+    assert moved["source_status"] == "current"
+    assert moved["relocation"] == "exact_text"
+    assert moved["start_line"] == 5
+    assert moved["text"] == "Relocated evidence line"
+    assert snapshot["source_status"] == "snapshot"
+    assert snapshot["text"] == "Relocated evidence line"

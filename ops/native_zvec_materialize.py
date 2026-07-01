@@ -258,6 +258,7 @@ def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
         args.workspace_id,
         zvec_path=zvec_path,
         prepared_workspace_path=prepared_path,
+        source_root=root,
     )
     zvec = native_report["zvec"]
     report = {

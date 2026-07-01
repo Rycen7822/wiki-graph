@@ -216,7 +216,8 @@ def create_app(
         payload = await _json_payload(request)
         result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
         max_chars = _bounded_int(payload.get("max_chars_per_block", 1200), default=1200, minimum=1, maximum=20_000, field="max_chars_per_block")
-        return JSONResponse(assemble_context(result, max_chars_per_block=max_chars))
+        response_profile = str(payload.get("response_profile", "standard"))
+        return JSONResponse(assemble_context(result, max_chars_per_block=max_chars, response_profile=response_profile))
 
     async def query(request: Request) -> JSONResponse:
         if not _authorized(request, api_key):
@@ -224,7 +225,8 @@ def create_app(
         payload = await _json_payload(request)
         result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
         max_chars = _bounded_int(payload.get("max_chars_per_block", 1200), default=1200, minimum=1, maximum=20_000, field="max_chars_per_block")
-        context = assemble_context(result, max_chars_per_block=max_chars)
+        response_profile = str(payload.get("response_profile", "standard"))
+        context = assemble_context(result, max_chars_per_block=max_chars, response_profile=response_profile)
         mode = str(result.get("trace", {}).get("mode", payload.get("mode", "mix")))
         query_text = str(payload.get("query", ""))
         if mode == "bypass":
@@ -237,6 +239,19 @@ def create_app(
             answer_generator=answer_generator,
         )
         return JSONResponse(answer_payload)
+
+    async def read_span(request: Request) -> JSONResponse:
+        if not _authorized(request, api_key):
+            return unauthorized()
+        payload = await _json_payload(request)
+        workspace_id = payload.get("workspace_id") or default_workspace_id
+        if not workspace_id:
+            raise ValueError("workspace_id is required")
+        span_id = str(payload.get("span_id") or "")
+        if not span_id:
+            raise ValueError("span_id is required")
+        result = await run_in_threadpool(engine.read_span, str(workspace_id), span_id)
+        return JSONResponse(result)
 
     async def value_error(_request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -255,6 +270,7 @@ def create_app(
             Route("/health", health, methods=["GET"]),
             Route("/query", query, methods=["POST"]),
             Route("/query/data", query_data, methods=["POST"]),
+            Route("/read/span", read_span, methods=["POST"]),
         ],
         exception_handlers={RequestEntityTooLarge: request_too_large, NotImplementedError: not_implemented, ValueError: value_error, KeyError: key_error},
     )

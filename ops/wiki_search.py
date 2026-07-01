@@ -43,6 +43,9 @@ def run_native_api_query(args, query: str, *, section_kind: str | None = None) -
         payload["query_vector"] = json.loads(query_vector)
     if section_kind:
         payload["section_kind"] = section_kind
+    response_profile = getattr(args, "response_profile", None)
+    if response_profile:
+        payload["response_profile"] = response_profile
     response = http_json("POST", args.server.rstrip("/") + endpoint, payload, timeout=120)
     pack = None
     if args.save_evidence_pack:
@@ -72,6 +75,7 @@ def main() -> int:
     )
     parser.add_argument("--save-evidence-pack", action="store_true")
     parser.add_argument("--data-only", action="store_true", help="Use /query/data retrieval without LLM answer generation")
+    parser.add_argument("--response-profile", choices=["compact", "standard", "debug"], help="Native response profile for /query/data or /query envelopes")
     parser.add_argument("--native-workspace", help="Workspace id override for native API queries")
     parser.add_argument("--query-vector", help="JSON array query vector forwarded to native API queries")
     parser.add_argument("--neighbor-k", type=int, default=5, help="Max native semantic neighbor records per hit")
@@ -88,6 +92,7 @@ def main() -> int:
             "section_kind",
             "neighbor_limit",
             "max_chars_per_block",
+            "response_profile",
             "must_include_paths",
             "must_include_entities",
         }
