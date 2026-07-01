@@ -59,6 +59,56 @@ def test_load_engine_from_workspace_pointer_uses_read_only_zvec_factory_for_acti
     assert engine.default_workspace_id == "native-active"
 
 
+def test_load_engine_from_workspace_pointer_uses_read_only_sqlite_open_existing_by_default(tmp_path, monkeypatch) -> None:
+    pointer_path = tmp_path / "active_workspace.json"
+    sqlite_path = tmp_path / "records.sqlite"
+    zvec_path = tmp_path / "zvec_records"
+    pointer_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "workspace_id": "native-active",
+                "status": "active",
+                "sqlite_path": str(sqlite_path),
+                "zvec_path": str(zvec_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = {}
+
+    class DB:
+        pass
+
+    class Zvec:
+        pass
+
+    def open_existing(cls, path: Path, *, read_only: bool = True) -> DB:
+        calls["sqlite_path"] = path
+        calls["sqlite_read_only"] = read_only
+        return DB()
+
+    def zvec_factory(path: Path, *, read_only: bool) -> Zvec:
+        calls["zvec_path"] = path
+        calls["zvec_read_only"] = read_only
+        return Zvec()
+
+    monkeypatch.setattr(runtime.SQLiteWorkspace, "open_existing", classmethod(open_existing))
+
+    engine = runtime.load_engine_from_workspace_pointer(
+        pointer_path,
+        zvec_workspace_factory=zvec_factory,
+    )
+
+    assert calls == {
+        "sqlite_path": sqlite_path,
+        "sqlite_read_only": True,
+        "zvec_path": zvec_path,
+        "zvec_read_only": True,
+    }
+    assert isinstance(engine.db, DB)
+
+
 def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_path) -> None:
     pointer_path = tmp_path / "active_workspace.json"
     sqlite_path = tmp_path / "records.sqlite"

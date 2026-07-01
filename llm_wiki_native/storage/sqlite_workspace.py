@@ -105,16 +105,33 @@ class SQLiteWorkspace:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
+        self._read_only = False
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
+    @classmethod
+    def open_existing(cls, db_path: Path, *, read_only: bool = True) -> "SQLiteWorkspace":
+        path = Path(db_path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        workspace = cls.__new__(cls)
+        workspace.db_path = path
+        workspace._read_only = bool(read_only)
+        return workspace
+
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        if self._read_only:
+            conn = sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", timeout=30.0, uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
+        if self._read_only:
+            conn.execute("PRAGMA query_only = ON")
+        else:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_schema(self) -> None:

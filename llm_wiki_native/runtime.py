@@ -14,7 +14,7 @@ def load_engine_from_workspace_pointer(
     pointer_path: Path,
     *,
     allowed_statuses: tuple[str, ...] = ("active",),
-    sqlite_workspace_factory: Callable[[Path], Any] = SQLiteWorkspace,
+    sqlite_workspace_factory: Callable[[Path], Any] | None = None,
     zvec_workspace_factory: Callable[..., Any] | None = None,
 ) -> NativeQueryEngine:
     pointer = _read_pointer(Path(pointer_path))
@@ -26,7 +26,10 @@ def load_engine_from_workspace_pointer(
         raise ValueError(f"workspace pointer status must be one of: {allowed}")
     sqlite_path = Path(str(pointer["sqlite_path"]))
     zvec_path = Path(str(pointer["zvec_path"]))
-    db = sqlite_workspace_factory(sqlite_path)
+    if sqlite_workspace_factory is None:
+        db = SQLiteWorkspace.open_existing(sqlite_path, read_only=True)
+    else:
+        db = sqlite_workspace_factory(sqlite_path)
     if zvec_workspace_factory is None:
         from llm_wiki_native.storage.zvec_workspace import open_workspace_collection
 
