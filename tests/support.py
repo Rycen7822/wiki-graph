@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -103,3 +105,147 @@ def request_asgi(app: Any, method: str, path: str, *, raise_app_exceptions: bool
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(request_once())
+
+
+def install_fake_zvec(monkeypatch: Any) -> Any:
+    fake = types.ModuleType("zvec")
+
+    class DataType:
+        INT32 = "INT32"
+        STRING = "STRING"
+        VECTOR_FP32 = "VECTOR_FP32"
+
+    class MetricType:
+        COSINE = "COSINE"
+
+    class CollectionOption:
+        def __init__(self, read_only: bool = False, enable_mmap: bool = True) -> None:
+            self.read_only = read_only
+            self.enable_mmap = enable_mmap
+
+    class InvertIndexParam:
+        pass
+
+    class FtsIndexParam:
+        def __init__(
+            self,
+            tokenizer_name: str = "standard",
+            filters: list[str] | None = None,
+            extra_params: str = "",
+        ) -> None:
+            self.tokenizer_name = tokenizer_name
+            self.filters = filters
+            self.extra_params = extra_params
+
+    class HnswIndexParam:
+        def __init__(
+            self,
+            metric_type=MetricType.COSINE,
+            m: int = 50,
+            ef_construction: int = 500,
+        ) -> None:
+            self.metric_type = metric_type
+            self.m = m
+            self.ef_construction = ef_construction
+
+    class HnswQueryParam:
+        def __init__(self, ef: int = 300) -> None:
+            self.ef = ef
+
+    class FtsQueryParam:
+        def __init__(self, default_operator: str = "") -> None:
+            self.default_operator = default_operator
+
+    class Fts:
+        def __init__(
+            self,
+            match_string: str | None = None,
+            query_string: str | None = None,
+        ) -> None:
+            self.match_string = match_string
+            self.query_string = query_string
+
+    class Query:
+        def __init__(self, field_name: str, vector=None, param=None, fts=None) -> None:
+            self.field_name = field_name
+            self.vector = vector
+            self.param = param
+            self.fts = fts
+
+    class RrfReRanker:
+        def __init__(self, rank_constant: int) -> None:
+            self.rank_constant = rank_constant
+
+    class FieldSchema:
+        def __init__(
+            self,
+            name: str,
+            data_type,
+            nullable: bool = False,
+            index_param=None,
+        ) -> None:
+            self.name = name
+            self.data_type = data_type
+            self.nullable = nullable
+            self.index_param = index_param
+
+    class VectorSchema:
+        def __init__(
+            self,
+            name: str,
+            data_type,
+            dimension: int,
+            index_param=None,
+        ) -> None:
+            self.name = name
+            self.data_type = data_type
+            self.dimension = dimension
+            self.index_param = index_param
+
+    class CollectionSchema:
+        def __init__(self, name: str, fields=None, vectors=None) -> None:
+            self.name = name
+            self.fields = fields or []
+            self.vectors = vectors or []
+
+    fake.calls = []
+
+    def create_and_open(*, path: str, schema, option):
+        fake.calls.append(("create_and_open", path, schema, option))
+        return {"kind": "created", "path": path}
+
+    def zvec_open(path: str, option):
+        fake.calls.append(("open", path, option))
+        return {"kind": "opened", "path": path}
+
+    class Doc:
+        def __init__(self, id: str, score=None, vectors=None, fields=None) -> None:
+            self.id = id
+            self.score = score
+            self.vectors = vectors or {}
+            self.fields = fields or {}
+
+    for name, value in {
+        "CollectionOption": CollectionOption,
+        "CollectionSchema": CollectionSchema,
+        "DataType": DataType,
+        "Doc": Doc,
+        "FieldSchema": FieldSchema,
+        "Fts": Fts,
+        "FtsIndexParam": FtsIndexParam,
+        "FtsQueryParam": FtsQueryParam,
+        "HnswIndexParam": HnswIndexParam,
+        "HnswQueryParam": HnswQueryParam,
+        "InvertIndexParam": InvertIndexParam,
+        "MetricType": MetricType,
+        "Query": Query,
+        "RrfReRanker": RrfReRanker,
+        "VectorSchema": VectorSchema,
+        "create_and_open": create_and_open,
+        "open": zvec_open,
+    }.items():
+        setattr(fake, name, value)
+
+    monkeypatch.setitem(sys.modules, "zvec", fake)
+    monkeypatch.delitem(sys.modules, "llm_wiki_native.storage.zvec_workspace", raising=False)
+    return fake

@@ -1,158 +1,14 @@
 from __future__ import annotations
 
 import importlib
-import sys
-import types
-
 import pytest
 
+from support import install_fake_zvec
 
-def _install_fake_zvec(monkeypatch):
-    fake = types.ModuleType("zvec")
-
-    class DataType:
-        INT32 = "INT32"
-        STRING = "STRING"
-        VECTOR_FP32 = "VECTOR_FP32"
-
-    class MetricType:
-        COSINE = "COSINE"
-
-    class CollectionOption:
-        def __init__(self, read_only: bool = False, enable_mmap: bool = True) -> None:
-            self.read_only = read_only
-            self.enable_mmap = enable_mmap
-
-    class InvertIndexParam:
-        pass
-
-    class FtsIndexParam:
-        def __init__(
-            self,
-            tokenizer_name: str = "standard",
-            filters: list[str] | None = None,
-            extra_params: str = "",
-        ) -> None:
-            self.tokenizer_name = tokenizer_name
-            self.filters = filters
-            self.extra_params = extra_params
-
-    class HnswIndexParam:
-        def __init__(
-            self,
-            metric_type=MetricType.COSINE,
-            m: int = 50,
-            ef_construction: int = 500,
-        ) -> None:
-            self.metric_type = metric_type
-            self.m = m
-            self.ef_construction = ef_construction
-
-    class HnswQueryParam:
-        def __init__(self, ef: int = 300) -> None:
-            self.ef = ef
-
-    class FtsQueryParam:
-        def __init__(self, default_operator: str = "") -> None:
-            self.default_operator = default_operator
-
-    class Fts:
-        def __init__(
-            self,
-            match_string: str | None = None,
-            query_string: str | None = None,
-        ) -> None:
-            self.match_string = match_string
-            self.query_string = query_string
-
-    class Query:
-        def __init__(self, field_name: str, vector=None, param=None, fts=None) -> None:
-            self.field_name = field_name
-            self.vector = vector
-            self.param = param
-            self.fts = fts
-
-    class RrfReRanker:
-        def __init__(self, rank_constant: int) -> None:
-            self.rank_constant = rank_constant
-
-    class FieldSchema:
-        def __init__(
-            self,
-            name: str,
-            data_type,
-            nullable: bool = False,
-            index_param=None,
-        ) -> None:
-            self.name = name
-            self.data_type = data_type
-            self.nullable = nullable
-            self.index_param = index_param
-
-    class VectorSchema:
-        def __init__(
-            self,
-            name: str,
-            data_type,
-            dimension: int,
-            index_param=None,
-        ) -> None:
-            self.name = name
-            self.data_type = data_type
-            self.dimension = dimension
-            self.index_param = index_param
-
-    class CollectionSchema:
-        def __init__(self, name: str, fields=None, vectors=None) -> None:
-            self.name = name
-            self.fields = fields or []
-            self.vectors = vectors or []
-
-    fake.calls = []
-
-    def create_and_open(*, path: str, schema, option):
-        fake.calls.append(("create_and_open", path, schema, option))
-        return {"kind": "created", "path": path}
-
-    def zvec_open(path: str, option):
-        fake.calls.append(("open", path, option))
-        return {"kind": "opened", "path": path}
-
-    class Doc:
-        def __init__(self, id: str, score=None, vectors=None, fields=None) -> None:
-            self.id = id
-            self.score = score
-            self.vectors = vectors or {}
-            self.fields = fields or {}
-
-    for name, value in {
-        "CollectionOption": CollectionOption,
-        "CollectionSchema": CollectionSchema,
-        "DataType": DataType,
-        "Doc": Doc,
-        "FieldSchema": FieldSchema,
-        "Fts": Fts,
-        "FtsIndexParam": FtsIndexParam,
-        "FtsQueryParam": FtsQueryParam,
-        "HnswIndexParam": HnswIndexParam,
-        "HnswQueryParam": HnswQueryParam,
-        "InvertIndexParam": InvertIndexParam,
-        "MetricType": MetricType,
-        "Query": Query,
-        "RrfReRanker": RrfReRanker,
-        "VectorSchema": VectorSchema,
-        "create_and_open": create_and_open,
-        "open": zvec_open,
-    }.items():
-        setattr(fake, name, value)
-
-    monkeypatch.setitem(sys.modules, "zvec", fake)
-    monkeypatch.delitem(sys.modules, "llm_wiki_native.storage.zvec_workspace", raising=False)
-    return fake
 
 
 def test_build_schema_matches_plan_numeric_filters_and_hnsw(monkeypatch) -> None:
-    fake_zvec = _install_fake_zvec(monkeypatch)
+    fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     schema = module.build_schema(embedding_dim=8)
@@ -183,7 +39,7 @@ def test_build_schema_matches_plan_numeric_filters_and_hnsw(monkeypatch) -> None
 
 
 def test_doc_ids_and_numeric_codes_are_strict_plan_mappings(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
+    install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     assert module.zvec_doc_id("chunk", "chunk-1") == "chunk__Y2h1bmstMQ"
@@ -212,7 +68,7 @@ def test_doc_ids_and_numeric_codes_are_strict_plan_mappings(monkeypatch) -> None
 
 
 def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
-    fake_zvec = _install_fake_zvec(monkeypatch)
+    fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     record = module.ZvecRecord(
@@ -280,7 +136,7 @@ def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
 
 
 def test_bulk_insert_batches_docs_and_counts_statuses(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
+    install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class Status:
@@ -331,7 +187,7 @@ def test_bulk_insert_batches_docs_and_counts_statuses(monkeypatch) -> None:
 
 
 def test_bulk_insert_default_batch_size_respects_zvec_write_limit(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
+    install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class Status:
@@ -376,7 +232,7 @@ def test_bulk_insert_default_batch_size_respects_zvec_write_limit(monkeypatch) -
 
 
 def test_flush_optimize_close_delegates_without_destroy(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
+    install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class Collection:
@@ -402,7 +258,7 @@ def test_flush_optimize_close_delegates_without_destroy(monkeypatch) -> None:
 
 
 def test_self_nearest_smoke_fetches_vectors_and_reports_failures(monkeypatch) -> None:
-    _install_fake_zvec(monkeypatch)
+    install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class FetchedDoc:
@@ -446,7 +302,7 @@ def test_create_and_open_workspace_collections_use_mmap_options(
     monkeypatch,
     tmp_path,
 ) -> None:
-    fake_zvec = _install_fake_zvec(monkeypatch)
+    fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     created = module.create_workspace_collection(
@@ -477,7 +333,7 @@ def test_create_and_open_workspace_collections_use_mmap_options(
 
 
 def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:
-    fake_zvec = _install_fake_zvec(monkeypatch)
+    fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class Doc:
@@ -518,7 +374,7 @@ def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:
 
 
 def test_query_mix_uses_vector_fts_and_rrf(monkeypatch) -> None:
-    fake_zvec = _install_fake_zvec(monkeypatch)
+    fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
     class Collection:
