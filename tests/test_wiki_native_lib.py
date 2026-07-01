@@ -82,6 +82,7 @@ FACADE_OWNER_SYMBOLS = {
         "validation_report_is_fresh",
         "wiki_root_machine_pollution",
     ),
+    "ops.wiki_native_wiki_integration_bridge": ("clear_pending_wiki_integration_after_success",),
     "ops.wiki_native_wiki_integration_pending": (
         "load_pending_wiki_integration_ledger",
         "mark_pending_wiki_integration",

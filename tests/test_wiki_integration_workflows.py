@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 from support import sample_wiki, write  # noqa: E402
 from ops import batch_native_refresh  # noqa: E402
 from ops import batch_wiki_integration  # noqa: E402
-from ops.wiki_native_lib import clear_pending_wiki_integration_after_success  # noqa: E402
+from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
@@ -299,7 +299,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         "import os, sys\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(ROOT)!r})\n"
-        "from ops.wiki_native_lib import clear_pending_wiki_integration_after_success\n"
+        "from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success\n"
         "root = Path(os.environ['LLM_WIKI_ROOT'])\n"
         "state = Path(os.environ['LLM_WIKI_STATE_DIR'])\n"
         "prompt_path = Path(os.environ['LLM_WIKI_INTEGRATION_PROMPT'])\n"

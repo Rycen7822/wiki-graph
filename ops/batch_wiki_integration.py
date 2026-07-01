@@ -14,14 +14,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_lib import (
+from ops.wiki_native_cli import DEFAULT_STATE_DIR, DEFAULT_WIKI_ROOT, print_json
+from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success
+from ops.wiki_native_wiki_integration_pending import (
     DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD,
-    DEFAULT_STATE_DIR,
-    DEFAULT_WIKI_ROOT,
-    clear_pending_wiki_integration_after_success,
     mark_pending_wiki_integration,
     pending_wiki_integration_status,
-    print_json,
     record_pending_wiki_integration_failure,
 )
 from ops.wiki_integration_plan import build_wiki_integration_plan, write_wiki_integration_plan_report
