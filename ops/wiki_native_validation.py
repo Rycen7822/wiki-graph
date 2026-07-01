@@ -9,8 +9,19 @@ import re
 from pathlib import Path
 from typing import Any
 
-from llm_wiki_native.source_docs import raw_clip_files, read_text
-
+from llm_wiki_native.source_docs import COMPILED_DIR_TYPES, display_scalar, parse_frontmatter, raw_clip_files, read_text
+from ops.wiki_native_artifacts import resolve_source
+from ops.wiki_native_ingest_text import as_list, find_wikilinks
+from ops.wiki_native_state import ensure_state_dirs
+from ops.wiki_native_wiki_checks import (
+    compiled_pages,
+    index_stats,
+    indexed_markdown_pages,
+    now_stamp,
+    structured_heading_warnings,
+    validation_freshness_context,
+    wiki_root_machine_pollution,
+)
 
 RAW_CLIP_MAP_SNAPSHOT_RE = re.compile(r"(Active raw clips[：:]\s*)(\d+)")
 
@@ -74,23 +85,9 @@ def sync_raw_clip_map_snapshot(root: Path) -> dict[str, Any]:
     }
 
 
-def validate_wiki(
-    root: Path,
-    state_dir: Path,
-    workdir: Path | None = None,
-    full: bool = False,
-    write_report: bool = False,
-    sync_raw_map_snapshot: bool = False,
-) -> dict[str, Any]:
-    import ops.wiki_native_lib as lib
-
-    root = root.resolve()
-    raw_map_sync = sync_raw_clip_map_snapshot(root) if sync_raw_map_snapshot else None
-    errors: list[str] = []
-    warnings: list[str] = []
-    compiled = lib.indexed_markdown_pages(root)
-    non_meta_compiled = lib.compiled_pages(root)
-    index_total, index_wikilinks = lib.index_stats(root)
+def _validate_index_surface(root: Path, errors: list[str]) -> dict[str, Any]:
+    compiled = indexed_markdown_pages(root)
+    index_total, index_wikilinks = index_stats(root)
     compiled_count = len(compiled)
     if index_total is None:
         errors.append("index.md missing Total pages marker")
@@ -100,38 +97,66 @@ def validate_wiki(
         errors.append(f"index_wikilinks != index_total ({index_wikilinks} != {index_total})")
     slug_set = {p.stem for p in compiled}
     slug_set.update({"index", "raw-clip-map", "topic-map", "source-map"})
-    broken, missing_sources, image_issues, raw_filename_drift = [], [], [], []
-    for path in non_meta_compiled:
-        text = lib.read_text(path)
-        fm, body = lib.parse_frontmatter(text)
+    return {
+        "compiled_count": compiled_count,
+        "index_total": index_total,
+        "index_wikilinks": index_wikilinks,
+        "slug_set": slug_set,
+    }
+
+
+def _validate_compiled_surface(root: Path, slug_set: set[str], errors: list[str], warnings: list[str]) -> dict[str, Any]:
+    broken: list[str] = []
+    missing_sources: list[str] = []
+    image_issues: list[str] = []
+    for path in compiled_pages(root):
+        text = read_text(path)
+        fm, _body = parse_frontmatter(text)
         rel = path.relative_to(root).as_posix()
-        expected_type = lib.COMPILED_DIR_TYPES[path.parent.name]
+        expected_type = COMPILED_DIR_TYPES[path.parent.name]
         for key in ["title", "type", "tags", "updated"]:
             if key not in fm:
                 errors.append(f"{rel} missing frontmatter.{key}")
         if fm.get("type") != expected_type:
             errors.append(f"{rel} type {fm.get('type')!r} != {expected_type!r}")
-        for link in lib.find_wikilinks(text):
+        for link in find_wikilinks(text):
             if link not in slug_set:
                 broken.append(f"{rel} -> {link}")
-        for src in lib.as_list(fm.get("sources")):
-            s = lib.display_scalar(src)
-            if not s or s.startswith("http://") or s.startswith("https://"):
+        for src in as_list(fm.get("sources")):
+            source = display_scalar(src)
+            if not source or source.startswith("http://") or source.startswith("https://"):
                 continue
-            resolved = lib.resolve_source(path, s, root)
+            resolved = resolve_source(path, source, root)
             if resolved and not resolved.exists():
-                missing_sources.append(f"{rel} -> {s}")
+                missing_sources.append(f"{rel} -> {source}")
         if re.search(r"!\[[^\]]*\]\(https?://", text) or "data:image" in text:
             image_issues.append(rel)
         warnings.extend(secret_hits(path, text))
-    raw_files = lib.raw_clip_files(root)
+    if broken:
+        errors.append(f"broken_wikilinks={len(broken)}")
+    if missing_sources:
+        errors.append(f"missing_source_refs={len(missing_sources)}")
+    if image_issues:
+        errors.append(f"image_hygiene={len(image_issues)}")
+    return {
+        "broken_wikilinks": len(broken),
+        "broken_wikilink_examples": broken[:20],
+        "missing_source_refs": len(missing_sources),
+        "missing_source_ref_examples": missing_sources[:20],
+        "image_hygiene": len(image_issues),
+    }
+
+
+def _validate_raw_surface(root: Path, full: bool, errors: list[str], warnings: list[str]) -> dict[str, Any]:
+    raw_filename_drift: list[str] = []
+    raw_files = raw_clip_files(root)
     for raw in raw_files:
         rel = raw.relative_to(root).as_posix()
         if " " in raw.name or "-md.md" in raw.name or raw.name.count(".md") != 1:
             raw_filename_drift.append(rel)
         if full:
-            raw_text = lib.read_text(raw)
-            warnings.extend(lib.structured_heading_warnings(raw, raw_text))
+            raw_text = read_text(raw)
+            warnings.extend(structured_heading_warnings(raw, raw_text))
             warnings.extend(secret_hits(raw, raw_text))
     raw_count, map_count = len(raw_files), None
     raw_map = root / "_meta" / "raw-clip-map.md"
@@ -140,49 +165,87 @@ def validate_wiki(
         if map_count is not None:
             if map_count != raw_count:
                 warnings.append(f"active_raw_clips != raw-clip-map snapshot ({raw_count} != {map_count})")
-    pollution = lib.wiki_root_machine_pollution(root)
+    if raw_filename_drift:
+        errors.append(f"raw_filename_drift={len(raw_filename_drift)}")
+    return {
+        "active_raw_clips": raw_count,
+        "raw_clip_map_snapshot": map_count,
+        "raw_filename_drift": len(raw_filename_drift),
+        "raw_filename_drift_examples": raw_filename_drift[:20],
+    }
+
+
+def _validate_root_hygiene_surface(root: Path, errors: list[str], warnings: list[str]) -> dict[str, Any]:
+    pollution = wiki_root_machine_pollution(root)
     if pollution:
         errors.append("wiki_root_machine_pollution detected: " + ", ".join(p.as_posix() for p in pollution))
     log_path = root / "log.md"
     if log_path.exists():
-        log_entries = len(re.findall(r"^##\s+", lib.read_text(log_path), re.M))
+        log_entries = len(re.findall(r"^##\s+", read_text(log_path), re.M))
         if log_entries > 500:
             warnings.append(f"log.md has {log_entries} entries; rotate warning")
-    if broken:
-        errors.append(f"broken_wikilinks={len(broken)}")
-    if missing_sources:
-        errors.append(f"missing_source_refs={len(missing_sources)}")
-    if raw_filename_drift:
-        errors.append(f"raw_filename_drift={len(raw_filename_drift)}")
-    if image_issues:
-        errors.append(f"image_hygiene={len(image_issues)}")
-    freshness_contract: dict[str, Any] = {}
-    if write_report:
-        valid_for_reasons = ["wiki-clear-success", "final-status"]
-        if full:
-            valid_for_reasons.append("refresh-artifact")
-        freshness_contract = {
-            **lib.validation_freshness_context(root, state_dir, workdir),
-            "covered_surfaces": ["index", "compiled", "_meta", "raw"],
-            "valid_for_reasons": valid_for_reasons,
-        }
-    report = {
-        **freshness_contract,
-        "generated_at": lib.now_stamp(),
-        "compiled_count": compiled_count,
-        "index_total": index_total,
-        "index_wikilinks": index_wikilinks,
-        "active_raw_clips": raw_count,
-        "raw_clip_map_snapshot": map_count,
-        "broken_wikilinks": len(broken),
-        "broken_wikilink_examples": broken[:20],
-        "missing_source_refs": len(missing_sources),
-        "missing_source_ref_examples": missing_sources[:20],
-        "raw_filename_drift": len(raw_filename_drift),
-        "raw_filename_drift_examples": raw_filename_drift[:20],
-        "native_unresolved_references": 0,
+    return {
         "wiki_root_machine_pollution": len(pollution),
         "wiki_root_machine_pollution_paths": [p.as_posix() for p in pollution],
+    }
+
+
+def _validation_freshness_contract(root: Path, state_dir: Path, workdir: Path | None, full: bool, write_report: bool) -> dict[str, Any]:
+    if not write_report:
+        return {}
+    valid_for_reasons = ["wiki-clear-success", "final-status"]
+    if full:
+        valid_for_reasons.append("refresh-artifact")
+    return {
+        **validation_freshness_context(root, state_dir, workdir),
+        "covered_surfaces": ["index", "compiled", "_meta", "raw"],
+        "valid_for_reasons": valid_for_reasons,
+    }
+
+
+def _write_validation_report(report: dict[str, Any], state_dir: Path) -> Path:
+    ensure_state_dirs(state_dir)
+    out = state_dir / "validation_reports" / f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_validate.json"
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
+
+
+def validate_wiki(
+    root: Path,
+    state_dir: Path,
+    workdir: Path | None = None,
+    full: bool = False,
+    write_report: bool = False,
+    sync_raw_map_snapshot: bool = False,
+) -> dict[str, Any]:
+    root = root.resolve()
+    raw_map_sync = sync_raw_clip_map_snapshot(root) if sync_raw_map_snapshot else None
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    index_report = _validate_index_surface(root, errors)
+    compiled_report = _validate_compiled_surface(root, index_report["slug_set"], errors, warnings)
+    raw_report = _validate_raw_surface(root, full, errors, warnings)
+    hygiene_report = _validate_root_hygiene_surface(root, errors, warnings)
+    freshness_contract = _validation_freshness_contract(root, state_dir, workdir, full, write_report)
+
+    report = {
+        **freshness_contract,
+        "generated_at": now_stamp(),
+        "compiled_count": index_report["compiled_count"],
+        "index_total": index_report["index_total"],
+        "index_wikilinks": index_report["index_wikilinks"],
+        "active_raw_clips": raw_report["active_raw_clips"],
+        "raw_clip_map_snapshot": raw_report["raw_clip_map_snapshot"],
+        "broken_wikilinks": compiled_report["broken_wikilinks"],
+        "broken_wikilink_examples": compiled_report["broken_wikilink_examples"],
+        "missing_source_refs": compiled_report["missing_source_refs"],
+        "missing_source_ref_examples": compiled_report["missing_source_ref_examples"],
+        "raw_filename_drift": raw_report["raw_filename_drift"],
+        "raw_filename_drift_examples": raw_report["raw_filename_drift_examples"],
+        "native_unresolved_references": 0,
+        "wiki_root_machine_pollution": hygiene_report["wiki_root_machine_pollution"],
+        "wiki_root_machine_pollution_paths": hygiene_report["wiki_root_machine_pollution_paths"],
         "native_state_dir": str(state_dir.resolve()),
         "native_workdir": str(workdir.resolve()) if workdir else None,
         "warnings": warnings[:200],
@@ -191,8 +254,5 @@ def validate_wiki(
     if raw_map_sync is not None:
         report["raw_clip_map_sync"] = raw_map_sync
     if write_report:
-        lib.ensure_state_dirs(state_dir)
-        out = state_dir / "validation_reports" / f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_validate.json"
-        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        report["report_path"] = str(out)
+        report["report_path"] = str(_write_validation_report(report, state_dir))
     return report

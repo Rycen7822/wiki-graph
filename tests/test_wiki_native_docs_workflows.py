@@ -20,6 +20,7 @@ from ops.wiki_native_ingest_text import make_ingest_text  # noqa: E402
 from ops.wiki_native_query_events import init_query_events_db  # noqa: E402
 from ops.wiki_native_state import ensure_state_dirs  # noqa: E402
 from ops.wiki_native_validation import validate_wiki  # noqa: E402
+import ops.wiki_native_validation as wiki_validation  # noqa: E402
 from ops.wiki_native_wiki_checks import VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION  # noqa: E402
 from ops.wiki_native_wiki_checks import validation_freshness_context  # noqa: E402
 from ops.wiki_native_wiki_checks import validation_report_is_fresh  # noqa: E402
@@ -140,6 +141,19 @@ def test_state_dirs_and_query_event_db_are_external_to_wiki_root(tmp_path: Path)
     assert "sync_events" not in tables
 
 
+def test_validate_wiki_builder_has_report_surface_helpers() -> None:
+    expected_helpers = {
+        "_validate_index_surface",
+        "_validate_compiled_surface",
+        "_validate_raw_surface",
+        "_validate_root_hygiene_surface",
+        "_validation_freshness_contract",
+        "_write_validation_report",
+    }
+
+    assert {name for name in expected_helpers if callable(getattr(wiki_validation, name, None))} == expected_helpers
+
+
 def test_validate_wiki_default_does_not_write_report(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
@@ -191,11 +205,9 @@ def test_validate_wiki_can_sync_raw_clip_map_snapshot_when_explicit(tmp_path: Pa
 
 
 def test_validate_wiki_non_full_does_not_read_raw_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ops import wiki_native_lib
-
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
-    original_read_text = wiki_native_lib.read_text
+    original_read_text = wiki_validation.read_text
 
     def fail_on_raw_body_reads(path: Path) -> str:
         rel = path.resolve().relative_to(root.resolve()).as_posix()
@@ -203,7 +215,7 @@ def test_validate_wiki_non_full_does_not_read_raw_bodies(tmp_path: Path, monkeyp
             raise AssertionError(f"non-full validation should not read raw body: {rel}")
         return original_read_text(path)
 
-    monkeypatch.setattr(wiki_native_lib, "read_text", fail_on_raw_body_reads)
+    monkeypatch.setattr(wiki_validation, "read_text", fail_on_raw_body_reads)
 
     report = validate_wiki(root, state, tmp_path / "work" / "wikigraph", full=False)
 
