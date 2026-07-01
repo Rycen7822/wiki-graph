@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import json
 import math
 import os
+from threading import Lock
 from typing import Mapping, Protocol
 import urllib.request
 
@@ -22,6 +24,7 @@ class NativeEmbeddingConfig:
     api_key: str = field(repr=False)
     timeout_seconds: float = 60.0
     embedding_dim: int | None = None
+    cache_size: int = 512
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "NativeEmbeddingConfig":
@@ -47,14 +50,36 @@ class NativeEmbeddingConfig:
             raise ValueError("LLM_WIKI_NATIVE_EMBEDDING_API_KEY or EMBEDDING_BINDING_API_KEY or OPENAI_API_KEY is required")
         timeout = _first_env_float(values, ("LLM_WIKI_NATIVE_EMBEDDING_TIMEOUT_SECONDS", "EMBEDDING_TIMEOUT"), 60.0)
         embedding_dim = _first_env_int(values, ("LLM_WIKI_NATIVE_EMBEDDING_DIM", "EMBEDDING_DIM"))
-        return cls(base_url=base_url, model=model, api_key=api_key, timeout_seconds=timeout, embedding_dim=embedding_dim)
+        cache_size = _first_env_int(values, ("LLM_WIKI_NATIVE_EMBEDDING_CACHE_SIZE", "EMBEDDING_CACHE_SIZE"))
+        if cache_size is None:
+            cache_size = 512
+        if cache_size < 0:
+            raise ValueError("LLM_WIKI_NATIVE_EMBEDDING_CACHE_SIZE or EMBEDDING_CACHE_SIZE must be non-negative")
+        return cls(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            timeout_seconds=timeout,
+            embedding_dim=embedding_dim,
+            cache_size=cache_size,
+        )
 
 
 class NativeEmbedding:
     def __init__(self, config: NativeEmbeddingConfig) -> None:
         self.config = config
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache_lock = Lock()
 
     def embed_query(self, query: str) -> list[float]:
+        cached = self._cached(query)
+        if cached is not None:
+            return cached
+        vector = self._fetch_embedding(query)
+        self._store_cached(query, vector)
+        return list(vector)
+
+    def _fetch_embedding(self, query: str) -> list[float]:
         request = urllib.request.Request(
             f"{self.config.base_url.rstrip('/')}/embeddings",
             data=json.dumps({"model": self.config.model, "input": query}).encode("utf-8"),
@@ -67,6 +92,25 @@ class NativeEmbedding:
         with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
         return _embedding_from_payload(payload, expected_dim=self.config.embedding_dim)
+
+    def _cached(self, query: str) -> list[float] | None:
+        if self.config.cache_size <= 0:
+            return None
+        with self._cache_lock:
+            vector = self._cache.get(query)
+            if vector is None:
+                return None
+            self._cache.move_to_end(query)
+            return list(vector)
+
+    def _store_cached(self, query: str, vector: list[float]) -> None:
+        if self.config.cache_size <= 0:
+            return
+        with self._cache_lock:
+            self._cache[query] = list(vector)
+            self._cache.move_to_end(query)
+            while len(self._cache) > self.config.cache_size:
+                self._cache.popitem(last=False)
 
 
 def _first_env(values: Mapping[str, str], *names: str) -> str:
