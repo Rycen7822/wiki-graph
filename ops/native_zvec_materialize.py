@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_native.build import MissingNativeVectorsError  # noqa: E402
-from llm_wiki_native.cli import build_workspace_from_state  # noqa: E402
+from llm_wiki_native.workspace_build import build_workspace_from_state  # noqa: E402
 from llm_wiki_native.pointers import finalize_prepared_workspace, rollback_active_workspace  # noqa: E402
 
 

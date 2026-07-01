@@ -6,9 +6,9 @@ import tomllib
 
 import pytest
 
-import llm_wiki_native.cli as cli_module
+import llm_wiki_native.workspace_build as workspace_build
 from llm_wiki_native.build import MissingNativeVectorsError
-from llm_wiki_native.cli import build_workspace_from_state, main
+from llm_wiki_native.cli import main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from support import write_json, write_jsonl, write_vector_cache
 
@@ -125,11 +125,11 @@ def _fake_zvec_factory(created: dict):
     return factory
 
 
-def test_build_workspace_from_state_library_materializes_manifest_and_edges_without_activation(tmp_path) -> None:
+def test_workspace_build_materializes_manifest_and_edges_without_activation(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
 
-    report = build_workspace_from_state(state, db_path, "native-test")
+    report = workspace_build.build_workspace_from_state(state, db_path, "native-test")
 
     db = SQLiteWorkspace(db_path)
     assert report["audit"]["ok"] is True
@@ -163,7 +163,7 @@ def test_build_workspace_materializes_source_root_lexical_spans(tmp_path) -> Non
     )
     db_path = tmp_path / "native.sqlite"
 
-    report = build_workspace_from_state(state, db_path, "native-test", source_root=wiki_root)
+    report = workspace_build.build_workspace_from_state(state, db_path, "native-test", source_root=wiki_root)
 
     db = SQLiteWorkspace(db_path)
     assert report["lexical_span_count"] >= 2
@@ -175,14 +175,14 @@ def test_build_workspace_materializes_source_root_lexical_spans(tmp_path) -> Non
     assert table_hits[0]["source_path"] == "concepts/table-demo.md"
 
 
-def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -> None:
+def test_workspace_build_can_write_zvec_staging_workspace(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
     zvec_path = tmp_path / "native.zvec"
 
     created = {}
 
-    report = build_workspace_from_state(
+    report = workspace_build.build_workspace_from_state(
         state,
         db_path,
         "native-test",
@@ -210,7 +210,7 @@ def test_build_workspace_from_state_can_write_zvec_staging_workspace(tmp_path) -
     assert len(created["workspace"].sample_doc_ids) == 4
 
 
-def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_path) -> None:
+def test_workspace_build_can_write_prepared_workspace_pointer(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
     zvec_path = tmp_path / "native_zvec" / "workspaces" / "native-test" / "zvec_records"
@@ -218,7 +218,7 @@ def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_pat
 
     created = {}
 
-    report = build_workspace_from_state(
+    report = workspace_build.build_workspace_from_state(
         state,
         db_path,
         "native-test",
@@ -239,12 +239,12 @@ def test_build_workspace_from_state_can_write_prepared_workspace_pointer(tmp_pat
     assert pointer["zvec"] == report["zvec"]
 
 
-def test_build_workspace_from_state_fails_closed_when_vectors_are_missing(tmp_path) -> None:
+def test_workspace_build_fails_closed_when_vectors_are_missing(tmp_path) -> None:
     state = _sample_state(tmp_path, with_vectors=False)
     db_path = tmp_path / "native.sqlite"
 
     with pytest.raises(MissingNativeVectorsError) as exc:
-        build_workspace_from_state(state, db_path, "native-test")
+        workspace_build.build_workspace_from_state(state, db_path, "native-test")
 
     assert db_path.exists() is False
     assert exc.value.report["total_missing"] == 4
@@ -258,7 +258,7 @@ def test_cli_main_builds_zvec_workspace_and_prints_json_report(tmp_path, capsys,
 
     created = {}
 
-    monkeypatch.setattr(cli_module, "_default_zvec_workspace_factory", _fake_zvec_factory(created))
+    monkeypatch.setattr(workspace_build, "_default_zvec_workspace_factory", _fake_zvec_factory(created))
 
     assert main(
         [
