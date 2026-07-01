@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,11 @@ REQUIRED_STATE_INPUTS = (
     "section_similarity_edges.jsonl",
 )
 MANIFEST_VECTOR_COLLECTIONS = ("chunks", "entities", "relationships")
+STATE_FINGERPRINT_INPUTS = (
+    *REQUIRED_STATE_INPUTS,
+    "vector_cache.sqlite",
+    "section_embeddings.jsonl",
+)
 
 
 def pointer_dir(workspace_root: Path) -> Path:
@@ -68,6 +74,39 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return payload
+
+
+def _file_fingerprint(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False}
+    stat = path.stat()
+    return {
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def state_input_fingerprints(state_dir: Path) -> dict[str, dict[str, Any]]:
+    state_dir = Path(state_dir)
+    return {name: _file_fingerprint(state_dir / name) for name in STATE_FINGERPRINT_INPUTS}
+
+
+def reusable_build_report(
+    workspace_root: Path,
+    workspace_id: str,
+    input_fingerprints: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    report_path = build_report_path(workspace_root, workspace_id)
+    if not report_path.exists():
+        return None
+    report = _read_json(report_path)
+    if report.get("ok") is not True:
+        return None
+    if report.get("input_fingerprints") != input_fingerprints:
+        return None
+    return report
 
 
 def _vector_missing_count(vector_audit: dict[str, Any]) -> int:
@@ -185,7 +224,7 @@ def fill_missing_manifest_vectors_for_state(
     }
 
 
-def build(args: argparse.Namespace, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
+def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
     root = args.root.resolve()
     state_dir = args.state_dir.resolve()
     workspace_root = args.workspace_root.resolve()
@@ -193,6 +232,17 @@ def build(args: argparse.Namespace, *, embed_texts_func: Any | None = None) -> d
     sqlite_path = candidate_dir / "native.sqlite"
     zvec_path = candidate_dir / "zvec_records"
     prepared_path = prepared_workspace_path(workspace_root) if args.prepare_only else None
+    input_fingerprints = state_input_fingerprints(state_dir)
+    if bool(getattr(args, "reuse_unchanged_workspace", False)):
+        reusable_report = reusable_build_report(workspace_root, args.workspace_id, input_fingerprints)
+        if reusable_report is not None:
+            return {
+                **reusable_report,
+                "command": "build",
+                "reused_existing_workspace": True,
+                "reuse_reason": "state_input_fingerprints_match",
+                "input_fingerprints": input_fingerprints,
+            }
     vector_fill_report = None
     if bool(getattr(args, "fill_missing_vectors", False)):
         vector_fill_report = fill_missing_manifest_vectors_for_state(
@@ -201,6 +251,7 @@ def build(args: argparse.Namespace, *, embed_texts_func: Any | None = None) -> d
             embedding_profile=args.embedding_profile,
             embed_texts_func=embed_texts_func,
         )
+        input_fingerprints = state_input_fingerprints(state_dir)
     native_report = build_workspace_from_state(
         state_dir,
         sqlite_path,
@@ -233,6 +284,8 @@ def build(args: argparse.Namespace, *, embed_texts_func: Any | None = None) -> d
             "missing": _vector_missing_count(native_report["vector_audit"]),
         },
         "native_report": native_report,
+        "input_fingerprints": input_fingerprints,
+        "reused_existing_workspace": False,
     }
     if vector_fill_report is not None:
         report["vector_fill"] = vector_fill_report
@@ -279,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     build_parser.add_argument("--workspace-id", required=True)
     build_parser.add_argument("--embedding-profile", default="conservative")
     build_parser.add_argument("--fill-missing-vectors", action="store_true")
+    build_parser.add_argument("--reuse-unchanged-workspace", action="store_true", help="Reuse an existing ok build report for the same workspace_id when state input fingerprints match")
     build_parser.add_argument("--prepare-only", action="store_true")
 
     preflight_parser = sub.add_parser("preflight", help="Check native zvec staging inputs without workspace writes")
@@ -316,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
                     "workspace_id": args.workspace_id,
                     "embedding_profile": args.embedding_profile,
                     "prepare_only": bool(args.prepare_only),
+                    "reuse_unchanged_workspace": bool(args.reuse_unchanged_workspace),
                     "before_missing": exc.before_missing,
                     "vector_cache_path": str(exc.vector_cache_path),
                 }
@@ -333,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                     "workspace_id": args.workspace_id,
                     "embedding_profile": args.embedding_profile,
                     "prepare_only": bool(args.prepare_only),
+                    "reuse_unchanged_workspace": bool(args.reuse_unchanged_workspace),
                     "missing_vectors": exc.report,
                 }
             )

@@ -24,6 +24,7 @@ from ops.wiki_native_lib import (
     print_json,
     record_pending_wiki_integration_failure,
 )
+from ops.wiki_integration_plan import build_wiki_integration_plan, write_wiki_integration_plan_report
 
 
 DEFAULT_NATIVE_WORKDIR = Path(__file__).resolve().parents[1]
@@ -40,22 +41,28 @@ def _tail_text(text: str, max_chars: int = 8000) -> str:
     return text[-max_chars:]
 
 
-def build_auto_integration_prompt(root: Path, state_dir: Path, status: dict[str, Any], reason: str, workdir: Path | None = None) -> str:
+def build_auto_integration_prompt(
+    root: Path,
+    state_dir: Path,
+    status: dict[str, Any],
+    reason: str,
+    workdir: Path | None = None,
+    *,
+    plan: dict[str, Any] | None = None,
+    plan_path: Path | None = None,
+) -> str:
     native_workdir = workdir or DEFAULT_NATIVE_WORKDIR
     wiki_integration_command = "python -m ops.batch_wiki_integration"
     native_refresh_command = "python -m ops.batch_native_refresh"
-    pending = status.get("actionable_pending") or []
-    pending_lines = []
-    for idx, item in enumerate(pending, 1):
-        if not isinstance(item, dict):
-            continue
-        pending_lines.append(
-            f"{idx}. `{item.get('raw_path', '')}` — {item.get('title', '')} — source: {item.get('source_id', '')} — hints: {', '.join(str(h) for h in (item.get('topic_hints') or []))}"
-        )
-    pending_block = "\n".join(pending_lines) or "(no actionable pending items)"
-    return f"""You are an autonomous Hermes sub-run launched by `batch_wiki_integration.py auto-integrate` because the llm-wiki raw-fast batch wiki integration threshold was reached.
+    validate_command = "python -m ops.validate_wiki"
+    plan_hash = str((plan or {}).get("plan_hash") or "not-written")
+    operations = (plan or {}).get("operations") or []
+    routed_count = sum(1 for op in operations if isinstance(op, dict) and op.get("op") == "raw_map_upsert")
+    review_count = sum(1 for op in operations if isinstance(op, dict) and op.get("op") == "review_queue_add")
+    plan_path_text = str(plan_path) if plan_path else "(auto-integrate writes this before launch)"
+    return f"""You are an autonomous Hermes sub-run launched by `batch_wiki_integration.py auto-integrate` for llm-wiki raw-fast batch wiki integration.
 
-Task: perform the batch wiki integration for the pending raw-fast notes, then clear the pending wiki-integration ledger only after Markdown/wiki validation passes.
+Task: execute the deterministic plan artifact, validate once with raw-map snapshot sync, clear the wiki integration ledger after validation passes, then run guarded native refresh.
 
 Context:
 - Wiki root: `{root}`
@@ -63,27 +70,34 @@ Context:
 - State dir: `{state_dir}`
 - Pending ledger: `{state_dir / 'pending_wiki_integration.json'}`
 - Trigger reason: `{reason}`
-- Pending threshold status: pending_count={status.get('pending_count')}, actionable_pending_count={status.get('actionable_pending_count')}, threshold={status.get('threshold')}
+- Pending status: pending_count={status.get('pending_count')}, actionable_pending_count={status.get('actionable_pending_count')}, threshold={status.get('threshold')}
+- Plan artifact: `{plan_path_text}`
+- plan_hash: `{plan_hash}`; operations={len(operations)}; routed_raw_notes={routed_count}; review_queue_additions={review_count}
 
-Pending actionable raw notes:
-{pending_block}
+Required references:
+- Load `llm-wiki` and use `references/raw-fast-batch-wiki-integration.md` plus `references/wiki-core-operations.md`.
+- Use bounded reads/searches for `_meta/raw-clip-map.md` and `_meta/topic-map.md`; keep large map files out of context.
 
-Required workflow:
-1. Load and follow the `llm-wiki` skill, especially `references/raw-fast-batch-wiki-integration.md` and `references/wiki-core-operations.md`.
-2. Read `SCHEMA.md`, `index.md`, recent `log.md`, `_meta/raw-clip-map.md`, and `_meta/topic-map.md` before editing.
-3. Read every pending raw note listed above; reconcile duplicates or review blockers conservatively.
-4. Batch-update the Markdown/wiki layer: `_meta/raw-clip-map.md`, `_meta/topic-map.md`, relevant compiled pages where the notes meet page/update thresholds, `index.md` if compiled pages were added/removed, and `log.md` with one batch entry. Do not mechanically create one compiled page per raw note.
-5. Run the appropriate wiki validation checks. Do not put generated machine artifacts under the human wiki root.
-6. Only after validation passes, run:
+Execution contract:
+1. Read the plan artifact JSON first and apply the `operations` deterministically to `_meta/raw-clip-map.md`, `_meta/topic-map.md`, and `log.md`; compiled page edits follow only when the plan explicitly names them.
+2. Run one persisted wiki validation with raw-map snapshot sync:
+   `{validate_command} --root {root} --state-dir {state_dir} --workdir {native_workdir} --full --write-report --sync-raw-map-snapshot`
+   Save stdout to a temp JSON file, inspect `errors` and `warnings`, and keep the report path for closeout.
+3. After validation passes, run:
    `{wiki_integration_command} clear-success --root {root} --state-dir {state_dir} --reason {reason}`
    This carries integrated raw notes into the native graph pending ledger.
-7. Run `{native_refresh_command} status --root {root} --state-dir {state_dir} --workdir {native_workdir}` and report whether native graph refresh is now pending.
+4. Read native status:
+   `{native_refresh_command} status --root {root} --state-dir {state_dir} --workdir {native_workdir}`
+   Use `next_refresh_kind`; after 5 completed incremental graph updates the policy queues `full-rebuild`.
+5. Validate cutover guards before the build attempt:
+   `{native_refresh_command} preflight-cutover --root {root} --state-dir {state_dir} --workdir {native_workdir} --restart-command "$LLM_WIKI_NATIVE_RESTART_COMMAND" --smoke-url "$LLM_WIKI_NATIVE_SMOKE_URL" --smoke-query "$LLM_WIKI_NATIVE_SMOKE_QUERY" --require-unchanged-path "$LLM_WIKI_NATIVE_UNCHANGED_PATH"`
+6. When guards are available, execute guarded cutover with vector cache:
+   `{native_refresh_command} refresh --root {root} --state-dir {state_dir} --workdir {native_workdir} --cutover --fill-missing-vectors --restart-command "$LLM_WIKI_NATIVE_RESTART_COMMAND" --health-url "$LLM_WIKI_NATIVE_HEALTH_URL" --smoke-url "$LLM_WIKI_NATIVE_SMOKE_URL" --smoke-query "$LLM_WIKI_NATIVE_SMOKE_QUERY" --smoke-query-vector-source active-first-vector --require-unchanged-path "$LLM_WIKI_NATIVE_UNCHANGED_PATH"`
+   Live graph freshness is complete after cutover, service restart, `/health`, `/query/data`, unchanged-path audit, and native pending clear succeed; prepare-only output is a prepared artifact, not live graph freshness.
 
-Important constraints:
-- Do not ask the user questions; make reasonable conservative integration choices.
-- Do not clear pending items before wiki/meta/log edits and validation are complete.
-- Do not run a full native refresh unless explicitly required by the current prompt; a status check is enough for this auto-integration closeout.
-- Do not expose secrets or tokens. If any appear in sources or logs, redact as `[REDACTED]`.
+Closeout:
+- Redact secrets as `[REDACTED]` in logs.
+- Reuse a fresh passing validation report for log-only closeout edits.
 """
 
 
@@ -123,7 +137,9 @@ def run_auto_integration(
     timeout: int = 7200,
 ) -> tuple[int, dict[str, Any]]:
     pre_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
-    prompt = build_auto_integration_prompt(root, state_dir, pre_status, reason)
+    plan = build_wiki_integration_plan(root, state_dir, reason=reason, threshold=threshold)
+    plan_path = write_wiki_integration_plan_report(state_dir, plan)
+    prompt = build_auto_integration_prompt(root, state_dir, pre_status, reason, plan=plan, plan_path=plan_path)
     prompt_path = write_auto_integration_prompt(state_dir, prompt)
     command = build_runner_command(integration_command, prompt, prompt_path, root, state_dir, reason)
     redacted_command = ["<prompt>" if part == prompt else part for part in command]
@@ -133,6 +149,10 @@ def run_auto_integration(
         "ran": False,
         "pre_status": pre_status,
         "prompt_path": str(prompt_path),
+        "plan_path": str(plan_path),
+        "plan_hash": plan.get("plan_hash"),
+        "plan_operations": len(plan.get("operations") or []),
+        "prompt_chars": len(prompt),
         "command": redacted_command,
     }
     if pre_status.get("should_review"):

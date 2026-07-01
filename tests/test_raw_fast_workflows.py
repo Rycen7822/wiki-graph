@@ -1,7 +1,7 @@
 import sys
+import argparse
 import json
 import subprocess
-import types
 from pathlib import Path
 
 import pytest
@@ -543,14 +543,49 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     assert "resources" not in ledger["pending"][0]["required_sections"]
 
 
-def test_raw_fast_closeout_native_refresh_commands_use_batch_native_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    args = types.SimpleNamespace(
+def _raw_fast_closeout_native_args(tmp_path: Path, mode: str) -> argparse.Namespace:
+    return argparse.Namespace(
         root=tmp_path / "wiki",
         state_dir=tmp_path / "work" / "wikigraph" / "state",
         workdir=ROOT,
         timeout=17,
         refresh_timeout=23,
+        native_refresh_mode=mode,
     )
+
+
+def test_raw_fast_closeout_native_refresh_defaults_to_status_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _raw_fast_closeout_native_args(tmp_path, "status")
+    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        if command[3] == "status":
+            return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+        raise AssertionError("default raw-fast closeout should not run native prepare-only")
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    status_result = raw_fast_closeout.run_native_refresh_status(args)
+    refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
+
+    assert len(calls) == 1
+    status_command = calls[0]["command"]
+    assert isinstance(status_command, list)
+    assert status_command[1:4] == ["-m", "ops.batch_native_refresh", "status"]
+    assert "--workdir" in status_command
+    assert status_result["pending_count"] == 1
+    assert status_result["command_returncode"] == 0
+    assert refresh_result["ran"] is False
+    assert refresh_result["skipped"] is True
+    assert refresh_result["skip_reason"] == "native_refresh_status_only"
+    assert refresh_result["refresh_mode"] == "status"
+    assert refresh_result["pending_count"] == 1
+
+
+def test_raw_fast_closeout_native_refresh_prepare_mode_uses_batch_native_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _raw_fast_closeout_native_args(tmp_path, "prepare")
     status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
     calls: list[dict[str, object]] = []
 
@@ -573,16 +608,15 @@ def test_raw_fast_closeout_native_refresh_commands_use_batch_native_refresh(tmp_
     status_result = raw_fast_closeout.run_native_refresh_status(args)
     refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
 
-    status_command = calls[0]["command"]
+    assert len(calls) == 2
     refresh_command = calls[1]["command"]
-    assert isinstance(status_command, list)
-    assert status_command[1:4] == ["-m", "ops.batch_native_refresh", "status"]
-    assert "--workdir" in status_command
+    assert isinstance(refresh_command, list)
     assert refresh_command[1:5] == ["-m", "ops.batch_native_refresh", "refresh", "--prepare-only"]
     assert status_result["pending_count"] == 1
     assert status_result["command_returncode"] == 0
     assert refresh_result["ran"] is True
     assert refresh_result["prepared_only"] is True
+    assert refresh_result["refresh_mode"] == "prepare"
     assert refresh_result["status"]["pending_count"] == 1
 
 
@@ -745,7 +779,7 @@ def test_raw_fast_closeout_final_verify_only_waives_post_integration_non_raw_hit
 
 def test_raw_fast_closeout_fast_final_verify_records_tmp_absence(tmp_path: Path) -> None:
     state = tmp_path / "state"
-    args = types.SimpleNamespace(state_dir=state, raw_file="raw/clip/2601/26010112_Fast-Final.md")
+    args = argparse.Namespace(state_dir=state, raw_file="raw/clip/2601/26010112_Fast-Final.md")
     tmp_bundle = tmp_path / "already-cleaned"
     pre = {
         "command_returncode": 0,
@@ -775,7 +809,7 @@ def test_raw_fast_closeout_fast_final_verify_records_tmp_absence(tmp_path: Path)
 
 
 def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
-    args = types.SimpleNamespace(
+    args = argparse.Namespace(
         title="Compact Log Paper",
         source_id="https://arxiv.org/abs/2601.0101",
         raw_file="raw/clip/2601/26010112_Compact-Log-Paper.md",
@@ -797,7 +831,7 @@ def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
 
 
 def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tmp_path: Path) -> None:
-    args = types.SimpleNamespace(
+    args = argparse.Namespace(
         title="Blocked Native Ledger Paper",
         source_id="https://arxiv.org/abs/2601.0102",
         raw_file="raw/clip/2601/26010113_Blocked-Native-Ledger-Paper.md",

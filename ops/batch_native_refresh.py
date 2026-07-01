@@ -19,6 +19,10 @@ from urllib.parse import urlparse
 import urllib.request
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
+NATIVE_INCREMENTAL_REFRESH_THRESHOLD = 5
+FULL_REBUILD_DUE_REASON = "policy:full-rebuild-due-after-incrementals"
+REFRESH_KIND_INCREMENTAL = "incremental"
+REFRESH_KIND_FULL_REBUILD = "full-rebuild"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -52,6 +56,68 @@ def prepared_workspace_path(state_dir: Path) -> Path:
 
 def active_workspace_path(state_dir: Path) -> Path:
     return native_dir(state_dir) / "active_workspace.json"
+
+
+def active_workspace_history_path(state_dir: Path) -> Path:
+    return native_dir(state_dir) / "active_workspace.history.jsonl"
+
+
+def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    if not Path(path).exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def refresh_kind_from_reason(reason: Any) -> str | None:
+    text = str(reason or "").lower()
+    if REFRESH_KIND_FULL_REBUILD in text or "full rebuild" in text:
+        return REFRESH_KIND_FULL_REBUILD
+    if REFRESH_KIND_INCREMENTAL in text:
+        return REFRESH_KIND_INCREMENTAL
+    return None
+
+
+def completed_incremental_refresh_count(state_dir: Path) -> int:
+    count = 0
+    for row in reversed(_read_jsonl_objects(active_workspace_history_path(state_dir))):
+        kind = refresh_kind_from_reason(row.get("reason"))
+        if kind == REFRESH_KIND_FULL_REBUILD:
+            break
+        if kind == REFRESH_KIND_INCREMENTAL:
+            count += 1
+    return count
+
+
+def next_refresh_kind(state_dir: Path) -> str:
+    if completed_incremental_refresh_count(state_dir) >= NATIVE_INCREMENTAL_REFRESH_THRESHOLD:
+        return REFRESH_KIND_FULL_REBUILD
+    return REFRESH_KIND_INCREMENTAL
+
+
+def native_refresh_reason(kind: str, reason: str = "native refresh") -> str:
+    normalized = kind if kind in {REFRESH_KIND_INCREMENTAL, REFRESH_KIND_FULL_REBUILD} else REFRESH_KIND_INCREMENTAL
+    return f"native graph {normalized} refresh: {reason}"
+
+
+def native_refresh_policy_status(state_dir: Path) -> dict[str, Any]:
+    completed_incrementals = completed_incremental_refresh_count(state_dir)
+    return {
+        "incremental_rebuild_threshold": NATIVE_INCREMENTAL_REFRESH_THRESHOLD,
+        "completed_incremental_refresh_count": completed_incrementals,
+        "next_refresh_kind": REFRESH_KIND_FULL_REBUILD
+        if completed_incrementals >= NATIVE_INCREMENTAL_REFRESH_THRESHOLD
+        else REFRESH_KIND_INCREMENTAL,
+        "vector_cache_required": True,
+        "vector_cache_path": str(Path(state_dir) / "vector_cache.sqlite"),
+        "history_path": str(active_workspace_history_path(state_dir)),
+    }
 
 
 def _path_snapshot(path: Path) -> dict[str, Any]:
@@ -153,8 +219,27 @@ def mark_pending(state_dir: Path, root: Path, *, reason: str) -> dict[str, Any]:
     return entry
 
 
+def mark_full_rebuild_pending_if_due(
+    state_dir: Path,
+    root: Path,
+    *,
+    refresh_kind: str,
+    status_after_policy: dict[str, Any],
+) -> dict[str, Any]:
+    if refresh_kind == REFRESH_KIND_FULL_REBUILD:
+        return {"marked": False, "reason": "full_rebuild_completed"}
+    if status_after_policy.get("next_refresh_kind") != REFRESH_KIND_FULL_REBUILD:
+        return {"marked": False, "reason": "full_rebuild_not_due"}
+    for entry in pending_entries(state_dir):
+        if entry.get("reason") == FULL_REBUILD_DUE_REASON:
+            return {"marked": False, "reason": "already_pending", "entry": entry}
+    entry = mark_pending(state_dir, root, reason=FULL_REBUILD_DUE_REASON)
+    return {"marked": True, "reason": FULL_REBUILD_DUE_REASON, "entry": entry}
+
+
 def status(root: Path, state_dir: Path) -> dict[str, Any]:
     entries = pending_entries(state_dir)
+    refresh_policy = native_refresh_policy_status(state_dir)
     return {
         "root": str(root),
         "state_dir": str(state_dir),
@@ -165,6 +250,13 @@ def status(root: Path, state_dir: Path) -> dict[str, Any]:
         "native_dir": str(native_dir(state_dir)),
         "prepared_workspace": str(prepared_workspace_path(state_dir)),
         "active_workspace": str(active_workspace_path(state_dir)),
+        "history_path": str(active_workspace_history_path(state_dir)),
+        "refresh_policy": refresh_policy,
+        "next_refresh_kind": refresh_policy["next_refresh_kind"],
+        "completed_incremental_refresh_count": refresh_policy["completed_incremental_refresh_count"],
+        "incremental_rebuild_threshold": refresh_policy["incremental_rebuild_threshold"],
+        "vector_cache_required": refresh_policy["vector_cache_required"],
+        "vector_cache_path": refresh_policy["vector_cache_path"],
     }
 
 
@@ -175,7 +267,7 @@ def build_prepared_workspace(
     workspace_root: Path,
     workspace_id: str,
     embedding_profile: str,
-    fill_missing_vectors: bool = False,
+    fill_missing_vectors: bool = True,
 ) -> dict[str, Any]:
     from ops import native_zvec_materialize
 
@@ -187,6 +279,7 @@ def build_prepared_workspace(
             workspace_id=workspace_id,
             embedding_profile=embedding_profile,
             fill_missing_vectors=fill_missing_vectors,
+            reuse_unchanged_workspace=True,
             prepare_only=True,
         )
     )
@@ -199,15 +292,25 @@ def refresh_prepare_only(
     workspace_root: Path,
     workspace_id: str,
     embedding_profile: str,
-    fill_missing_vectors: bool = False,
+    fill_missing_vectors: bool = True,
     force: bool = False,
     required_unchanged_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     before_active = active_workspace_path(state_dir).read_text(encoding="utf-8") if active_workspace_path(state_dir).exists() else None
     unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
     current_status = status(root, state_dir)
+    refresh_policy = current_status.get("refresh_policy") or native_refresh_policy_status(state_dir)
+    refresh_kind = refresh_policy["next_refresh_kind"]
     if not current_status["should_refresh"] and not force:
-        result = {"prepared_only": True, "skipped": True, "status": current_status}
+        result = {
+            "prepared_only": True,
+            "skipped": True,
+            "status": current_status,
+            "refresh_kind": refresh_kind,
+            "refresh_policy": refresh_policy,
+            "vector_cache_required": True,
+            "fill_missing_vectors": fill_missing_vectors,
+        }
         if unchanged_before:
             result["unchanged_path_audit"] = assert_required_unchanged_paths(unchanged_before)
         return result
@@ -227,6 +330,10 @@ def refresh_prepare_only(
         "pending_retained": pending_ledger_path(state_dir).exists(),
         "build": report,
         "status_before": current_status,
+        "refresh_kind": refresh_kind,
+        "refresh_policy": refresh_policy,
+        "vector_cache_required": True,
+        "fill_missing_vectors": fill_missing_vectors,
     }
     if unchanged_before:
         result["unchanged_path_audit"] = assert_required_unchanged_paths(unchanged_before)
@@ -530,6 +637,67 @@ def require_unchanged_paths_outside_native_outputs(paths: list[Path] | None, *, 
             )
 
 
+def cutover_guard_report(
+    *,
+    state_dir: Path,
+    workspace_root: Path,
+    restart_command: str | None,
+    smoke_url: str | None,
+    smoke_query: str | None,
+    smoke_mode: str = "mix",
+    required_unchanged_paths: list[Path] | None = None,
+    check_paths: bool = True,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    required_unchanged_paths = required_unchanged_paths or []
+    if not str(restart_command or "").strip():
+        errors.append("missing_restart_command")
+    if smoke_url and not smoke_query:
+        errors.append("missing_smoke_query")
+    if smoke_query and not smoke_url:
+        errors.append("missing_smoke_url")
+    if not smoke_url and not smoke_query:
+        errors.extend(["missing_smoke_url", "missing_smoke_query"])
+    if smoke_mode != "mix":
+        errors.append("invalid_smoke_mode")
+    if smoke_url and urlparse(smoke_url).path != "/query/data":
+        errors.append("invalid_smoke_endpoint")
+    if not required_unchanged_paths:
+        errors.append("missing_required_unchanged_path")
+    path_errors: list[dict[str, str]] = []
+    if check_paths:
+        target_state = Path(state_dir)
+        if not target_state.exists():
+            errors.append("missing_state_dir")
+            path_errors.append({"path": str(target_state), "error": "missing_state_dir"})
+        elif not target_state.is_dir():
+            errors.append("state_dir_not_directory")
+            path_errors.append({"path": str(target_state), "error": "state_dir_not_directory"})
+        native_output_root = Path(workspace_root).resolve(strict=False).parent
+        for path in required_unchanged_paths:
+            target = Path(path)
+            if not target.exists():
+                errors.append("missing_required_unchanged_path_target")
+                path_errors.append({"path": str(target), "error": "missing_required_unchanged_path_target"})
+                continue
+            if _paths_overlap(target.resolve(strict=False), native_output_root):
+                errors.append("required_unchanged_path_overlaps_native_output")
+                path_errors.append({"path": str(target), "error": "required_unchanged_path_overlaps_native_output"})
+    unique_errors = list(dict.fromkeys(errors))
+    return {
+        "ok": not unique_errors,
+        "errors": unique_errors,
+        "path_errors": path_errors,
+        "state_dir": str(Path(state_dir).resolve(strict=False)),
+        "workspace_root": str(Path(workspace_root).resolve(strict=False)),
+        "restart_command_present": bool(str(restart_command or "").strip()),
+        "smoke_url": smoke_url,
+        "smoke_query_present": bool(smoke_query),
+        "smoke_mode": smoke_mode,
+        "required_unchanged_paths": [str(Path(path).resolve(strict=False)) for path in required_unchanged_paths],
+    }
+
+
 def refresh_cutover(
     *,
     root: Path,
@@ -541,7 +709,7 @@ def refresh_cutover(
     finalize_workspace: Any = finalize_prepared_workspace_for_state,
     restart_service: Any | None = None,
     query_smoke: Any | None = None,
-    fill_missing_vectors: bool = False,
+    fill_missing_vectors: bool = True,
     force: bool = False,
     required_unchanged_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
@@ -553,6 +721,8 @@ def refresh_cutover(
     require_existing_unchanged_paths(required_unchanged_paths)
     require_unchanged_paths_outside_native_outputs(required_unchanged_paths, workspace_root=workspace_root)
     current_status = status(root, state_dir)
+    refresh_policy = current_status.get("refresh_policy") or native_refresh_policy_status(state_dir)
+    refresh_kind = refresh_policy["next_refresh_kind"]
     if not current_status["should_refresh"] and not force:
         result = {
             "cutover": True,
@@ -563,6 +733,10 @@ def refresh_cutover(
             "query_smoke_executed": False,
             "pending_clear_executed": False,
             "status": current_status,
+            "refresh_kind": refresh_kind,
+            "refresh_policy": refresh_policy,
+            "vector_cache_required": True,
+            "fill_missing_vectors": fill_missing_vectors,
         }
         unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
         if unchanged_before:
@@ -580,13 +754,24 @@ def refresh_cutover(
         embedding_profile=embedding_profile,
         fill_missing_vectors=fill_missing_vectors,
     )
-    active = finalize_workspace(state_dir=state_dir, reason="native refresh cutover")
+    active = finalize_workspace(state_dir=state_dir, reason=native_refresh_reason(refresh_kind, "cutover"))
     service = restart_service(state_dir=state_dir)
     smoke = query_smoke(state_dir=state_dir, active=active) if query_smoke is not None else None
     if not isinstance(smoke, dict) or smoke.get("ok") is not True:
         raise RuntimeError(f"native refresh cutover query smoke did not report ok=true: {smoke!r}")
     unchanged_path_audit = assert_required_unchanged_paths(unchanged_before) if unchanged_before else None
     pending_cleared = clear_pending(state_dir)
+    status_after = status(root, state_dir)
+    status_after_policy = status_after.get("refresh_policy") or native_refresh_policy_status(state_dir)
+    policy_native_pending = mark_full_rebuild_pending_if_due(
+        state_dir,
+        root,
+        refresh_kind=refresh_kind,
+        status_after_policy=status_after_policy,
+    )
+    if policy_native_pending.get("marked"):
+        status_after = status(root, state_dir)
+        status_after_policy = status_after.get("refresh_policy") or native_refresh_policy_status(state_dir)
     result = {
         "cutover": True,
         "skipped": False,
@@ -600,6 +785,14 @@ def refresh_cutover(
         "service": service,
         "pending_cleared": pending_cleared,
         "status_before": current_status,
+        "status_after": status_after,
+        "refresh_kind": refresh_kind,
+        "refresh_policy": refresh_policy,
+        "next_refresh_kind_after_success": status_after_policy["next_refresh_kind"],
+        "policy_native_pending": policy_native_pending,
+        "policy_native_pending_marked_count": 1 if policy_native_pending.get("marked") else 0,
+        "vector_cache_required": True,
+        "fill_missing_vectors": fill_missing_vectors,
     }
     if smoke is not None:
         result["query_smoke"] = smoke
@@ -636,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
     refresh_parser.add_argument("--workspace-id", default=None)
     refresh_parser.add_argument("--workspace-root", type=Path)
     refresh_parser.add_argument("--embedding-profile", default="conservative")
-    refresh_parser.add_argument("--fill-missing-vectors", action="store_true")
+    refresh_parser.add_argument("--fill-missing-vectors", dest="fill_missing_vectors", action="store_true", default=True, help="Use vector_cache.sqlite and fill missing manifest vectors before native graph update/rebuild (default)")
+    refresh_parser.add_argument("--no-fill-missing-vectors", dest="fill_missing_vectors", action="store_false", help="Disable vector-cache fill only for controlled tests or emergency debugging")
     refresh_parser.add_argument("--restart-command", default=None)
     refresh_parser.add_argument("--health-url", default=None)
     refresh_parser.add_argument("--health-timeout", type=float, default=10.0)
@@ -650,6 +844,16 @@ def main(argv: list[str] | None = None) -> int:
     refresh_parser.add_argument("--smoke-timeout", type=float, default=10.0)
     refresh_parser.add_argument("--require-unchanged-path", dest="required_unchanged_paths", action="append", type=Path, default=[])
 
+    preflight_parser = sub.add_parser("preflight-cutover", help="Validate native refresh cutover guards without build/status writes")
+    common_paths(preflight_parser)
+    preflight_parser.add_argument("--workspace-root", type=Path)
+    preflight_parser.add_argument("--restart-command", default=None)
+    preflight_parser.add_argument("--smoke-url", default=None)
+    preflight_parser.add_argument("--smoke-query", default=None)
+    preflight_parser.add_argument("--smoke-mode", default="mix")
+    preflight_parser.add_argument("--require-unchanged-path", dest="required_unchanged_paths", action="append", type=Path, default=[])
+    preflight_parser.add_argument("--skip-path-checks", action="store_true", help="Validate option shape only; skip state/path existence checks")
+
     args = parser.parse_args(argv)
     root = args.root.resolve()
     workdir = args.workdir.resolve()
@@ -661,6 +865,20 @@ def main(argv: list[str] | None = None) -> int:
         entry = mark_pending(state_dir, root, reason=args.reason)
         print_json({"marked": entry, **status(root, state_dir)})
         return 0
+    if args.command == "preflight-cutover":
+        workspace_root = (args.workspace_root or default_workspace_root(state_dir)).resolve()
+        report = cutover_guard_report(
+            state_dir=state_dir,
+            workspace_root=workspace_root,
+            restart_command=args.restart_command,
+            smoke_url=args.smoke_url,
+            smoke_query=args.smoke_query,
+            smoke_mode=args.smoke_mode,
+            required_unchanged_paths=args.required_unchanged_paths,
+            check_paths=not args.skip_path_checks,
+        )
+        print_json(report)
+        return 0 if report["ok"] else 1
     if args.command == "refresh":
         if args.prepare_only and args.cutover:
             raise ValueError("native refresh accepts either --prepare-only or --cutover, not both")
