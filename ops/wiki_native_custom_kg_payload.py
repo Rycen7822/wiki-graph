@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import WikiDoc, canonical_id_for, collect_source_docs, display_scalar, generated_docs_from_state
+from llm_wiki_native.source_docs import WikiDoc, canonical_id_for, collect_source_docs, display_scalar, generated_docs_from_state
 from ops.wiki_native_ingest_text import make_ingest_text
 from ops.wiki_native_jsonl import jsonl_read
 from ops.wiki_native_section_similarity import section_similarity_edge_to_custom_kg_relationship

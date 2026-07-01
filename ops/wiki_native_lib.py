@@ -25,7 +25,7 @@ from ops.wiki_native_cli import (
     print_json,
     release_process_memory,
 )
-from ops.wiki_native_docs import (
+from llm_wiki_native.source_docs import (
     COMPILED_DIR_TYPES,
     WikiDoc,
     collect_source_docs,

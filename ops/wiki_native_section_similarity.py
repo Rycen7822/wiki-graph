@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import sha256_text
+from llm_wiki_native.source_docs import sha256_text
 
 
 def _now_stamp() -> str:

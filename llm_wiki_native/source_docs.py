@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Native wiki document parsing and generated-doc helpers."""
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ try:
 except ModuleNotFoundError:
     yaml = None  # type: ignore[assignment]
 
-from ops.wiki_native_query_events import slugify
 
 COMPILED_DIR_TYPES = {
     "entities": "entity",
@@ -24,6 +22,11 @@ COMPILED_DIR_TYPES = {
     "queries": "query",
 }
 META_FILES = ["_meta/source-map.md", "_meta/raw-clip-map.md", "_meta/topic-map.md"]
+
+
+def slugify(text: str, max_len: int = 80) -> str:
+    slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", text.strip()).strip("-").lower()
+    return (slug or "item")[:max_len].strip("-") or "item"
 
 
 @dataclass(frozen=True)

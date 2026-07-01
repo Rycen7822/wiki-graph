@@ -11,11 +11,11 @@ sys.path.insert(0, str(ROOT))
 from support import sample_wiki, write  # noqa: E402
 import ops.validate_wiki as validate_wiki_cli  # noqa: E402
 from ops.wiki_native_artifacts import resolve_source  # noqa: E402
-from ops.wiki_native_docs import canonical_id_for  # noqa: E402
-from ops.wiki_native_docs import collect_source_docs  # noqa: E402
-from ops.wiki_native_docs import fallback_frontmatter_load  # noqa: E402
-from ops.wiki_native_docs import generated_docs_from_state  # noqa: E402
-from ops.wiki_native_docs import parse_frontmatter  # noqa: E402
+from llm_wiki_native.source_docs import canonical_id_for  # noqa: E402
+from llm_wiki_native.source_docs import collect_source_docs  # noqa: E402
+from llm_wiki_native.source_docs import fallback_frontmatter_load  # noqa: E402
+from llm_wiki_native.source_docs import generated_docs_from_state  # noqa: E402
+from llm_wiki_native.source_docs import parse_frontmatter  # noqa: E402
 from ops.wiki_native_ingest_text import make_ingest_text  # noqa: E402
 from ops.wiki_native_query_events import init_query_events_db  # noqa: E402
 from ops.wiki_native_state import ensure_state_dirs  # noqa: E402

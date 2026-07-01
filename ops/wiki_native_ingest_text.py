@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ops.wiki_native_docs import WikiDoc, display_scalar, section_text
+from llm_wiki_native.source_docs import WikiDoc, display_scalar, section_text
 
 
 def as_list(value: Any) -> list[Any]:

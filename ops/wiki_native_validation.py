@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import raw_clip_files, read_text
+from llm_wiki_native.source_docs import raw_clip_files, read_text
 
 
 RAW_CLIP_MAP_SNAPSHOT_RE = re.compile(r"(Active raw clips[：:]\s*)(\d+)")

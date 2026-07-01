@@ -46,7 +46,7 @@ def spans_from_source_root(root: Path, workspace_id: str) -> list[LexicalSpan]:
     """Extract source-backed lexical spans from the human wiki root."""
 
     del workspace_id  # span ids are workspace-independent; DB rows carry workspace_id.
-    from ops.wiki_native_docs import collect_source_docs
+    from llm_wiki_native.source_docs import collect_source_docs
 
     root = Path(root)
     if not root.exists():

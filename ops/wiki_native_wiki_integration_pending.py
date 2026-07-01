@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import raw_clip_files
+from llm_wiki_native.source_docs import raw_clip_files
 from ops.wiki_native_state import ensure_state_dirs
 from ops.wiki_native_wiki_checks import now_stamp
 
