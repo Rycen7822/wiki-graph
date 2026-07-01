@@ -129,6 +129,20 @@ Which wrapper gate catches failed verification before mark-pending?
 """
 
 
+def test_raw_fast_evidence_bundle_process_pdf_has_named_sidecar_seams() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    expected_helpers = {
+        "_write_pdf_resource_boundary_sidecars",
+        "_write_pdf_localized_figure_sidecars",
+        "_write_pdf_digest_sidecars",
+        "_write_pdf_note_block_drafts",
+        "_write_pdf_enrichment_sidecars",
+    }
+
+    assert {name for name in expected_helpers if callable(getattr(raw_fast_evidence_bundle, name, None))} == expected_helpers
+
+
 @pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
