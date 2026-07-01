@@ -1,5 +1,6 @@
 import pytest
 
+from llm_wiki_native.retrieval.context import assemble_context
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine, _record_identity_from_hit
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from support import native_record
@@ -96,6 +97,74 @@ def test_hybrid_query_reranks_lexical_exact_map_row_over_weaker_zvec_hit(tmp_pat
     assert "lexical_fts" in result["hits"][0]["routes"] or "lexical_like" in result["hits"][0]["routes"]
     assert result["hits"][0]["score_breakdown"]["source_role"] > 0
     assert result["hits"][1]["record_id"] == "chunk-weak"
+
+
+def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.put_record(native_record("native-test", "chunk", "chunk-weak", "Weak semantic chunk", source_path="concepts/weak.md"))
+    db.put_vector("native-test", "chunk", "chunk-weak", "chunk-weak:vector", [1.0, 0.0])
+    db.put_edge("native-test", "relationship", "chunk-weak", "tag:x", 0.5, {"kind": "related"})
+    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0}, require_vectors=True)
+    db.put_lexical_span(
+        "native-test",
+        span_id="span:raw-map-row",
+        source_path="_meta/raw-clip-map.md",
+        source_id="meta:raw-clip-map",
+        source_role="meta_map",
+        span_kind="map.row",
+        heading_path=["Raw Clip Map"],
+        start_line=4,
+        end_line=4,
+        text="- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
+        metadata={"map": "raw-clip"},
+    )
+    zvec = _ZvecWorkspace([_ZvecHit("chunk", "chunk-weak", score=100.0)])
+    engine = NativeQueryEngine(db, zvec_workspace=zvec)
+
+    result = engine.query(
+        "native-test",
+        "MapOnlyNeedle raw map",
+        [1.0, 0.0],
+        mode="mix",
+        top_k=2,
+        record_types=("chunk",),
+        lexical_top_k=3,
+        neighbor_limit=1,
+    )
+    compact = assemble_context(result, max_chars_per_block=16, response_profile="compact")
+    standard = assemble_context(result, max_chars_per_block=16, response_profile="standard")
+    debug = assemble_context(result, max_chars_per_block=16, response_profile="debug")
+
+    assert [hit["record_id"] for hit in result["hits"]] == ["span:raw-map-row", "chunk-weak"]
+    assert result["hits"][0]["score"] >= result["hits"][1]["score"]
+    assert result["hits"][0]["routes"] == ["lexical_fts"]
+    assert result["hits"][1]["routes"] == ["zvec"]
+    assert result["hits"][1]["neighbors"] == [
+        {
+            "edge_type": "relationship",
+            "neighbor_id": "tag:x",
+            "src_id": "chunk-weak",
+            "tgt_id": "tag:x",
+            "weight": 0.5,
+            "payload": {"kind": "related"},
+        }
+    ]
+    assert result["trace"] == {
+        "query": "MapOnlyNeedle raw map",
+        "mode": "mix",
+        "top_k": 2,
+        "record_types": ["chunk"],
+        "section_kind": None,
+        "vector_hit_count": 1,
+        "lexical_hit_count": 1,
+        "route_counts": {"zvec": 1, "lexical": 1},
+        "retrieval_backend": "zvec+lexical",
+    }
+    assert compact["coverage_plan"]["by_source_role"]["meta_map"] == ["_meta/raw-clip-map.md"]
+    assert "neighbors" not in compact["context_blocks"][0]
+    assert standard["context_blocks"][0]["routes"] == ["lexical_fts"]
+    assert debug["retrieval_debug"]["hits"][0]["score_breakdown"]["source_role"] == 30.0
 
 
 def test_query_engine_routes_mix_to_zvec_hybrid_when_workspace_is_supplied() -> None:

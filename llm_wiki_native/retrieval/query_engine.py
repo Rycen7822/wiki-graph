@@ -7,7 +7,7 @@ LLM answer generation, and HTTP serving live in the API/search layers.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 from llm_wiki_native.contracts import (
     RECORD_TYPE_CODES,
@@ -146,38 +146,22 @@ class NativeQueryEngine:
         source_roles: tuple[str, ...] | None,
         span_kinds: tuple[str, ...] | None,
     ) -> dict[str, Any]:
-        if mode == "mix":
-            zvec_hits = self.zvec_workspace.query_mix(
-                query,
-                query_vector,
-                top_k,
-                _zvec_filter(record_types, section_kind),
-            )
-        elif mode == "naive":
-            zvec_hits = self.zvec_workspace.query_vector(
-                query_vector,
-                top_k,
-                _zvec_filter(record_types, section_kind),
-            )
-        else:
-            raise NotImplementedError(f"zvec query mode is not implemented yet: {mode}")
-
-        zvec_items = []
-        for rank, hit in enumerate(zvec_hits[:top_k], start=1):
-            fields = dict(hit.fields)
-            record_type, record_id = _record_identity_from_hit(hit.doc_id, fields)
-            record = self.db.get_record(workspace_id, record_type, record_id)
-            item = {
-                "doc_id": hit.doc_id,
-                "zvec_score": float(hit.score),
-                "record_type": record_type,
-                "record_id": record_id,
-                "record": record,
-                "neighbors": self.db.neighbors(workspace_id, record_id, limit=neighbor_limit),
-                "routes": ["zvec"],
-                "route_ranks": {"zvec": rank},
-            }
-            zvec_items.append(item)
+        zvec_hits = _query_zvec_hits(
+            self.zvec_workspace,
+            query,
+            query_vector,
+            mode=mode,
+            top_k=top_k,
+            record_types=record_types,
+            section_kind=section_kind,
+        )
+        zvec_items = _zvec_items(
+            self.db,
+            workspace_id,
+            zvec_hits,
+            top_k=top_k,
+            neighbor_limit=neighbor_limit,
+        )
         lexical_items = _query_lexical_items(
             self.db,
             workspace_id,
@@ -187,20 +171,89 @@ class NativeQueryEngine:
             span_kinds=span_kinds,
         ) if include_lexical and mode == "mix" else []
         hits = _rank_hybrid_hits([*zvec_items, *lexical_items], query=query)[:top_k]
-        return {
-            "hits": hits,
-            "trace": {
-                "query": query,
-                "mode": mode,
-                "top_k": top_k,
-                "record_types": list(record_types),
-                "section_kind": section_kind,
-                "vector_hit_count": len(zvec_items),
-                "lexical_hit_count": len(lexical_items),
-                "route_counts": {"zvec": len(zvec_items), "lexical": len(lexical_items)},
-                "retrieval_backend": "zvec+lexical" if lexical_items else "zvec",
-            },
-        }
+        return _query_response(
+            hits,
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            record_types=record_types,
+            section_kind=section_kind,
+            zvec_items=zvec_items,
+            lexical_items=lexical_items,
+        )
+
+
+def _query_zvec_hits(
+    zvec_workspace: Any,
+    query: str,
+    query_vector: list[float],
+    *,
+    mode: str,
+    top_k: int,
+    record_types: tuple[str, ...],
+    section_kind: str | None,
+) -> Sequence[Any]:
+    filter_expr = _zvec_filter(record_types, section_kind)
+    if mode == "mix":
+        return zvec_workspace.query_mix(query, query_vector, top_k, filter_expr)
+    if mode == "naive":
+        return zvec_workspace.query_vector(query_vector, top_k, filter_expr)
+    raise NotImplementedError(f"zvec query mode is not implemented yet: {mode}")
+
+
+def _zvec_items(
+    db: Any,
+    workspace_id: str,
+    zvec_hits: Sequence[Any],
+    *,
+    top_k: int,
+    neighbor_limit: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for rank, hit in enumerate(zvec_hits[:top_k], start=1):
+        fields = dict(hit.fields)
+        record_type, record_id = _record_identity_from_hit(hit.doc_id, fields)
+        record = db.get_record(workspace_id, record_type, record_id)
+        items.append(
+            {
+                "doc_id": hit.doc_id,
+                "zvec_score": float(hit.score),
+                "record_type": record_type,
+                "record_id": record_id,
+                "record": record,
+                "neighbors": db.neighbors(workspace_id, record_id, limit=neighbor_limit),
+                "routes": ["zvec"],
+                "route_ranks": {"zvec": rank},
+            }
+        )
+    return items
+
+
+def _query_response(
+    hits: list[dict[str, Any]],
+    *,
+    query: str,
+    mode: str,
+    top_k: int,
+    record_types: tuple[str, ...],
+    section_kind: str | None,
+    zvec_items: list[dict[str, Any]],
+    lexical_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "hits": hits,
+        "trace": {
+            "query": query,
+            "mode": mode,
+            "top_k": top_k,
+            "record_types": list(record_types),
+            "section_kind": section_kind,
+            "vector_hit_count": len(zvec_items),
+            "lexical_hit_count": len(lexical_items),
+            "route_counts": {"zvec": len(zvec_items), "lexical": len(lexical_items)},
+            "retrieval_backend": "zvec+lexical" if lexical_items else "zvec",
+        },
+    }
 
 
 def _span_response_base(workspace_id: str, span: dict[str, Any]) -> dict[str, Any]:
