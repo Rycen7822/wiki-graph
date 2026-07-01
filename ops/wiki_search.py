@@ -52,7 +52,8 @@ def run_native_api_query(args, query: str, *, section_kind: str | None = None) -
     pack = None
     if args.save_evidence_pack:
         pack = save_evidence_pack(args.state_dir, query, args.mode, response)
-    add_query_event(args.state_dir, query, args.mode, str(pack) if pack else None)
+    if getattr(args, "record_query_event", True):
+        add_query_event(args.state_dir, query, args.mode, str(pack) if pack else None)
     return {"query": query, "mode": args.mode, "section_kind": section_kind, "evidence_pack": str(pack) if pack else None, "backend": "native", "response": response}
 
 
@@ -66,7 +67,7 @@ def run_query(args, query: str) -> dict:
 
 
 def main() -> int:
-    parser = common_paths_parser("Query the llm-wiki native service and optionally save an evidence pack")
+    parser = common_paths_parser("Query the llm-wiki native service; records query events by default unless --no-record-query-event is set")
     parser.add_argument("query", nargs="?")
     parser.add_argument("--mode", default=DEFAULT_QUERY_MODE, choices=sorted(SUPPORTED_QUERY_MODES))
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
@@ -76,6 +77,8 @@ def main() -> int:
         help="Prefix a raw_section query and, with --data-only, return only matching raw_section_docs chunks.",
     )
     parser.add_argument("--save-evidence-pack", action="store_true")
+    parser.add_argument("--no-record-query-event", dest="record_query_event", action="store_false", help="Do not write the default native query event to the state dir")
+    parser.set_defaults(record_query_event=True)
     parser.add_argument("--data-only", action="store_true", help="Use /query/data retrieval without LLM answer generation")
     parser.add_argument("--response-profile", choices=sorted(RESPONSE_PROFILES), help="Native response profile for /query/data or /query envelopes")
     parser.add_argument("--native-workspace", help="Workspace id override for native API queries")

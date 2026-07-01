@@ -47,6 +47,37 @@ def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_pat
     assert result["response"]["context_blocks"][0]["source_path"] == "alpha.md"
 
 
+def test_wiki_search_can_disable_query_event_recording(tmp_path, monkeypatch) -> None:
+    def fake_http_json(method, url, payload, *, timeout=60):
+        return {"context_blocks": [{"source_path": "alpha.md"}], "hits": []}
+
+    def fail_add_query_event(*_args, **_kwargs):
+        raise AssertionError("query event should not be recorded")
+
+    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
+    monkeypatch.setattr(wiki_search, "add_query_event", fail_add_query_event)
+    args = SimpleNamespace(
+        backend="native",
+        native_workspace=None,
+        query_vector=None,
+        mode="mix",
+        top_k=3,
+        section_kind=None,
+        data_only=True,
+        save_evidence_pack=False,
+        state_dir=tmp_path,
+        workdir=tmp_path,
+        server="http://127.0.0.1:9621",
+        neighbor_k=5,
+        record_query_event=False,
+    )
+
+    result = wiki_search.run_query(args, "GraphRAG bottleneck")
+
+    assert result["backend"] == "native"
+    assert result["response"]["context_blocks"][0]["source_path"] == "alpha.md"
+
+
 def test_wiki_search_cli_help_is_native_only() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "ops.wiki_search", "--help"],
@@ -63,6 +94,8 @@ def test_wiki_search_cli_help_is_native_only() -> None:
     for marker in LOCAL_SQLITE_CLI_FLAGS:
         assert marker not in result.stdout
     assert "--query-vector" in result.stdout
+    assert "--no-record-query-event" in result.stdout
+    assert "records query events by default" in result.stdout
     assert "plain query-list JSONL" in result.stdout
     assert "--query-suite" in result.stdout
     assert "--benchmark" not in result.stdout
