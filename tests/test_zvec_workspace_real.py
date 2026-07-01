@@ -36,6 +36,77 @@ def _record(module, *, record_type: str, record_id: str, content: str, embedding
     )
 
 
+@pytest.mark.requires_zvec
+def test_real_zvec_accepts_encoded_doc_id_with_punctuation(tmp_path) -> None:
+    sys.modules.pop("llm_wiki_native.storage.zvec_workspace", None)
+    module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
+
+    record = module.ZvecRecord(
+        record_type="section",
+        record_id="raw/section:doc-a:method",
+        canonical_id="raw/section:doc-a:method",
+        source_id="doc:a",
+        source_kind_code=2,
+        source_path_hash="path-hash",
+        source_path="raw/doc-a.md",
+        title="Method",
+        vector_hash="vector-hash",
+        content_hash="content-hash",
+        metadata_hash="metadata-hash",
+        content="method text",
+        tokens=2,
+        embedding=[1.0, 0.0],
+        section_kind="methodology",
+    )
+    doc = module.zvec_doc_from_record(record)
+
+    assert ":" not in doc.id
+    assert "/" not in doc.id
+    workspace = module.create_workspace_collection(tmp_path / "zvec", embedding_dim=2)
+    stats = workspace.bulk_insert([record], batch_size=1)
+    fetched = workspace.fetch([doc.id])
+
+    assert stats == module.InsertStats(attempted=1, inserted=1, failed=0)
+    assert fetched[doc.id].fields["record_id"] == "raw/section:doc-a:method"
+    workspace.flush_optimize_close()
+    hits = workspace.query_vector([1.0, 0.0], top_k=1, filter_expr="record_type_code in (4)")
+
+    assert hits[0].doc_id == doc.id
+    assert hits[0].fields["record_id"] == "raw/section:doc-a:method"
+
+
+@pytest.mark.requires_zvec
+def test_real_zvec_accepts_long_record_id_with_short_stable_doc_id(tmp_path) -> None:
+    sys.modules.pop("llm_wiki_native.storage.zvec_workspace", None)
+    module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
+
+    record = module.ZvecRecord(
+        record_type="entity",
+        record_id="compiled:comparison:adaptive-memory-retrieval-vs-persistent-knowledge-base",
+        canonical_id="compiled:comparison:adaptive-memory-retrieval-vs-persistent-knowledge-base",
+        source_id="compiled:comparison:adaptive-memory-retrieval-vs-persistent-knowledge-base",
+        source_kind_code=1,
+        source_path_hash="path-hash",
+        source_path="adaptive-memory-retrieval-vs-persistent-knowledge-base.md",
+        title="",
+        vector_hash="vector-hash",
+        content_hash="content-hash",
+        metadata_hash="metadata-hash",
+        content="compiled:comparison:adaptive-memory-retrieval-vs-persistent-knowledge-base\nAdaptive Memory Retrieval",
+        tokens=2,
+        embedding=[1.0, 0.0],
+    )
+    workspace = module.create_workspace_collection(tmp_path / "zvec", embedding_dim=2)
+    doc_id = module.zvec_doc_id(record.record_type, record.record_id)
+
+    stats = workspace.bulk_insert([record], batch_size=1)
+    fetched = workspace.fetch([doc_id])
+
+    assert len(doc_id) <= module.MAX_ZVEC_DOC_ID_LENGTH
+    assert stats == module.InsertStats(attempted=1, inserted=1, failed=0)
+    assert fetched[doc_id].fields["record_id"] == record.record_id
+    assert fetched[doc_id].fields["content"] == record.content
+
 def test_real_zvec_workspace_insert_fetch_query_mix_filter_and_self_nearest(tmp_path: Path) -> None:
     module = _real_zvec_workspace_module()
     workspace = module.create_workspace_collection(tmp_path / "zvec-real", embedding_dim=2)
