@@ -101,6 +101,206 @@ def _lexical_span_from_row(row: sqlite3.Row, *, route: str, lexical_rank: float 
     return result
 
 
+def _record_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["payload"] = json.loads(str(data.pop("payload_json")))
+    return data
+
+
+def _record_insert_values(record: NativeRecord) -> tuple[Any, ...]:
+    return (
+        record.workspace_id,
+        record.record_type,
+        record.record_id,
+        record.vector_text,
+        record.content_hash,
+        record.metadata_hash,
+        record.vector_hash,
+        record.source_path,
+        record.source_id,
+        json.dumps(record.payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _edge_from_row(row: sqlite3.Row, *, node_id: str) -> dict[str, Any]:
+    src_id = str(row["src_id"])
+    tgt_id = str(row["tgt_id"])
+    return {
+        "edge_type": str(row["edge_type"]),
+        "neighbor_id": tgt_id if src_id == node_id else src_id,
+        "src_id": src_id,
+        "tgt_id": tgt_id,
+        "weight": float(row["weight"]),
+        "payload": json.loads(str(row["payload_json"])),
+    }
+
+
+def _edge_insert_values(
+    workspace_id: str,
+    edge_type: str,
+    src_id: str,
+    tgt_id: str,
+    weight: float,
+    payload: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        workspace_id,
+        edge_type,
+        src_id,
+        tgt_id,
+        float(weight),
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _lexical_span_values(
+    workspace_id: str,
+    *,
+    span_id: str,
+    source_path: str,
+    source_id: str,
+    source_role: str,
+    span_kind: str,
+    heading: list[str],
+    start_line: int,
+    end_line: int,
+    text: str,
+    text_hash: str,
+    metadata: dict[str, Any],
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    heading_json = json.dumps(heading, ensure_ascii=False, sort_keys=True)
+    metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    row_values = (
+        workspace_id,
+        span_id,
+        source_path,
+        source_id,
+        source_role,
+        span_kind,
+        heading_json,
+        int(start_line),
+        int(end_line),
+        text,
+        text_hash,
+        metadata_json,
+    )
+    fts_values = (
+        workspace_id,
+        span_id,
+        source_path,
+        source_id,
+        source_role,
+        span_kind,
+        " / ".join(heading),
+        text,
+        metadata_json,
+    )
+    return row_values, fts_values
+
+
+def _create_core_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace(
+          workspace_id TEXT PRIMARY KEY,
+          source_manifest_hash TEXT NOT NULL,
+          schema_version INTEGER NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          status TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS record(
+          workspace_id TEXT NOT NULL,
+          record_type TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          vector_text TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          metadata_hash TEXT NOT NULL,
+          vector_hash TEXT NOT NULL,
+          source_path TEXT,
+          source_id TEXT,
+          payload_json TEXT NOT NULL,
+          PRIMARY KEY(workspace_id, record_type, record_id),
+          FOREIGN KEY(workspace_id) REFERENCES workspace(workspace_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vector(
+          workspace_id TEXT NOT NULL,
+          record_type TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          vector_hash TEXT NOT NULL,
+          dim INTEGER NOT NULL,
+          vector_blob BLOB NOT NULL,
+          PRIMARY KEY(workspace_id, record_type, record_id)
+        )
+        """
+    )
+
+
+def _create_graph_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS edge(
+          workspace_id TEXT NOT NULL,
+          edge_type TEXT NOT NULL,
+          src_id TEXT NOT NULL,
+          tgt_id TEXT NOT NULL,
+          weight REAL NOT NULL,
+          payload_json TEXT NOT NULL,
+          PRIMARY KEY(workspace_id, edge_type, src_id, tgt_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_src ON edge(workspace_id, src_id, edge_type, weight)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_tgt ON edge(workspace_id, tgt_id, edge_type, weight)")
+
+
+def _create_lexical_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lexical_span(
+          workspace_id TEXT NOT NULL,
+          span_id TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          source_role TEXT NOT NULL,
+          span_kind TEXT NOT NULL,
+          heading_path_json TEXT NOT NULL,
+          start_line INTEGER NOT NULL,
+          end_line INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          text_hash TEXT NOT NULL,
+          metadata_json TEXT NOT NULL,
+          PRIMARY KEY(workspace_id, span_id),
+          FOREIGN KEY(workspace_id) REFERENCES workspace(workspace_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lexical_span_workspace_role ON lexical_span(workspace_id, source_role, span_kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lexical_span_workspace_source ON lexical_span(workspace_id, source_path, start_line)")
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS lexical_span_fts USING fts5(
+          workspace_id UNINDEXED,
+          span_id UNINDEXED,
+          source_path,
+          source_id,
+          source_role,
+          span_kind,
+          heading_path,
+          text,
+          metadata
+        )
+        """
+    )
+
+
 class SQLiteWorkspace:
 
     def __init__(self, db_path: Path) -> None:
@@ -136,100 +336,9 @@ class SQLiteWorkspace:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS workspace(
-                  workspace_id TEXT PRIMARY KEY,
-                  source_manifest_hash TEXT NOT NULL,
-                  schema_version INTEGER NOT NULL,
-                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  status TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS record(
-                  workspace_id TEXT NOT NULL,
-                  record_type TEXT NOT NULL,
-                  record_id TEXT NOT NULL,
-                  vector_text TEXT NOT NULL,
-                  content_hash TEXT NOT NULL,
-                  metadata_hash TEXT NOT NULL,
-                  vector_hash TEXT NOT NULL,
-                  source_path TEXT,
-                  source_id TEXT,
-                  payload_json TEXT NOT NULL,
-                  PRIMARY KEY(workspace_id, record_type, record_id),
-                  FOREIGN KEY(workspace_id) REFERENCES workspace(workspace_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS vector(
-                  workspace_id TEXT NOT NULL,
-                  record_type TEXT NOT NULL,
-                  record_id TEXT NOT NULL,
-                  vector_hash TEXT NOT NULL,
-                  dim INTEGER NOT NULL,
-                  vector_blob BLOB NOT NULL,
-                  PRIMARY KEY(workspace_id, record_type, record_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS edge(
-                  workspace_id TEXT NOT NULL,
-                  edge_type TEXT NOT NULL,
-                  src_id TEXT NOT NULL,
-                  tgt_id TEXT NOT NULL,
-                  weight REAL NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  PRIMARY KEY(workspace_id, edge_type, src_id, tgt_id)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_src ON edge(workspace_id, src_id, edge_type, weight)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_workspace_tgt ON edge(workspace_id, tgt_id, edge_type, weight)")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS lexical_span(
-                  workspace_id TEXT NOT NULL,
-                  span_id TEXT NOT NULL,
-                  source_path TEXT NOT NULL,
-                  source_id TEXT NOT NULL,
-                  source_role TEXT NOT NULL,
-                  span_kind TEXT NOT NULL,
-                  heading_path_json TEXT NOT NULL,
-                  start_line INTEGER NOT NULL,
-                  end_line INTEGER NOT NULL,
-                  text TEXT NOT NULL,
-                  text_hash TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL,
-                  PRIMARY KEY(workspace_id, span_id),
-                  FOREIGN KEY(workspace_id) REFERENCES workspace(workspace_id)
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_lexical_span_workspace_role ON lexical_span(workspace_id, source_role, span_kind)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_lexical_span_workspace_source ON lexical_span(workspace_id, source_path, start_line)")
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS lexical_span_fts USING fts5(
-                  workspace_id UNINDEXED,
-                  span_id UNINDEXED,
-                  source_path,
-                  source_id,
-                  source_role,
-                  span_kind,
-                  heading_path,
-                  text,
-                  metadata
-                )
-                """
-            )
+            _create_core_schema(conn)
+            _create_graph_schema(conn)
+            _create_lexical_schema(conn)
 
     def create_workspace(self, workspace_id: str, source_manifest_hash: str) -> None:
         with self._connect() as conn:
@@ -263,18 +372,7 @@ class SQLiteWorkspace:
                   metadata_hash, vector_hash, source_path, source_id, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    record.workspace_id,
-                    record.record_type,
-                    record.record_id,
-                    record.vector_text,
-                    record.content_hash,
-                    record.metadata_hash,
-                    record.vector_hash,
-                    record.source_path,
-                    record.source_id,
-                    json.dumps(record.payload, ensure_ascii=False, sort_keys=True),
-                ),
+                _record_insert_values(record),
             )
 
     def count_records(self, workspace_id: str) -> dict[str, int]:
@@ -308,9 +406,7 @@ class SQLiteWorkspace:
             ).fetchone()
         if row is None:
             raise KeyError(f"{workspace_id}:{record_type}:{record_id}")
-        data = dict(row)
-        data["payload"] = json.loads(str(data.pop("payload_json")))
-        return data
+        return _record_from_row(row)
 
     def put_vector(self, workspace_id: str, record_type: str, record_id: str, vector_hash: str, vector: list[float]) -> None:
         record = self.get_record(workspace_id, record_type, record_id)
@@ -336,7 +432,7 @@ class SQLiteWorkspace:
                 INSERT OR REPLACE INTO edge(workspace_id, edge_type, src_id, tgt_id, weight, payload_json)
                 VALUES(?, ?, ?, ?, ?, ?)
                 """,
-                (workspace_id, edge_type, src_id, tgt_id, float(weight), json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                _edge_insert_values(workspace_id, edge_type, src_id, tgt_id, weight, payload),
             )
 
     def neighbors(
@@ -368,18 +464,7 @@ class SQLiteWorkspace:
             edge_type = str(row["edge_type"])
             if edge_types is not None and edge_type not in edge_types:
                 continue
-            src_id = str(row["src_id"])
-            tgt_id = str(row["tgt_id"])
-            results.append(
-                {
-                    "edge_type": edge_type,
-                    "neighbor_id": tgt_id if src_id == node_id else src_id,
-                    "src_id": src_id,
-                    "tgt_id": tgt_id,
-                    "weight": float(row["weight"]),
-                    "payload": json.loads(str(row["payload_json"])),
-                }
-            )
+            results.append(_edge_from_row(row, node_id=node_id))
         results.sort(key=lambda item: (-item["weight"], item["edge_type"], item["neighbor_id"]))
         return results[:limit] if limit is not None else results
 
@@ -412,8 +497,20 @@ class SQLiteWorkspace:
         metadata = dict(metadata or {})
         text = str(text)
         text_hash = text_hash or _sha256_text(text)
-        heading_json = json.dumps(heading, ensure_ascii=False, sort_keys=True)
-        metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        row_values, fts_values = _lexical_span_values(
+            workspace_id,
+            span_id=span_id,
+            source_path=source_path,
+            source_id=source_id,
+            source_role=source_role,
+            span_kind=span_kind,
+            heading=heading,
+            start_line=start_line,
+            end_line=end_line,
+            text=text,
+            text_hash=text_hash,
+            metadata=metadata,
+        )
         with self._connect() as conn:
             conn.execute(
                 """
@@ -422,20 +519,7 @@ class SQLiteWorkspace:
                   heading_path_json, start_line, end_line, text, text_hash, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    workspace_id,
-                    span_id,
-                    source_path,
-                    source_id,
-                    source_role,
-                    span_kind,
-                    heading_json,
-                    int(start_line),
-                    int(end_line),
-                    text,
-                    text_hash,
-                    metadata_json,
-                ),
+                row_values,
             )
             conn.execute("DELETE FROM lexical_span_fts WHERE workspace_id = ? AND span_id = ?", (workspace_id, span_id))
             conn.execute(
@@ -445,17 +529,7 @@ class SQLiteWorkspace:
                   heading_path, text, metadata
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    workspace_id,
-                    span_id,
-                    source_path,
-                    source_id,
-                    source_role,
-                    span_kind,
-                    " / ".join(heading),
-                    text,
-                    metadata_json,
-                ),
+                fts_values,
             )
 
     def get_lexical_span(self, workspace_id: str, span_id: str) -> dict[str, Any]:
