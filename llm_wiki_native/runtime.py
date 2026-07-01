@@ -32,7 +32,8 @@ def load_engine_from_workspace_pointer(
 
         zvec_workspace_factory = open_workspace_collection
     zvec_workspace = zvec_workspace_factory(zvec_path, read_only=True)
-    engine = NativeQueryEngine(db, zvec_workspace=zvec_workspace)
+    source_root = Path(str(pointer["source_root"])).resolve() if pointer.get("source_root") else None
+    engine = NativeQueryEngine(db, zvec_workspace=zvec_workspace, source_root=source_root)
     engine.default_workspace_id = str(pointer["workspace_id"])  # type: ignore[attr-defined]
     return engine
 

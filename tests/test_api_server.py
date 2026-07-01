@@ -59,6 +59,7 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
         "mode": "mix",
         "top_k": 1,
         "record_types": ["entity"],
+        "response_profile": "compact",
     }
 
     data_response = _request(app, "POST", "/query/data", json=payload)
@@ -66,6 +67,8 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
     assert data_response.status_code == 200
     body = data_response.json()
     assert body["context_blocks"][0]["source_path"] == "alpha.md"
+    assert "neighbors" not in body["context_blocks"][0]
+    assert body["coverage_plan"]["must_read"][0]["source_path"] == "alpha.md"
     assert body["trace"]["mode"] == "mix"
 
 
@@ -106,6 +109,39 @@ def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch)
     assert _request(app, "POST", "/query/data", json=payload, raise_app_exceptions=False).status_code == 401
     assert _request(app, "POST", "/query/data", json=payload, headers={"Authorization": "Bearer wrong"}, raise_app_exceptions=False).status_code == 401
     assert _request(app, "POST", "/query/data", json=payload, headers={"Authorization": "Bearer secret-token"}).status_code == 200
+
+
+def test_native_api_read_span_returns_current_source_text(tmp_path, monkeypatch) -> None:
+    patch_direct_threadpool(monkeypatch)
+    wiki_root = tmp_path / "wiki"
+    (wiki_root / "notes").mkdir(parents=True)
+    (wiki_root / "notes" / "alpha.md").write_text("# Alpha\n\nAPI evidence line\n", encoding="utf-8")
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.mark_audited("native-test", {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0})
+    db.put_lexical_span(
+        "native-test",
+        span_id="span:api",
+        source_path="notes/alpha.md",
+        source_id="wiki:alpha",
+        source_role="wiki",
+        span_kind="doc.paragraph",
+        heading_path=["Alpha"],
+        start_line=3,
+        end_line=3,
+        text="API evidence line",
+        metadata={},
+    )
+    app = create_app(NativeQueryEngine(db, zvec_workspace=type("Z", (), {"query_mix": lambda *a, **k: [], "query_vector": lambda *a, **k: []})(), source_root=wiki_root), default_workspace_id="native-test")
+
+    response = _request(app, "POST", "/read/span", json={"span_id": "span:api"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_id"] == "native-test"
+    assert body["span_id"] == "span:api"
+    assert body["source_status"] == "current"
+    assert body["text"] == "API evidence line"
 
 
 def test_native_api_validates_vectors_and_clamps_request_limits(monkeypatch) -> None:
