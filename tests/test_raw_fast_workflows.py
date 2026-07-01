@@ -484,6 +484,17 @@ def test_raw_fast_verifier_rejects_remote_markdown_images(tmp_path: Path) -> Non
     assert "remote_markdown_images" in payload["raw_fast_blockers"]
 
 
+def test_raw_fast_closeout_main_has_named_workflow_seams() -> None:
+    expected_helpers = {
+        "_run_closeout_mark_and_cleanup",
+        "_run_closeout_final_verify",
+        "_run_closeout_downstream_status",
+        "_successful_closeout_output",
+    }
+
+    assert {name for name in expected_helpers if callable(getattr(raw_fast_closeout, name, None))} == expected_helpers
+
+
 def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
