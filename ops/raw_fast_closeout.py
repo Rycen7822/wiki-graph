@@ -655,6 +655,133 @@ def fail(stage: str, payload: dict[str, Any], code: int = 1, timings: TimingReco
     return code
 
 
+def _run_closeout_mark_and_cleanup(
+    args: argparse.Namespace,
+    timings: TimingRecorder,
+    *,
+    pre_verify: dict[str, Any],
+    scan: dict[str, Any],
+) -> dict[str, Any]:
+    evidence_reports = timings.record("evidence_report_capture", capture_tmp_evidence_reports, args)
+    mark_result = timings.record("mark_pending", run_mark_pending, args)
+    marked_payload = compact_mark_payload(mark_result)
+    if mark_result.get("returncode") != 0:
+        return {
+            "ok": False,
+            "stage": "mark_pending",
+            "code": int(mark_result.get("returncode") or 1),
+            "payload": {
+                "raw_fast_ok": False,
+                "pre_verify": pre_verify,
+                "control_scan": scan,
+                "mark_pending": marked_payload,
+            },
+        }
+
+    cleanup = timings.record(
+        "cleanup",
+        safe_cleanup,
+        args.tmp,
+        root=args.root,
+        workdir=args.workdir,
+        allow_non_tmp_cleanup=args.allow_non_tmp_cleanup,
+    )
+    if any(not item.get("ok") for item in cleanup):
+        return {
+            "ok": False,
+            "stage": "cleanup",
+            "code": 1,
+            "payload": {
+                "raw_fast_ok": False,
+                "pre_verify": pre_verify,
+                "control_scan": scan,
+                "marked": marked_payload.get("marked"),
+                "cleanup": cleanup,
+            },
+        }
+    return {
+        "ok": True,
+        "evidence_reports": evidence_reports,
+        "marked_payload": marked_payload,
+        "cleanup": cleanup,
+    }
+
+
+def _run_closeout_final_verify(
+    args: argparse.Namespace,
+    timings: TimingRecorder,
+    *,
+    pre_verify: dict[str, Any],
+) -> dict[str, Any]:
+    if args.fast_final_verify:
+        return timings.record("final_verify", fast_final_verify_from_pre, args, pre_verify, args.tmp, label="final_verify")
+    if args.tmp:
+        return timings.record("final_verify", verify_note, args, tmp_paths=args.tmp, label="final_verify")
+    return timings.record("final_verify", verify_note, args, label="final_verify")
+
+
+def _run_closeout_downstream_status(args: argparse.Namespace, timings: TimingRecorder) -> dict[str, Any]:
+    wiki_status = timings.record("wiki_status", run_wiki_status, args)
+    synthesized_native = synthesize_blocked_native_refresh_status(args, wiki_status)
+    if synthesized_native:
+        standalone_native_status = timings.record("standalone_native_refresh_status", run_native_refresh_status, args)
+        native_refresh_status = timings.record(
+            "native_refresh_status",
+            synthesize_blocked_native_refresh_status,
+            args,
+            wiki_status,
+            standalone_status=standalone_native_status,
+        )
+    else:
+        native_refresh_status = timings.record("native_refresh_status", run_native_refresh_status, args)
+    native_refresh = timings.record("native_refresh", run_native_refresh_if_needed, args, native_refresh_status)
+    return {
+        "wiki_status": wiki_status,
+        "native_refresh_status": native_refresh_status,
+        "native_refresh": native_refresh,
+        "compact_native_status": compact_native_refresh_status(native_refresh_status),
+    }
+
+
+def _successful_closeout_output(
+    args: argparse.Namespace,
+    timings: TimingRecorder,
+    *,
+    pre_verify: dict[str, Any],
+    scan: dict[str, Any],
+    marked_payload: dict[str, Any],
+    cleanup: list[dict[str, Any]],
+    evidence_reports: dict[str, Any],
+    final_verify: dict[str, Any],
+    downstream: dict[str, Any],
+) -> dict[str, Any]:
+    output = {
+        "ok": True,
+        "stage": "complete",
+        "raw_fast_ok": True,
+        "raw_file": args.raw_file,
+        "pre_verify": pre_verify,
+        "control_scan": scan,
+        "marked": marked_payload.get("marked"),
+        "mark_pending": marked_payload,
+        "cleanup": cleanup,
+        "evidence_reports": evidence_reports,
+        "final_verify": final_verify,
+        "wiki_integration": compact_wiki_status(downstream["wiki_status"]),
+        "native_refresh_status": downstream["compact_native_status"],
+        "native_refresh": downstream["native_refresh"],
+        "timings": timings.snapshot(),
+    }
+    if args.append_log:
+        log_append = timings.record("append_log", append_compact_log, args, output)
+        output["log_append"] = {key: value for key, value in log_append.items() if key != "entry"}
+        output["compact_log_entry"] = log_append.get("entry")
+        output["timings"] = timings.snapshot()
+    else:
+        output["compact_log_entry"] = build_compact_log_entry(args, output)
+    return output
+
+
 def main() -> int:
     timings = TimingRecorder()
     args = parse_args()
@@ -678,21 +805,14 @@ def main() -> int:
     if any(not item.get("ok") for item in cleanup_check):
         return fail("cleanup_preflight", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "cleanup_preflight": cleanup_check}, 1, timings)
 
-    evidence_reports = timings.record("evidence_report_capture", capture_tmp_evidence_reports, args)
+    mark_cleanup = _run_closeout_mark_and_cleanup(args, timings, pre_verify=pre_verify, scan=scan)
+    if not mark_cleanup["ok"]:
+        return fail(mark_cleanup["stage"], mark_cleanup["payload"], mark_cleanup["code"], timings)
+    evidence_reports = mark_cleanup["evidence_reports"]
+    marked_payload = mark_cleanup["marked_payload"]
+    cleanup = mark_cleanup["cleanup"]
 
-    mark_result = timings.record("mark_pending", run_mark_pending, args)
-    marked_payload = compact_mark_payload(mark_result)
-    if mark_result.get("returncode") != 0:
-        return fail("mark_pending", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "mark_pending": marked_payload}, int(mark_result.get("returncode") or 1), timings)
-
-    cleanup = timings.record("cleanup", safe_cleanup, args.tmp, root=args.root, workdir=args.workdir, allow_non_tmp_cleanup=args.allow_non_tmp_cleanup)
-    if any(not item.get("ok") for item in cleanup):
-        return fail("cleanup", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "marked": marked_payload.get("marked"), "cleanup": cleanup}, 1, timings)
-
-    if args.fast_final_verify:
-        final_verify = timings.record("final_verify", fast_final_verify_from_pre, args, pre_verify, args.tmp, label="final_verify")
-    else:
-        final_verify = timings.record("final_verify", verify_note, args, tmp_paths=args.tmp, label="final_verify") if args.tmp else timings.record("final_verify", verify_note, args, label="final_verify")
+    final_verify = _run_closeout_final_verify(args, timings, pre_verify=pre_verify)
     if not final_verify_acceptable(pre_verify, final_verify):
         return fail(
             "final_verify",
@@ -701,21 +821,9 @@ def main() -> int:
             timings,
         )
 
-    wiki_status = timings.record("wiki_status", run_wiki_status, args)
-    synthesized_native = synthesize_blocked_native_refresh_status(args, wiki_status)
-    if synthesized_native:
-        standalone_native_status = timings.record("standalone_native_refresh_status", run_native_refresh_status, args)
-        native_refresh_status = timings.record(
-            "native_refresh_status",
-            synthesize_blocked_native_refresh_status,
-            args,
-            wiki_status,
-            standalone_status=standalone_native_status,
-        )
-    else:
-        native_refresh_status = timings.record("native_refresh_status", run_native_refresh_status, args)
-    native_refresh = timings.record("native_refresh", run_native_refresh_if_needed, args, native_refresh_status)
-    compact_native_status = compact_native_refresh_status(native_refresh_status)
+    downstream = _run_closeout_downstream_status(args, timings)
+    native_refresh = downstream["native_refresh"]
+    compact_native_status = downstream["compact_native_status"]
     if not native_refresh.get("ok", True):
         return fail(
             "native_refresh",
@@ -726,7 +834,7 @@ def main() -> int:
                 "marked": marked_payload.get("marked"),
                 "cleanup": cleanup,
                 "final_verify": final_verify,
-                "wiki_integration": compact_wiki_status(wiki_status),
+                "wiki_integration": compact_wiki_status(downstream["wiki_status"]),
                 "native_refresh_status": compact_native_status,
                 "native_refresh": native_refresh,
             },
@@ -734,31 +842,17 @@ def main() -> int:
             timings,
         )
 
-    output = {
-        "ok": True,
-        "stage": "complete",
-        "raw_fast_ok": True,
-        "raw_file": args.raw_file,
-        "pre_verify": pre_verify,
-        "control_scan": scan,
-        "marked": marked_payload.get("marked"),
-        "mark_pending": marked_payload,
-        "cleanup": cleanup,
-        "evidence_reports": evidence_reports,
-        "final_verify": final_verify,
-        "wiki_integration": compact_wiki_status(wiki_status),
-        "native_refresh_status": compact_native_status,
-        "native_refresh": native_refresh,
-        "timings": timings.snapshot(),
-    }
-    if args.append_log:
-        log_append = timings.record("append_log", append_compact_log, args, output)
-        output["log_append"] = {key: value for key, value in log_append.items() if key != "entry"}
-        output["compact_log_entry"] = log_append.get("entry")
-        output["timings"] = timings.snapshot()
-    else:
-        output["compact_log_entry"] = build_compact_log_entry(args, output)
-
+    output = _successful_closeout_output(
+        args,
+        timings,
+        pre_verify=pre_verify,
+        scan=scan,
+        marked_payload=marked_payload,
+        cleanup=cleanup,
+        evidence_reports=evidence_reports,
+        final_verify=final_verify,
+        downstream=downstream,
+    )
     print_json(output)
     return 0
 
