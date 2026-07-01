@@ -1010,6 +1010,163 @@ def build_note_skeleton(frontmatter: dict[str, Any]) -> str:
 """
 
 
+def _write_pdf_resource_boundary_sidecars(
+    workdir: Path,
+    files: dict[str, str],
+    resource_probe: dict[str, Any],
+    *,
+    title: str,
+    url: str,
+    pdfinfo: dict[str, Any],
+    secret_scan: dict[str, Any],
+) -> dict[str, Any]:
+    draft = summarize_resource_boundary(
+        resource_probe,
+        metadata={"title": title, "source_url": url},
+        pdf_info=pdfinfo,
+        secret_scan=secret_scan,
+    )
+    write_json(workdir / "resource_boundary_draft.json", draft)
+    write_text(workdir / "resource_boundary_draft.md", render_resource_boundary_markdown(draft))
+    files["resource_boundary_draft"] = "resource_boundary_draft.json"
+    files["resource_boundary_draft_markdown"] = "resource_boundary_draft.md"
+    return {
+        "ok": True,
+        "status": "written",
+        "github_count": len(draft.get("github") or []),
+        "hf_statuses": {key: value.get("status") for key, value in (draft.get("hf") or {}).items()},
+    }
+
+
+def _write_pdf_localized_figure_sidecars(
+    root: Path,
+    workdir: Path,
+    files: dict[str, str],
+    *,
+    title: str,
+    image_slug: str | None,
+) -> dict[str, Any]:
+    localized = localize_source_figures(root, workdir, image_slug or slugify(title).lower())
+    write_json(workdir / "localized_figures.json", localized)
+    write_text(workdir / "localized_figures.md", render_localized_figures_markdown(localized))
+    files["localized_figures"] = "localized_figures.json"
+    files["localized_figures_markdown"] = "localized_figures.md"
+    return localized
+
+
+def _write_pdf_digest_sidecars(
+    workdir: Path,
+    files: dict[str, str],
+    *,
+    title: str,
+    url: str,
+    resource_probe: dict[str, Any],
+) -> dict[str, Any]:
+    digest = build_paper_digest(workdir, title, url, resource_probe=resource_probe, files=files)
+    write_json(workdir / "paper_digest.json", digest)
+    write_text(workdir / "paper_digest.md", render_paper_digest_markdown(digest))
+    files["paper_digest"] = "paper_digest.json"
+    files["paper_digest_markdown"] = "paper_digest.md"
+    return {
+        "ok": True,
+        "status": "written",
+        "equations": len(digest.get("equation_cards") or []),
+        "tables": len(digest.get("table_cards") or []),
+        "figures": len(digest.get("figure_cards") or []),
+        "warnings": len(digest.get("quality_warnings") or []),
+    }
+
+
+def _write_pdf_note_block_drafts(
+    workdir: Path,
+    files: dict[str, str],
+    *,
+    frontmatter: dict[str, Any],
+    resource_draft_payload: dict[str, Any] | None,
+    localized_payload: dict[str, Any] | None,
+    digest_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    draft_text = build_note_block_drafts(frontmatter, resource_draft_payload, localized_payload, digest_payload)
+    write_text(workdir / "note_block_drafts.md", draft_text)
+    files["note_block_drafts"] = "note_block_drafts.md"
+    return {"ok": True, "status": "written", "bytes": len(draft_text.encode("utf-8"))}
+
+
+def _write_pdf_enrichment_sidecars(
+    *,
+    root: Path,
+    workdir: Path,
+    files: dict[str, str],
+    timings: TimingRecorder,
+    title: str,
+    url: str,
+    pdfinfo: dict[str, Any],
+    resource_probe: dict[str, Any],
+    secret_scan: dict[str, Any],
+    frontmatter: dict[str, Any],
+    resource_draft: bool,
+    paper_digest: bool,
+    localize_figures: bool,
+    image_slug: str | None,
+) -> dict[str, Any]:
+    resource_draft_payload: dict[str, Any] | None = None
+    localized_payload: dict[str, Any] | None = None
+    digest_payload: dict[str, Any] | None = None
+
+    if resource_draft or paper_digest:
+        timings.record(
+            "resource_boundary_draft",
+            _write_pdf_resource_boundary_sidecars,
+            workdir,
+            files,
+            resource_probe,
+            title=title,
+            url=url,
+            pdfinfo=pdfinfo,
+            secret_scan=secret_scan,
+        )
+        resource_draft_payload = json.loads((workdir / "resource_boundary_draft.json").read_text(encoding="utf-8"))
+
+    if localize_figures:
+        localized_payload = timings.record(
+            "localize_figures",
+            _write_pdf_localized_figure_sidecars,
+            root,
+            workdir,
+            files,
+            title=title,
+            image_slug=image_slug,
+        )
+
+    if paper_digest:
+        timings.record(
+            "paper_digest",
+            _write_pdf_digest_sidecars,
+            workdir,
+            files,
+            title=title,
+            url=url,
+            resource_probe=resource_probe,
+        )
+        digest_payload = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
+        timings.record(
+            "note_block_drafts",
+            _write_pdf_note_block_drafts,
+            workdir,
+            files,
+            frontmatter=frontmatter,
+            resource_draft_payload=resource_draft_payload,
+            localized_payload=localized_payload,
+            digest_payload=digest_payload,
+        )
+
+    return {
+        "resource_draft": resource_draft_payload,
+        "localized_figures": localized_payload,
+        "paper_digest": digest_payload,
+    }
+
+
 def process_pdf(
     url: str,
     kind: str,
@@ -1096,52 +1253,22 @@ def process_pdf(
     files["candidate_frontmatter"] = "candidate_frontmatter.json"
     files["note_skeleton"] = "note_skeleton.md"
 
-    resource_draft_payload: dict[str, Any] | None = None
-    localized_payload: dict[str, Any] | None = None
-    digest_payload: dict[str, Any] | None = None
-
-    if resource_draft or paper_digest:
-        def _write_resource_boundary_outputs() -> dict[str, Any]:
-            draft = summarize_resource_boundary(resource_probe, metadata={"title": title, "source_url": url}, pdf_info=pdfinfo, secret_scan=secret_scan)
-            write_json(workdir / "resource_boundary_draft.json", draft)
-            write_text(workdir / "resource_boundary_draft.md", render_resource_boundary_markdown(draft))
-            files["resource_boundary_draft"] = "resource_boundary_draft.json"
-            files["resource_boundary_draft_markdown"] = "resource_boundary_draft.md"
-            return {"ok": True, "status": "written", "github_count": len(draft.get("github") or []), "hf_statuses": {k: v.get("status") for k, v in (draft.get("hf") or {}).items()}}
-
-        resource_draft_payload = timings.record("resource_boundary_draft", _write_resource_boundary_outputs)
-        resource_draft_payload = json.loads((workdir / "resource_boundary_draft.json").read_text(encoding="utf-8"))
-
-    if localize_figures:
-        def _write_localized_figure_outputs() -> dict[str, Any]:
-            localized = localize_source_figures(root, workdir, image_slug or slugify(title).lower())
-            write_json(workdir / "localized_figures.json", localized)
-            write_text(workdir / "localized_figures.md", render_localized_figures_markdown(localized))
-            files["localized_figures"] = "localized_figures.json"
-            files["localized_figures_markdown"] = "localized_figures.md"
-            return localized
-
-        localized_payload = timings.record("localize_figures", _write_localized_figure_outputs)
-
-    if paper_digest:
-        def _write_paper_digest_outputs() -> dict[str, Any]:
-            digest = build_paper_digest(workdir, title, url, resource_probe=resource_probe, files=files)
-            write_json(workdir / "paper_digest.json", digest)
-            write_text(workdir / "paper_digest.md", render_paper_digest_markdown(digest))
-            files["paper_digest"] = "paper_digest.json"
-            files["paper_digest_markdown"] = "paper_digest.md"
-            return {"ok": True, "status": "written", "equations": len(digest.get("equation_cards") or []), "tables": len(digest.get("table_cards") or []), "figures": len(digest.get("figure_cards") or []), "warnings": len(digest.get("quality_warnings") or [])}
-
-        timings.record("paper_digest", _write_paper_digest_outputs)
-        digest_payload = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
-
-        def _write_note_block_drafts() -> dict[str, Any]:
-            draft_text = build_note_block_drafts(fm, resource_draft_payload, localized_payload, digest_payload)
-            write_text(workdir / "note_block_drafts.md", draft_text)
-            files["note_block_drafts"] = "note_block_drafts.md"
-            return {"ok": True, "status": "written", "bytes": len(draft_text.encode("utf-8"))}
-
-        timings.record("note_block_drafts", _write_note_block_drafts)
+    _write_pdf_enrichment_sidecars(
+        root=root,
+        workdir=workdir,
+        files=files,
+        timings=timings,
+        title=title,
+        url=url,
+        pdfinfo=pdfinfo,
+        resource_probe=resource_probe,
+        secret_scan=secret_scan,
+        frontmatter=fm,
+        resource_draft=resource_draft,
+        paper_digest=paper_digest,
+        localize_figures=localize_figures,
+        image_slug=image_slug,
+    )
 
     payload = {
         "ok": True,
