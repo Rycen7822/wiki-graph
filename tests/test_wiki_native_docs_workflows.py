@@ -163,6 +163,55 @@ def test_validate_wiki_report_uses_native_output_fields(tmp_path: Path) -> None:
     assert report["native_workdir"] == str(workdir.resolve())
 
 
+def test_validate_wiki_can_sync_raw_clip_map_snapshot_when_explicit(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    write(
+        root / "raw" / "clip" / "2601" / "26010102_Bar-Paper.md",
+        "---\ntitle: Bar Paper\nsource: https://arxiv.org/abs/2601.0102\ndomain: paper\nupdated: 2026-05-18 16:00\ntags: [paper]\n---\n# Bar Paper\n",
+    )
+    raw_map = root / "_meta" / "raw-clip-map.md"
+    write(raw_map, "# Raw Clip Map\n\nActive raw clips: 1\n")
+    before_text = raw_map.read_text(encoding="utf-8")
+
+    stale = validate_wiki(root, tmp_path / "state", tmp_path / "work")
+
+    assert raw_map.read_text(encoding="utf-8") == before_text
+    assert stale["active_raw_clips"] == 2
+    assert stale["raw_clip_map_snapshot"] == 1
+    assert "active_raw_clips != raw-clip-map snapshot (2 != 1)" in stale["warnings"]
+
+    synced = validate_wiki(root, tmp_path / "state", tmp_path / "work", sync_raw_map_snapshot=True)
+
+    assert synced["active_raw_clips"] == 2
+    assert synced["raw_clip_map_snapshot"] == 2
+    assert synced["raw_clip_map_sync"]["changed"] is True
+    assert synced["raw_clip_map_sync"]["previous_snapshot"] == 1
+    assert not [warning for warning in synced["warnings"] if "raw-clip-map snapshot" in warning]
+    assert "Active raw clips: 2" in raw_map.read_text(encoding="utf-8")
+
+
+def test_validate_wiki_non_full_does_not_read_raw_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import wiki_native_lib
+
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    original_read_text = wiki_native_lib.read_text
+
+    def fail_on_raw_body_reads(path: Path) -> str:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+        if rel.startswith("raw/"):
+            raise AssertionError(f"non-full validation should not read raw body: {rel}")
+        return original_read_text(path)
+
+    monkeypatch.setattr(wiki_native_lib, "read_text", fail_on_raw_body_reads)
+
+    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph", full=False)
+
+    assert report["active_raw_clips"] == 1
+    with pytest.raises(AssertionError, match="non-full validation should not read raw body"):
+        validate_wiki(root, state, tmp_path / "work" / "wikigraph", full=True)
+
+
 def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ops import wiki_native_wiki_checks
 
@@ -345,9 +394,11 @@ def test_machine_pollution_detection(tmp_path: Path) -> None:
     retired_backend = "light" + "rag"
     retired_manifest_name = f"{retired_backend}_manifest.jsonl"
     write(root / retired_manifest_name, "{}\n")
+    write(root / "raw" / "clip" / "2601" / "seed_edges.jsonl", "{}\n")
     polluted = {p.as_posix() for p in wiki_root_machine_pollution(root)}
     assert ".llm-wiki" in polluted
     assert retired_manifest_name in polluted
+    assert "raw/clip/2601/seed_edges.jsonl" in polluted
 
 
 def test_ingest_text_has_stable_machine_header(tmp_path: Path) -> None:

@@ -172,15 +172,12 @@ def wiki_root_machine_pollution(root: Path) -> list[Path]:
         if p.exists():
             polluted.append(Path(name))
     if root.exists():
-        for p in root.iterdir():
-            if p.is_file() and any(pattern.match(p.name) for pattern in POLLUTION_DIRECT_PATTERNS):
-                rel = p.relative_to(root)
+        for p in root.rglob("*"):
+            rel = p.relative_to(root)
+            if p.parent == root and p.is_file() and any(pattern.match(p.name) for pattern in POLLUTION_DIRECT_PATTERNS):
                 if rel not in polluted:
                     polluted.append(rel)
-    for name in POLLUTION_RECURSIVE_NAMES:
-        for p in root.rglob(name):
-            rel = p.relative_to(root)
-            if rel not in polluted:
+            if p.name in POLLUTION_RECURSIVE_NAMES and rel not in polluted:
                 polluted.append(rel)
     return sorted(polluted, key=lambda p: p.as_posix())
 

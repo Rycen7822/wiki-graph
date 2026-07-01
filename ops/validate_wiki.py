@@ -57,6 +57,7 @@ def main() -> int:
     parser = common_paths_parser("Validate llm-wiki before/after native refresh")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--write-report", action="store_true")
+    parser.add_argument("--sync-raw-map-snapshot", action="store_true", help="Synchronize _meta/raw-clip-map.md Active raw clips marker before validation")
     parser.add_argument("--allow-errors", action="store_true")
     parser.add_argument("--reuse-validation-report", type=Path)
     args = parser.parse_args()
@@ -74,7 +75,15 @@ def main() -> int:
             print_json(reused_report)
             return 0 if args.allow_errors or not reused_report["errors"] else 1
 
-    report = validate_wiki(args.root, args.state_dir, args.workdir, full=args.full, write_report=args.write_report)
+    validate_kwargs: dict[str, Any] = {"full": args.full, "write_report": args.write_report}
+    if args.sync_raw_map_snapshot:
+        validate_kwargs["sync_raw_map_snapshot"] = True
+    report = validate_wiki(
+        args.root,
+        args.state_dir,
+        args.workdir,
+        **validate_kwargs,
+    )
     if reuse_status is not None:
         report["validation_reuse"] = reuse_status
     print_json(report)

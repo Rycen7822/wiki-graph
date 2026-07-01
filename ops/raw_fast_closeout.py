@@ -465,10 +465,22 @@ def run_native_refresh_status(args: argparse.Namespace) -> dict[str, Any]:
 
 def run_native_refresh_if_needed(args: argparse.Namespace, status: dict[str, Any]) -> dict[str, Any]:
     compact_status = compact_native_refresh_status(status)
+    mode = getattr(args, "native_refresh_mode", "status")
     if status.get("command_returncode") not in (None, 0):
-        return {"ok": False, "ran": False, "returncode": status.get("command_returncode"), "error": status.get("error") or "native_refresh_status_failed", **compact_status}
+        return {
+            "ok": False,
+            "ran": False,
+            "refresh_mode": mode,
+            "returncode": status.get("command_returncode"),
+            "error": status.get("error") or "native_refresh_status_failed",
+            **compact_status,
+        }
     if status.get("blocked_by_pending_wiki_integration") or not status.get("should_refresh"):
-        return {"ok": True, "ran": False, "skipped": True, "skip_reason": "not_runnable_or_not_required", **compact_status}
+        return {"ok": True, "ran": False, "skipped": True, "skip_reason": "not_runnable_or_not_required", "refresh_mode": mode, **compact_status}
+    if mode == "status":
+        return {"ok": True, "ran": False, "skipped": True, "skip_reason": "native_refresh_status_only", "refresh_mode": mode, **compact_status}
+    if mode != "prepare":
+        return {"ok": False, "ran": False, "refresh_mode": mode, "error": "invalid_native_refresh_mode", **compact_status}
     command = [sys.executable, "-m", "ops.batch_native_refresh", "refresh", "--prepare-only", "--root", str(args.root), "--state-dir", str(args.state_dir), "--workdir", str(args.workdir)]
     result = run_json(command, cwd=args.workdir, timeout=args.refresh_timeout)
     payload = result.get("json") if isinstance(result.get("json"), dict) else {}
@@ -478,6 +490,7 @@ def run_native_refresh_if_needed(args: argparse.Namespace, status: dict[str, Any
     return {
         "ok": ok,
         "ran": ok and not bool(payload.get("skipped")),
+        "refresh_mode": mode,
         "returncode": result.get("returncode"),
         "status": compact_native_refresh_status(refresh_status if isinstance(refresh_status, dict) else status),
         "skipped": payload.get("skipped"),
@@ -625,6 +638,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--integration-timeout", type=int, default=7200)
     parser.add_argument("--refresh-timeout", type=int, default=7200)
+    parser.add_argument(
+        "--native-refresh-mode",
+        choices=["status", "prepare"],
+        default="status",
+        help="After raw-fast closeout, report native status by default; use 'prepare' to run batch_native_refresh refresh --prepare-only.",
+    )
     return parser.parse_args()
 
 

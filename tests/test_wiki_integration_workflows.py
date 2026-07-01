@@ -256,12 +256,33 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
         ],
     }
 
-    prompt = batch_wiki_integration.build_auto_integration_prompt(root, state, status, "manual")
+    plan = {
+        "plan_hash": "plan123",
+        "operations": [
+            {"op": "raw_map_upsert", "raw_path": "raw/clip/2606/26062906_skill-neologisms-towards-skill-based-continual-learning.md"},
+            {"op": "review_queue_add", "raw_path": "raw/clip/2606/26062907_needs-review.md"},
+        ],
+    }
+    plan_path = state / "wiki_integration_plans" / "plan.json"
+
+    prompt = batch_wiki_integration.build_auto_integration_prompt(root, state, status, "manual", plan=plan, plan_path=plan_path)
 
     assert ("/home/" + "xu/project/wiki/wikigraph") not in prompt
     assert f"Native refresh workdir: `{ROOT}`" in prompt
+    assert f"Plan artifact: `{plan_path}`" in prompt
+    assert "plan_hash: `plan123`; operations=2; routed_raw_notes=1; review_queue_additions=1" in prompt
+    assert "Skill Neologisms" not in prompt
+    assert "python -m ops.validate_wiki" in prompt
+    assert "--sync-raw-map-snapshot" in prompt
     assert "python -m ops.batch_wiki_integration clear-success" in prompt
     assert "python -m ops.batch_native_refresh status" in prompt
+    assert "python -m ops.batch_native_refresh preflight-cutover" in prompt
+    assert "python -m ops.batch_native_refresh refresh" in prompt
+    assert "--fill-missing-vectors" in prompt
+    assert "next_refresh_kind" in prompt
+    assert "after 5 completed incremental graph updates" in prompt
+    assert "prepare-only output is a prepared artifact, not live graph freshness" in prompt
+    assert "Use bounded reads/searches for `_meta/raw-clip-map.md` and `_meta/topic-map.md`; keep large map files out of context." in prompt
     assert "references/raw-fast-batch-wiki-integration.md" in prompt
     assert "references/wiki-core-operations.md" in prompt
     assert "references/wiki-operational-pitfalls.md" not in prompt
@@ -283,7 +304,7 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
         "state = Path(os.environ['LLM_WIKI_STATE_DIR'])\n"
         "prompt_path = Path(os.environ['LLM_WIKI_INTEGRATION_PROMPT'])\n"
         "seen = state / 'fake_runner_seen.txt'\n"
-        "seen.write_text(prompt_path.read_text(encoding='utf-8')[:500], encoding='utf-8')\n"
+        "seen.write_text(prompt_path.read_text(encoding='utf-8')[:1600], encoding='utf-8')\n"
         "clear_pending_wiki_integration_after_success(root, state, reason=os.environ.get('LLM_WIKI_INTEGRATION_REASON', 'threshold'))\n",
     )
 
@@ -313,6 +334,12 @@ def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_thresho
     assert payload["post_status"]["should_integrate"] is False
     assert payload["post_status"]["pending_count"] == 0
     assert payload["prompt_path"].endswith(".md")
+    assert payload["plan_path"].endswith("_wiki_integration_plan.json")
+    assert payload["plan_hash"]
+    assert payload["plan_operations"] >= 1
+    assert payload["prompt_chars"] < 5000
+    assert Path(payload["plan_path"]).exists()
+    assert "Plan artifact" in (state / "fake_runner_seen.txt").read_text(encoding="utf-8")
     assert "batch wiki integration" in (state / "fake_runner_seen.txt").read_text(encoding="utf-8")
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
     assert len(batch_native_refresh.pending_entries(state)) == 1

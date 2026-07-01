@@ -736,7 +736,7 @@ def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys
         ("smoke_args", "http://127.0.0.1:9621/query/data", "native cutover smoke", "mix", "active-first-vector"),
         ("restart_args", "svc restart llm-wiki-native", "http://127.0.0.1:9621/health", 3.0),
         ("build", "candidate"),
-        ("finalize", "native refresh cutover"),
+        ("finalize", "native graph incremental refresh: cutover"),
         ("restart", str(state_dir.resolve())),
         ("smoke", str(state_dir.resolve()), "candidate"),
     ]
@@ -814,6 +814,72 @@ def test_refresh_cutover_cli_rejects_invalid_cutover_options_before_calls(
     for term in expected_terms:
         assert term in message
     assert calls == []
+
+
+def test_preflight_cutover_reports_missing_smoke_pair_without_status_or_build(tmp_path, capsys) -> None:
+    workdir = tmp_path / "wikigraph"
+    state_dir = workdir / "state"
+    state_dir.mkdir(parents=True)
+    root = tmp_path / "wiki"
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+
+    code = batch_native_refresh.main(
+        [
+            "preflight-cutover",
+            "--workdir",
+            str(workdir),
+            "--root",
+            str(root),
+            "--restart-command",
+            "svc restart llm-wiki-native",
+            "--smoke-url",
+            "http://127.0.0.1:9621/query/data",
+            "--require-unchanged-path",
+            str(watched_dir),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert "missing_smoke_query" in payload["errors"]
+    assert "missing_restart_command" not in payload["errors"]
+    assert payload["path_errors"] == []
+    assert not batch_native_refresh.pending_ledger_path(state_dir).exists()
+
+
+def test_preflight_cutover_accepts_valid_guard_shape_without_pending_status(tmp_path, capsys) -> None:
+    workdir = tmp_path / "wikigraph"
+    state_dir = workdir / "state"
+    state_dir.mkdir(parents=True)
+    root = tmp_path / "wiki"
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+
+    code = batch_native_refresh.main(
+        [
+            "preflight-cutover",
+            "--workdir",
+            str(workdir),
+            "--root",
+            str(root),
+            "--restart-command",
+            "svc restart llm-wiki-native",
+            "--smoke-url",
+            "http://127.0.0.1:9621/query/data",
+            "--smoke-query",
+            "native cutover smoke",
+            "--require-unchanged-path",
+            str(watched_dir),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["errors"] == []
+    assert not batch_native_refresh.pending_ledger_path(state_dir).exists()
 
 
 @pytest.mark.parametrize(
@@ -960,9 +1026,10 @@ def test_refresh_cutover_accepts_explicit_root_without_hardcoded_local_special_c
     assert calls == [
         ("status", (root, state_dir), {}),
         ("build", "candidate"),
-        ("finalize", "native refresh cutover"),
+        ("finalize", "native graph incremental refresh: cutover"),
         ("restart", str(state_dir)),
         ("smoke", str(state_dir)),
+        ("status", (root, state_dir), {}),
     ]
 
 
@@ -1022,7 +1089,7 @@ def test_refresh_cutover_success_preserves_pending_until_smoke_then_clears(tmp_p
     assert result["service"]["status"] == "ok"
     assert calls == [
         ("build", "candidate", True),
-        ("finalize", "native refresh cutover"),
+        ("finalize", "native graph incremental refresh: cutover"),
         ("restart", str(state_dir)),
         ("smoke", str(state_dir), "candidate", True),
     ]
@@ -1144,3 +1211,135 @@ def test_refresh_cutover_skipped_result_marks_no_execution(tmp_path) -> None:
     assert result["pending_clear_executed"] is False
     assert result["unchanged_path_audit"]["ok"] is True
     assert calls == []
+
+
+def _append_native_history(state_dir: Path, reasons: list[str]) -> None:
+    history = batch_native_refresh.active_workspace_history_path(state_dir)
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(
+        "".join(
+            json.dumps({"reason": reason, "current": {"workspace_id": f"ws-{idx}"}}) + "\n"
+            for idx, reason in enumerate(reasons)
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_native_refresh_status_reports_five_incremental_full_rebuild_policy(tmp_path) -> None:
+    state_dir = tmp_path / "wikigraph" / "state"
+    root = tmp_path / "wiki"
+    _append_native_history(
+        state_dir,
+        [f"native graph incremental refresh: cutover {idx}" for idx in range(5)],
+    )
+
+    status = batch_native_refresh.status(root, state_dir)
+
+    assert status["completed_incremental_refresh_count"] == 5
+    assert status["incremental_rebuild_threshold"] == 5
+    assert status["next_refresh_kind"] == "full-rebuild"
+    assert status["vector_cache_required"] is True
+    assert status["vector_cache_path"] == str(state_dir / "vector_cache.sqlite")
+
+    _append_native_history(
+        state_dir,
+        [
+            *[f"native graph incremental refresh: cutover {idx}" for idx in range(5)],
+            "native graph full-rebuild refresh: cutover",
+        ],
+    )
+
+    reset_status = batch_native_refresh.status(root, state_dir)
+    assert reset_status["completed_incremental_refresh_count"] == 0
+    assert reset_status["next_refresh_kind"] == "incremental"
+
+
+def test_refresh_cutover_marks_full_rebuild_pending_after_fifth_incremental(tmp_path) -> None:
+    state_dir = tmp_path / "wikigraph" / "state"
+    root = tmp_path / "wiki"
+    workspace_root = state_dir / "native_zvec" / "workspaces"
+    watched_dir = tmp_path / "watched"
+    watched_dir.mkdir()
+    _append_native_history(
+        state_dir,
+        [f"native graph incremental refresh: cutover {idx}" for idx in range(4)],
+    )
+    batch_native_refresh.mark_pending(state_dir, root, reason="wiki-integration:threshold")
+    calls = []
+
+    def build_workspace(**kwargs):
+        calls.append(("build", kwargs["workspace_id"]))
+        return {"ok": True, "workspace_id": kwargs["workspace_id"]}
+
+    def finalize_workspace(*, state_dir, reason):
+        calls.append(("finalize", reason))
+        history = batch_native_refresh.active_workspace_history_path(state_dir)
+        with history.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"reason": reason, "current": {"workspace_id": "candidate"}}) + "\n")
+        return {"schema_version": 1, "workspace_id": "candidate", "status": "active"}
+
+    def restart_service(*, state_dir):
+        calls.append(("restart", str(state_dir)))
+        return {"service": "llm-wiki-native", "status": "ok"}
+
+    def query_smoke(*, state_dir, active):
+        calls.append(("smoke", str(state_dir), active["workspace_id"]))
+        return {"ok": True}
+
+    result = batch_native_refresh.refresh_cutover(
+        root=root,
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        workspace_id="candidate",
+        embedding_profile="conservative",
+        build_workspace=build_workspace,
+        finalize_workspace=finalize_workspace,
+        restart_service=restart_service,
+        query_smoke=query_smoke,
+        required_unchanged_paths=[watched_dir],
+    )
+
+    entries = batch_native_refresh.pending_entries(state_dir)
+    assert result["refresh_kind"] == "incremental"
+    assert result["next_refresh_kind_after_success"] == "full-rebuild"
+    assert result["policy_native_pending_marked_count"] == 1
+    assert result["policy_native_pending"]["reason"] == batch_native_refresh.FULL_REBUILD_DUE_REASON
+    assert result["status_after"]["pending_count"] == 1
+    assert [entry["reason"] for entry in entries] == [batch_native_refresh.FULL_REBUILD_DUE_REASON]
+    assert calls == [
+        ("build", "candidate"),
+        ("finalize", "native graph incremental refresh: cutover"),
+        ("restart", str(state_dir)),
+        ("smoke", str(state_dir), "candidate"),
+    ]
+
+
+def test_refresh_prepare_only_defaults_to_vector_cache_and_full_rebuild_when_policy_due(tmp_path, monkeypatch) -> None:
+    state_dir = tmp_path / "wikigraph" / "state"
+    root = tmp_path / "wiki"
+    workspace_root = state_dir / "native_zvec" / "workspaces"
+    _append_native_history(
+        state_dir,
+        [f"native graph incremental refresh: cutover {idx}" for idx in range(5)],
+    )
+    batch_native_refresh.mark_pending(state_dir, root, reason="wiki-integration:threshold")
+    calls = []
+
+    def fake_build_prepared_workspace(*, root, state_dir, workspace_root, workspace_id, embedding_profile, fill_missing_vectors):
+        calls.append((workspace_id, embedding_profile, fill_missing_vectors))
+        return {"ok": True, "workspace_id": workspace_id}
+
+    monkeypatch.setattr(batch_native_refresh, "build_prepared_workspace", fake_build_prepared_workspace)
+
+    result = batch_native_refresh.refresh_prepare_only(
+        root=root,
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        workspace_id="candidate",
+        embedding_profile="conservative",
+    )
+
+    assert result["refresh_kind"] == "full-rebuild"
+    assert result["fill_missing_vectors"] is True
+    assert result["vector_cache_required"] is True
+    assert calls == [("candidate", "conservative", True)]

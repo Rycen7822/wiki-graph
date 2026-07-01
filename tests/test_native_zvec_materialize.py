@@ -193,6 +193,48 @@ def test_audit_reads_existing_build_report(tmp_path, capsys) -> None:
     assert printed["build_report_found"] is True
 
 
+def test_build_reuses_existing_candidate_when_state_fingerprints_match(tmp_path, monkeypatch) -> None:
+    state = _sample_state(tmp_path)
+    workspace_root = tmp_path / "native_zvec" / "workspaces"
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    args = SimpleNamespace(
+        root=wiki_root,
+        state_dir=state,
+        workspace_root=workspace_root,
+        workspace_id="native-test",
+        embedding_profile="conservative",
+        prepare_only=True,
+        fill_missing_vectors=False,
+        reuse_unchanged_workspace=False,
+    )
+    first = native_zvec_materialize.build(args)
+
+    def fail_build_workspace_from_state(*_args, **_kwargs):
+        raise AssertionError("matching input fingerprints should reuse the existing candidate report")
+
+    monkeypatch.setattr(native_zvec_materialize, "build_workspace_from_state", fail_build_workspace_from_state)
+    reused = native_zvec_materialize.build(
+        SimpleNamespace(
+            root=wiki_root,
+            state_dir=state,
+            workspace_root=workspace_root,
+            workspace_id="native-test",
+            embedding_profile="conservative",
+            prepare_only=True,
+            fill_missing_vectors=False,
+            reuse_unchanged_workspace=True,
+        )
+    )
+
+    assert first["reused_existing_workspace"] is False
+    assert reused["ok"] is True
+    assert reused["workspace_id"] == "native-test"
+    assert reused["reused_existing_workspace"] is True
+    assert reused["reuse_reason"] == "state_input_fingerprints_match"
+    assert reused["input_fingerprints"] == first["input_fingerprints"]
+
+
 def test_preflight_reports_missing_state_inputs_without_workspace_writes(tmp_path, capsys) -> None:
     state = tmp_path / "state"
     workspace_root = tmp_path / "native_zvec" / "workspaces"

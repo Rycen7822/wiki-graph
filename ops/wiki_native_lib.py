@@ -80,7 +80,12 @@ from ops.wiki_native_raw_sections import (
 )
 from ops.wiki_native_query_events import add_query_event, save_evidence_pack
 from ops.wiki_native_state import ensure_state_dirs
-from ops.wiki_native_validation import secret_hits, validate_wiki
+from ops.wiki_native_validation import (
+    raw_clip_map_snapshot_count,
+    secret_hits,
+    sync_raw_clip_map_snapshot,
+    validate_wiki,
+)
 
 __all__ = [
     "COMPILED_DIR_TYPES",
@@ -127,6 +132,7 @@ __all__ = [
     "parse_frontmatter",
     "print_json",
     "raw_clip_files",
+    "raw_clip_map_snapshot_count",
     "raw_section_query_for_kind",
     "read_text",
     "record_pending_wiki_integration_failure",
@@ -141,6 +147,7 @@ __all__ = [
     "select_section_similarity_edges",
     "sha256_text",
     "structured_heading_warnings",
+    "sync_raw_clip_map_snapshot",
     "validate_wiki",
     "validation_freshness_context",
     "validation_report_is_fresh",
