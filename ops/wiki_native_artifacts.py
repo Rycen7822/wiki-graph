@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import (
+from llm_wiki_native.source_docs import (
     WikiDoc,
     collect_source_docs,
     display_scalar,

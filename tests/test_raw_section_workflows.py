@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT))
 from support import sample_wiki, write  # noqa: E402
 from ops.wiki_native_artifacts import build_seed_edges  # noqa: E402
 from ops.wiki_native_artifacts import extract_method_atoms  # noqa: E402
-from ops.wiki_native_docs import generated_docs_from_state  # noqa: E402
+from llm_wiki_native.source_docs import generated_docs_from_state  # noqa: E402
 from ops.wiki_native_query_response import expand_native_data_response_with_section_neighbors  # noqa: E402
 from ops.wiki_native_query_response import filter_native_data_response_by_section_kind  # noqa: E402
 from ops.wiki_native_raw_section_extract import extract_raw_sections  # noqa: E402

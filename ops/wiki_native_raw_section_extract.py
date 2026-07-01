@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ops.wiki_native_docs import collect_source_docs, generated_doc_filename, markdown_sections
+from llm_wiki_native.source_docs import collect_source_docs, generated_doc_filename, markdown_sections
 from ops.wiki_native_raw_sections import raw_section_specs_for_heading
 from ops.wiki_native_state import ensure_state_dirs
 

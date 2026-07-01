@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from ops.wiki_native_docs import (
+from llm_wiki_native.source_docs import (
     COMPILED_DIR_TYPES,
     META_FILES,
     collect_source_docs,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
@@ -38,7 +39,7 @@ FACADE_OWNER_SYMBOLS = {
     "ops.wiki_native_artifacts": ("build_seed_edges", "extract_method_atoms", "resolve_source"),
     "ops.wiki_native_cli": ("common_paths_parser", "print_json", "release_process_memory"),
     "ops.wiki_native_custom_kg_payload": ("build_custom_kg_payload", "custom_kg_doc_description", "custom_kg_entity_type"),
-    "ops.wiki_native_docs": (
+    "llm_wiki_native.source_docs": (
         "COMPILED_DIR_TYPES",
         "WikiDoc",
         "collect_source_docs",
@@ -103,6 +104,23 @@ FACADE_OWNER_ALIASES = (
     ("ops.batch_native_refresh", "pending_native_refresh_status", "status"),
 )
 
+
+
+def test_native_package_does_not_import_ops_modules() -> None:
+    offenders: list[str] = []
+    for path in sorted((ROOT / "llm_wiki_native").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "ops" or alias.name.startswith("ops."):
+                        offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:{alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "ops" or module.startswith("ops."):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:{module}")
+
+    assert offenders == []
 
 
 def test_native_query_report_entrypoint_remains_available() -> None:
