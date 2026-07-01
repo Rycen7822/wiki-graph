@@ -129,6 +129,7 @@ Which wrapper gate catches failed verification before mark-pending?
 """
 
 
+@pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
@@ -170,6 +171,7 @@ def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docli
     assert wiki_root_machine_pollution(root) == []
 
 
+@pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_are_sidecars(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
@@ -274,6 +276,7 @@ def test_raw_fast_evidence_bundle_localize_figures_resolves_source_root_relative
     assert not (root / "raw" / "images").exists()
 
 
+@pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_localize_figures_renders_pdf_source_figures_to_png(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -308,6 +311,7 @@ def test_raw_fast_evidence_bundle_localize_figures_renders_pdf_source_figures_to
     assert not (root / "raw" / "images").exists()
 
 
+@pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_image_tex_title(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -658,6 +662,7 @@ def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: P
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
 
 
+@pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_refuses_workdir_inside_wiki_root(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"

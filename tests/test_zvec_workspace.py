@@ -278,6 +278,7 @@ def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
         )
 
 
+@pytest.mark.requires_zvec
 def test_real_zvec_accepts_encoded_doc_id_with_punctuation(tmp_path) -> None:
     sys.modules.pop("llm_wiki_native.storage.zvec_workspace", None)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
@@ -316,6 +317,7 @@ def test_real_zvec_accepts_encoded_doc_id_with_punctuation(tmp_path) -> None:
     assert hits[0].fields["record_id"] == "raw/section:doc-a:method"
 
 
+@pytest.mark.requires_zvec
 def test_real_zvec_accepts_long_record_id_with_short_stable_doc_id(tmp_path) -> None:
     sys.modules.pop("llm_wiki_native.storage.zvec_workspace", None)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
