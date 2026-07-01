@@ -104,54 +104,52 @@ python3 -m ops.audit_native_production_refs --repo-root .
 
 ## Validation gates for changes
 
-For changes touching native refresh, wiki integration, query/runtime code, or retired-surface audit guards, run the focused repo tests:
+For broad changes touching native refresh, wiki integration, query/runtime code, retired-surface audit guards, or test ownership, run the repository test suite from the repo root:
 
 ```bash
-python3 -m pytest \
-  tests/test_api_server.py \
-  tests/test_api_server_main.py \
-  tests/test_artifacts.py \
-  tests/test_batch_native_refresh.py \
-  tests/test_cli_build.py \
-  tests/test_contracts.py \
-  tests/test_custom_kg_manifest_workflows.py \
-  tests/test_custom_kg_materialize.py \
-  tests/test_embedding_answer_clients.py \
-  tests/test_native_query_modes.py \
-  tests/test_native_query_report.py \
-  tests/test_native_zvec_materialize.py \
-  tests/test_query_engine.py \
-  tests/test_raw_fast_workflows.py \
-  tests/test_raw_section_workflows.py \
-  tests/test_section_similarity_workflows.py \
-  tests/test_sqlite_graph.py \
-  tests/test_sqlite_vectors.py \
-  tests/test_sqlite_workspace.py \
-  tests/test_vector_cache.py \
-  tests/test_wiki_integration_workflows.py \
-  tests/test_wiki_native_docs_workflows.py \
-  tests/test_wiki_native_jsonl.py \
-  tests/test_wiki_native_lib.py \
-  tests/test_wiki_search_native_backend.py \
-  tests/test_zvec_workspace.py \
-  -q
-```
-
-Run the unified test suite from the repository-root `tests/` directory:
-
-```bash
-python3 -m pytest tests -q
-```
-
-Run syntax and whitespace checks before committing:
-
-```bash
+python3 -m compileall -q tests
+python3 -m pytest --collect-only -q tests
+PYTHONPATH=. python3 -m pytest tests -q -rs --durations=20
 python3 -m compileall -q llm_wiki_native ops tests
-
 git diff --check
 ```
 
-A bare `python3 -m pytest -q` from the repo root may collect vendored/reference packages that need separate environment setup. Prefer the focused gates above unless you are intentionally testing those packages too.
+For smaller owner-family checks, use the current split test files instead of the retired oversized aggregators:
+
+```bash
+python3 -m pytest -q \
+  tests/test_batch_native_refresh.py \
+  tests/test_batch_native_refresh_smoke.py \
+  tests/test_batch_native_refresh_preflight.py \
+  tests/test_batch_native_refresh_cutover.py \
+  tests/test_batch_native_refresh_policy.py
+
+python3 -m pytest -q -rs \
+  tests/test_raw_fast_workflows.py \
+  tests/test_raw_fast_evidence_bundle.py \
+  tests/test_raw_fast_closeout.py
+
+python3 -m pytest -q \
+  tests/test_wiki_integration_workflows.py \
+  tests/test_wiki_integration_plan.py \
+  tests/test_wiki_integration_bridge.py \
+  tests/test_batch_wiki_integration_cli.py \
+  tests/test_batch_wiki_integration_prompt.py \
+  tests/test_batch_wiki_integration_runner.py
+
+python3 -m pytest -q \
+  tests/test_wiki_native_lib.py \
+  tests/test_wiki_native_production_refs.py \
+  tests/test_wiki_native_facade_contract.py \
+  tests/test_wiki_native_env_paths.py \
+  tests/test_wiki_native_ledger_migration.py
+
+python3 -m pytest -q -rs \
+  tests/test_zvec_workspace.py \
+  tests/test_zvec_workspace_real.py
+```
+
+A bare `python3 -m pytest -q` from the repo root may collect vendored/reference packages that need separate environment setup. Prefer the focused `tests/` gates above unless you are intentionally testing those packages too.
 
 ## Safety rules
 
