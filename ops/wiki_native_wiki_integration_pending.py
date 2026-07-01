@@ -13,7 +13,6 @@ from ops.wiki_native_wiki_checks import now_stamp
 PENDING_WIKI_INTEGRATION_LEDGER = "pending_wiki_integration.json"
 DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD = 10
 WIKI_INTEGRATION_ACTIONABLE_STATUSES = {"raw_saved"}
-WIKI_INTEGRATION_REVIEW_STATUSES = {"needs_review"}
 WIKI_INTEGRATION_TERMINAL_STATUSES = {"failed", "skipped_duplicate"}
 PENDING_WIKI_INTEGRATION_LEDGER_FIELDS = {
     "version",
