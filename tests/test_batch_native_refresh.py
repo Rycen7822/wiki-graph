@@ -173,6 +173,17 @@ def _fake_cutover_hooks(
     return build_workspace, finalize_workspace, restart_service, query_smoke
 
 
+def test_refresh_cutover_has_named_workflow_seams() -> None:
+    expected_helpers = {
+        "_validate_refresh_cutover_preconditions",
+        "_skipped_refresh_cutover_result",
+        "_execute_refresh_cutover",
+        "_refresh_cutover_success_result",
+    }
+
+    assert {name for name in expected_helpers if callable(getattr(batch_native_refresh, name, None))} == expected_helpers
+
+
 def test_refresh_prepare_only_updates_prepared_pointer_without_active_or_clear(tmp_path, capsys, monkeypatch) -> None:
     workdir = tmp_path / "wikigraph"
     root = tmp_path / "wiki"
