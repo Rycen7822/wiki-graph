@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
-import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,12 +22,10 @@ from starlette.routing import Route
 from llm_wiki_native.answer import AnswerGenerator, NativeAnswerConfig, NativeAnswerGenerator
 from llm_wiki_native.contracts import DEFAULT_NATIVE_PORT
 from llm_wiki_native.embedding import EmbeddingProvider, NativeEmbedding, NativeEmbeddingConfig
+from llm_wiki_native.query_contract import engine_query_kwargs, query_mode, query_vector, response_max_chars, response_profile
 from llm_wiki_native.retrieval.context import assemble_context
 
 MAX_REQUEST_BODY_BYTES = 1_000_000
-MAX_QUERY_VECTOR_DIM = 8_192
-MAX_TOP_K = 100
-MAX_NEIGHBOR_LIMIT = 50
 EMBEDDING_ENV_KEYS = (
     "LLM_WIKI_NATIVE_EMBEDDING_BASE_URL",
     "LLM_WIKI_NATIVE_EMBEDDING_MODEL",
@@ -50,65 +47,27 @@ class RequestEntityTooLarge(ValueError):
     pass
 
 
-def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int, field: str) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be an integer") from exc
-    if parsed < minimum:
-        return minimum
-    if parsed > maximum:
-        return maximum
-    return parsed
-
-
-def _query_vector(value: Any) -> list[float]:
-    if not isinstance(value, list):
-        raise ValueError("query_vector must be a list of finite numbers")
-    if not value:
-        raise ValueError("query_vector must not be empty")
-    if len(value) > MAX_QUERY_VECTOR_DIM:
-        raise ValueError(f"query_vector exceeds max dimension {MAX_QUERY_VECTOR_DIM}")
-    vector: list[float] = []
-    for item in value:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            raise ValueError("query_vector must contain only finite numbers")
-        numeric = float(item)
-        if not math.isfinite(numeric):
-            raise ValueError("query_vector must contain only finite numbers")
-        vector.append(numeric)
-    return vector
-
-
 def _query_kwargs(
     payload: dict[str, Any],
     *,
     embedding_provider: EmbeddingProvider | None = None,
     default_workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    workspace_id = payload.get("workspace_id") or default_workspace_id
-    if not workspace_id:
-        raise ValueError("workspace_id is required")
+    mode = query_mode(payload)
     query = str(payload.get("query", ""))
-    mode = str(payload.get("mode", "mix"))
     if "query_vector" in payload:
-        query_vector = _query_vector(payload["query_vector"])
+        normalized_query_vector = query_vector(payload["query_vector"])
     elif mode == "bypass":
-        query_vector = []
+        normalized_query_vector = []
     elif embedding_provider is not None:
-        query_vector = _query_vector(embedding_provider.embed_query(query))
+        normalized_query_vector = query_vector(embedding_provider.embed_query(query))
     else:
         raise ValueError("query_vector is required when embedding provider is not configured")
-    return {
-        "workspace_id": str(workspace_id),
-        "query": query,
-        "query_vector": query_vector,
-        "mode": mode,
-        "top_k": _bounded_int(payload.get("top_k", 20), default=20, minimum=1, maximum=MAX_TOP_K, field="top_k"),
-        "record_types": tuple(payload.get("record_types", ("entity", "relationship", "chunk"))),
-        "section_kind": str(payload["section_kind"]) if payload.get("section_kind") else None,
-        "neighbor_limit": _bounded_int(payload.get("neighbor_limit", 5), default=5, minimum=0, maximum=MAX_NEIGHBOR_LIMIT, field="neighbor_limit"),
-    }
+    return engine_query_kwargs(
+        payload,
+        normalized_query_vector=normalized_query_vector,
+        default_workspace_id=default_workspace_id,
+    )
 
 
 async def _json_payload(request: Request) -> dict[str, Any]:
@@ -215,18 +174,18 @@ def create_app(
             return unauthorized()
         payload = await _json_payload(request)
         result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
-        max_chars = _bounded_int(payload.get("max_chars_per_block", 1200), default=1200, minimum=1, maximum=20_000, field="max_chars_per_block")
-        response_profile = str(payload.get("response_profile", "standard"))
-        return JSONResponse(assemble_context(result, max_chars_per_block=max_chars, response_profile=response_profile))
+        max_chars = response_max_chars(payload)
+        profile = response_profile(payload)
+        return JSONResponse(assemble_context(result, max_chars_per_block=max_chars, response_profile=profile))
 
     async def query(request: Request) -> JSONResponse:
         if not _authorized(request, api_key):
             return unauthorized()
         payload = await _json_payload(request)
         result = await run_in_threadpool(engine.query, **_query_kwargs(payload, embedding_provider=embedding_provider, default_workspace_id=default_workspace_id))
-        max_chars = _bounded_int(payload.get("max_chars_per_block", 1200), default=1200, minimum=1, maximum=20_000, field="max_chars_per_block")
-        response_profile = str(payload.get("response_profile", "standard"))
-        context = assemble_context(result, max_chars_per_block=max_chars, response_profile=response_profile)
+        max_chars = response_max_chars(payload)
+        profile = response_profile(payload)
+        context = assemble_context(result, max_chars_per_block=max_chars, response_profile=profile)
         mode = str(result.get("trace", {}).get("mode", payload.get("mode", "mix")))
         query_text = str(payload.get("query", ""))
         if mode == "bypass":

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
-import math
 import os
 from pathlib import Path
 import shlex
@@ -17,6 +16,9 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 import urllib.request
+
+from llm_wiki_native.contracts import DEFAULT_QUERY_MODE
+from llm_wiki_native.query_contract import query_vector as normalize_native_query_vector
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
 NATIVE_INCREMENTAL_REFRESH_THRESHOLD = 5
@@ -432,7 +434,7 @@ def query_smoke_request(
     url: str,
     *,
     query: str,
-    mode: str = "mix",
+    mode: str = DEFAULT_QUERY_MODE,
     workspace_id: str | None = None,
     query_vector: list[float] | None = None,
     query_vector_source: str | None = None,
@@ -492,17 +494,12 @@ def query_smoke_request(
 
 
 def normalize_query_vector(value: Any) -> list[float]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("query_vector must be a non-empty JSON list")
-    vector: list[float] = []
-    for item in value:
-        if type(item) not in (int, float):
-            raise ValueError("query_vector must contain only finite numbers")
-        number = float(item)
-        if not math.isfinite(number):
-            raise ValueError("query_vector must contain only finite numbers")
-        vector.append(number)
-    return vector
+    try:
+        return normalize_native_query_vector(value)
+    except ValueError as exc:
+        if str(exc) in {"query_vector must be a list of finite numbers", "query_vector must not be empty"}:
+            raise ValueError("query_vector must be a non-empty JSON list") from exc
+        raise
 
 
 def parse_query_vector_json(text: str, *, source: str) -> list[float]:
@@ -644,7 +641,7 @@ def cutover_guard_report(
     restart_command: str | None,
     smoke_url: str | None,
     smoke_query: str | None,
-    smoke_mode: str = "mix",
+    smoke_mode: str = DEFAULT_QUERY_MODE,
     required_unchanged_paths: list[Path] | None = None,
     check_paths: bool = True,
 ) -> dict[str, Any]:

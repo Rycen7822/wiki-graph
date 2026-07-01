@@ -64,6 +64,7 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
                 "query_vector": [1.0, 0.0],
                 "section_kind": "methodology",
                 "neighbor_limit": 2,
+                "response_profile": "compact",
             },
             {
                 "id": "q2",
@@ -114,12 +115,14 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
         "query_vector_dim": 2,
         "section_kind": "methodology",
         "neighbor_limit": 2,
+        "response_profile": "compact",
     }
     assert calls[0]["url"] == "http://127.0.0.1:19637/query/data"
     assert calls[0]["payload"]["workspace_id"] == "native-test"
     assert calls[0]["payload"]["query_vector"] == [1.0, 0.0]
     assert calls[0]["payload"]["section_kind"] == "methodology"
     assert calls[0]["payload"]["neighbor_limit"] == 2
+    assert calls[0]["payload"]["response_profile"] == "compact"
     assert calls[1]["payload"]["mode"] == "naive"
 
 

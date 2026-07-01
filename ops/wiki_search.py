@@ -4,6 +4,8 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
+from llm_wiki_native.contracts import DEFAULT_NEIGHBOR_LIMIT, DEFAULT_QUERY_MODE, DEFAULT_TOP_K, RESPONSE_PROFILES, SUPPORTED_QUERY_MODES
+from llm_wiki_native.query_contract import STRUCTURED_QUERY_SUITE_KEYS
 from ops.wiki_native_lib import (
     add_query_event,
     common_paths_parser,
@@ -66,8 +68,8 @@ def run_query(args, query: str) -> dict:
 def main() -> int:
     parser = common_paths_parser("Query the llm-wiki native service and optionally save an evidence pack")
     parser.add_argument("query", nargs="?")
-    parser.add_argument("--mode", default="mix", choices=["mix", "naive", "bypass"])
-    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--mode", default=DEFAULT_QUERY_MODE, choices=sorted(SUPPORTED_QUERY_MODES))
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument(
         "--section-kind",
         choices=RAW_NOTE_CONTRACT_SECTION_KINDS,
@@ -75,27 +77,15 @@ def main() -> int:
     )
     parser.add_argument("--save-evidence-pack", action="store_true")
     parser.add_argument("--data-only", action="store_true", help="Use /query/data retrieval without LLM answer generation")
-    parser.add_argument("--response-profile", choices=["compact", "standard", "debug"], help="Native response profile for /query/data or /query envelopes")
+    parser.add_argument("--response-profile", choices=sorted(RESPONSE_PROFILES), help="Native response profile for /query/data or /query envelopes")
     parser.add_argument("--native-workspace", help="Workspace id override for native API queries")
     parser.add_argument("--query-vector", help="JSON array query vector forwarded to native API queries")
-    parser.add_argument("--neighbor-k", type=int, default=5, help="Max native semantic neighbor records per hit")
+    parser.add_argument("--neighbor-k", type=int, default=DEFAULT_NEIGHBOR_LIMIT, help="Max native semantic neighbor records per hit")
     parser.add_argument("--query-suite", type=Path, help="plain query-list JSONL with one query/q field per row")
     args = parser.parse_args()
     if args.query_suite:
         rows = []
         plain_query_keys = {"query", "q"}
-        structured_suite_keys = {
-            "mode",
-            "top_k",
-            "query_vector",
-            "record_types",
-            "section_kind",
-            "neighbor_limit",
-            "max_chars_per_block",
-            "response_profile",
-            "must_include_paths",
-            "must_include_entities",
-        }
         for line in args.query_suite.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -103,7 +93,7 @@ def main() -> int:
             if not isinstance(item, dict):
                 raise ValueError("wiki_search.py --query-suite accepts plain query-list JSONL objects")
             extra_keys = set(item) - plain_query_keys
-            if extra_keys & structured_suite_keys:
+            if extra_keys & STRUCTURED_QUERY_SUITE_KEYS:
                 raise ValueError(
                     "structured native query suites must run through python -m ops.collect_native_query_report; "
                     "wiki_search.py --query-suite accepts plain query-list JSONL only"

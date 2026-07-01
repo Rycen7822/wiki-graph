@@ -13,6 +13,7 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+from llm_wiki_native.query_contract import query_request_metadata, query_suite_payload
 from llm_wiki_native.reports import validate_query_suite_row  # noqa: E402
 
 Timer = Callable[[], float]
@@ -64,30 +65,11 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout: int) -> dict[str, 
 
 
 def _query_payload(row: dict[str, Any], *, workspace_id: str | None) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "query": row["query"],
-        "mode": row["mode"],
-        "top_k": int(row["top_k"]),
-    }
-    if workspace_id:
-        payload["workspace_id"] = workspace_id
-    for key in ("query_vector", "section_kind", "record_types", "neighbor_limit", "max_chars_per_block"):
-        if key in row:
-            payload[key] = row[key]
-    return payload
+    return query_suite_payload(row, workspace_id=workspace_id)
 
 
 def _request_metadata(row: dict[str, Any]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "top_k": int(row["top_k"]),
-    }
-    vector = row.get("query_vector")
-    if isinstance(vector, list):
-        metadata["query_vector_dim"] = len(vector)
-    for key in ("section_kind", "record_types", "neighbor_limit", "max_chars_per_block"):
-        if key in row:
-            metadata[key] = row[key]
-    return metadata
+    return query_request_metadata(row)
 
 
 def _has_explicit_query_vector(row: dict[str, Any]) -> bool:
