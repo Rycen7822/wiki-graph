@@ -50,6 +50,52 @@ def test_native_embedding_posts_openai_compatible_request(monkeypatch) -> None:
     assert body == {"model": "embed-small", "input": "alpha"}
 
 
+def test_native_embedding_caches_exact_query_vectors(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append({"request": request, "timeout": timeout})
+        return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = NativeEmbedding(
+        NativeEmbeddingConfig(
+            base_url="https://embedding.local/v1",
+            model="embed-small",
+            api_key="secret",
+            cache_size=4,
+        )
+    )
+
+    first = provider.embed_query("alpha")
+    first[0] = 99.0
+
+    assert provider.embed_query("alpha") == [0.25, 0.75]
+    assert len(calls) == 1
+
+
+def test_native_embedding_cache_can_be_disabled(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append({"request": request, "timeout": timeout})
+        return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = NativeEmbedding(
+        NativeEmbeddingConfig(
+            base_url="https://embedding.local/v1",
+            model="embed-small",
+            api_key="secret",
+            cache_size=0,
+        )
+    )
+
+    assert provider.embed_query("alpha") == [0.25, 0.75]
+    assert provider.embed_query("alpha") == [0.25, 0.75]
+    assert len(calls) == 2
+
+
 def test_native_embedding_config_from_env_requires_endpoint_model_and_key() -> None:
     with pytest.raises(ValueError, match="BASE_URL"):
         NativeEmbeddingConfig.from_env({})
@@ -72,6 +118,7 @@ def test_native_embedding_config_from_env_accepts_compatible_binding_names() -> 
             "EMBEDDING_BINDING_API_KEY": "secret",
             "EMBEDDING_TIMEOUT": "77",
             "EMBEDDING_DIM": "1024",
+            "EMBEDDING_CACHE_SIZE": "17",
         }
     )
 
@@ -80,6 +127,7 @@ def test_native_embedding_config_from_env_accepts_compatible_binding_names() -> 
     assert config.api_key == "secret"
     assert config.timeout_seconds == 77.0
     assert config.embedding_dim == 1024
+    assert config.cache_size == 17
     assert "secret" not in repr(config)
 
 

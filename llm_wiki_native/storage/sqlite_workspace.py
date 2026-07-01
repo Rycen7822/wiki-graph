@@ -338,9 +338,13 @@ class SQLiteWorkspace:
                 """
                 SELECT edge_type, src_id, tgt_id, weight, payload_json
                 FROM edge
-                WHERE workspace_id = ? AND (src_id = ? OR tgt_id = ?)
+                WHERE workspace_id = ? AND src_id = ?
+                UNION ALL
+                SELECT edge_type, src_id, tgt_id, weight, payload_json
+                FROM edge
+                WHERE workspace_id = ? AND tgt_id = ? AND src_id <> ?
                 """,
-                (workspace_id, node_id, node_id),
+                (workspace_id, node_id, workspace_id, node_id, node_id),
             ).fetchall()
         results: list[dict[str, Any]] = []
         for row in rows:

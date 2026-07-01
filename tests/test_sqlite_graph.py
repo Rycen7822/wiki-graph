@@ -47,6 +47,18 @@ def test_graph_index_preserves_reverse_directed_edges(tmp_path) -> None:
     ]
 
 
+def test_graph_index_does_not_duplicate_self_loop_neighbors(tmp_path) -> None:
+    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db.create_workspace("native-test", "manifest-hash")
+    db.put_edge("native-test", "self", "doc:a", "doc:a", 1.0, {"source": "loop"})
+
+    results = db.neighbors("native-test", "doc:a")
+
+    assert [(item["src_id"], item["tgt_id"], item["neighbor_id"], item["payload"]["source"]) for item in results] == [
+        ("doc:a", "doc:a", "doc:a", "loop")
+    ]
+
+
 def test_sqlite_workspace_enables_pragmas_and_neighbor_indexes(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
 
