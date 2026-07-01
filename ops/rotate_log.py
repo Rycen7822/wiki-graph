@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
-from ops.wiki_native_lib import common_paths_parser, now_stamp, print_json, read_text
+from llm_wiki_native.source_docs import read_text
+from ops.wiki_native_cli import common_paths_parser, print_json
+from ops.wiki_native_wiki_checks import now_stamp
 
 
 def main() -> int:

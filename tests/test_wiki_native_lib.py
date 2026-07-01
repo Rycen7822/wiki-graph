@@ -106,6 +106,33 @@ FACADE_OWNER_ALIASES = (
 
 
 
+def test_leaf_entrypoint_wrappers_import_owner_modules_directly() -> None:
+    wrapper_paths = [
+        "ops/audit_raw_note_sections.py",
+        "ops/build_seed_edges.py",
+        "ops/extract_method_atoms.py",
+        "ops/extract_raw_sections.py",
+        "ops/parse_wiki.py",
+        "ops/review_connections.py",
+        "ops/rotate_log.py",
+        "ops/select_section_similarity_edges.py",
+    ]
+    offenders: list[str] = []
+    for rel_path in wrapper_paths:
+        path = ROOT / rel_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "ops.wiki_native_lib":
+                names = ",".join(alias.name for alias in node.names)
+                offenders.append(f"{rel_path}:{node.lineno}:{names}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "ops.wiki_native_lib":
+                        offenders.append(f"{rel_path}:{node.lineno}:{alias.name}")
+
+    assert offenders == []
+
+
 def test_native_package_does_not_import_ops_modules() -> None:
     offenders: list[str] = []
     for path in sorted((ROOT / "llm_wiki_native").rglob("*.py")):

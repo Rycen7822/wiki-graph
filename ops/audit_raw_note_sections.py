@@ -7,12 +7,9 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from ops.wiki_native_lib import (
-    audit_raw_note_section_contracts,
-    common_paths_parser,
-    ensure_state_dirs,
-    print_json,
-)
+from ops.wiki_native_cli import common_paths_parser, print_json
+from ops.wiki_native_state import ensure_state_dirs
+from ops.wiki_native_wiki_checks import audit_raw_note_section_contracts
 
 
 def main() -> int:

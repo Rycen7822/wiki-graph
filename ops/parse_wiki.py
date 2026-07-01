@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from ops.wiki_native_lib import collect_source_docs, common_paths_parser, print_json
+from llm_wiki_native.source_docs import collect_source_docs
+from ops.wiki_native_cli import common_paths_parser, print_json
 
 
 def main() -> int:
