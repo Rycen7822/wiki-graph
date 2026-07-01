@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from ops.wiki_native_lib import build_seed_edges, common_paths_parser, print_json
+from ops.wiki_native_artifacts import build_seed_edges
+from ops.wiki_native_cli import common_paths_parser, print_json
 
 
 def main() -> int:

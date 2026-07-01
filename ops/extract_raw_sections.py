@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from ops.wiki_native_lib import common_paths_parser, extract_raw_sections, print_json
+from ops.wiki_native_cli import common_paths_parser, print_json
+from ops.wiki_native_raw_section_extract import extract_raw_sections
 
 
 def main() -> int:

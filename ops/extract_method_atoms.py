@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-from ops.wiki_native_lib import common_paths_parser, extract_method_atoms, print_json
+from ops.wiki_native_artifacts import extract_method_atoms
+from ops.wiki_native_cli import common_paths_parser, print_json
 
 
 def main() -> int:

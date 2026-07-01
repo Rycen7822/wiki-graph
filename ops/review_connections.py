@@ -2,7 +2,8 @@
 import json
 from pathlib import Path
 
-from ops.wiki_native_lib import common_paths_parser, ensure_state_dirs, print_json
+from ops.wiki_native_cli import common_paths_parser, print_json
+from ops.wiki_native_state import ensure_state_dirs
 
 
 def main() -> int:

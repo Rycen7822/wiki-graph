@@ -6,14 +6,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ops.wiki_native_lib import (
-    common_paths_parser,
-    ensure_state_dirs,
-    jsonl_read,
-    jsonl_write,
-    print_json,
-    select_section_similarity_edges,
-)
+from ops.wiki_native_cli import common_paths_parser, print_json
+from ops.wiki_native_jsonl import jsonl_read, jsonl_write
+from ops.wiki_native_section_similarity import select_section_similarity_edges
+from ops.wiki_native_state import ensure_state_dirs
 
 DEFAULT_PAIR_KINDS = [
     "methodology:methodology",
