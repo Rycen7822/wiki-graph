@@ -1,0 +1,400 @@
+import sys
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
+sys.path.insert(0, str(ROOT))
+
+from support import sample_wiki, write  # noqa: E402
+from ops import raw_fast_closeout  # noqa: E402
+from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
+from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
+
+def _assert_timing_step(payload: dict, step: str) -> None:
+    timings = payload["timings"]
+    entry = timings["steps"][step]
+    assert isinstance(entry["elapsed_seconds"], (int, float))
+    assert entry["elapsed_seconds"] >= 0
+
+def _structured_raw_fast_note(title: str, source: str) -> str:
+    return f"""---
+title: \"{title}\"
+source: \"{source}\"
+capture_route: \"test synthetic route\"
+captured: \"2026-06-06 07:00 CST (+0800)\"
+---
+
+## 一句话总结
+
+Synthetic take.
+
+## 论文摘要（中文）
+
+Synthetic abstract.
+
+## Motivation
+
+Synthetic motivation.
+
+## Methodology
+
+Formula evidence is integrated here: Eq. (1) defines $loss = x + y$ and the symbols are explained in the method narrative.
+
+## 关键实验结果 / 作者结论
+
+Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.
+
+## 对未来研究的启发
+
+Future work can reuse the verification harness.
+
+## 可能的局限
+
+The tiny fixture is a synthetic limitation, not a real paper.
+
+## 可继续追问的问题
+
+Which wrapper gate catches failed verification before mark-pending?
+"""
+def _raw_fast_closeout_native_args(tmp_path: Path, mode: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        root=tmp_path / "wiki",
+        state_dir=tmp_path / "work" / "wikigraph" / "state",
+        workdir=ROOT,
+        timeout=17,
+        refresh_timeout=23,
+        native_refresh_mode=mode,
+    )
+def test_raw_fast_closeout_main_has_named_workflow_seams() -> None:
+    expected_helpers = {
+        "_run_closeout_mark_and_cleanup",
+        "_run_closeout_final_verify",
+        "_run_closeout_downstream_status",
+        "_successful_closeout_output",
+    }
+
+    assert {name for name in expected_helpers if callable(getattr(raw_fast_closeout, name, None))} == expected_helpers
+def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010109_Tiny-Wrapper-Paper.md"
+    title = "Tiny Wrapper Paper"
+    source = "https://example.test/tiny-wrapper-paper.pdf"
+    write(root / raw_rel, _structured_raw_fast_note(title, source))
+    fetch_tmp = tmp_path / "fetch-tmp"
+    write(fetch_tmp / "scratch.txt", "temporary evidence")
+    write(
+        fetch_tmp / "evidence_bundle.json",
+        json.dumps(
+            {
+                "ok": True,
+                "kind": "direct-pdf",
+                "source_url": source,
+                "title_guess": title,
+                "warnings": [],
+                "files": {"pdf": "paper.pdf", "paper_digest": "paper_digest.json", "localized_figures": "localized_figures.json"},
+                "timings": {"total_seconds": 12.5, "steps": {"fetch_pdf": {"elapsed_seconds": 1.25}}},
+            }
+        ),
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            title,
+            "--source-id",
+            source,
+            "--pattern",
+            title,
+            "--pattern",
+            source,
+            "--topic-hint",
+            "wrapper-test",
+            "--resource-status-summary",
+            "synthetic resources checked",
+            "--tmp",
+            str(fetch_tmp),
+            "--auto-integrate",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["raw_fast_ok"] is True
+    assert payload["pre_verify"]["duplicate_strict_ok"] is True
+    assert payload["control_scan"]["control_count"] == 0
+    assert payload["marked"]["raw_path"] == raw_rel
+    assert payload["wiki_integration"]["pending_count"] == 1
+    assert payload["wiki_integration"]["should_integrate"] is False
+    assert payload["native_refresh_status"]["blocked_by_pending_wiki_integration"] is True
+    timing_steps = set(payload["timings"]["steps"])
+    assert {"pre_verify", "mark_pending"} <= timing_steps
+    assert payload["evidence_reports"]["count"] == 1
+    evidence_report_path = Path(payload["evidence_reports"]["summaries"][0]["report_path"])
+    assert evidence_report_path.exists()
+    assert payload["final_verify"]["tmp_absent"][str(fetch_tmp)] is True
+    assert not fetch_tmp.exists()
+    ledger = load_pending_wiki_integration_ledger(state)
+    assert ledger["pending"][0]["raw_path"] == raw_rel
+    assert "resources" not in ledger["pending"][0]["required_sections"]
+def test_raw_fast_closeout_native_refresh_defaults_to_status_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _raw_fast_closeout_native_args(tmp_path, "status")
+    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        if command[3] == "status":
+            return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+        raise AssertionError("default raw-fast closeout should not run native prepare-only")
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    status_result = raw_fast_closeout.run_native_refresh_status(args)
+    refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
+
+    assert len(calls) == 1
+    status_command = calls[0]["command"]
+    assert isinstance(status_command, list)
+    assert status_command[1:4] == ["-m", "ops.batch_native_refresh", "status"]
+    assert "--workdir" in status_command
+    assert status_result["pending_count"] == 1
+    assert status_result["command_returncode"] == 0
+    assert refresh_result["ran"] is False
+    assert refresh_result["skipped"] is True
+    assert refresh_result["skip_reason"] == "native_refresh_status_only"
+    assert refresh_result["refresh_mode"] == "status"
+    assert refresh_result["pending_count"] == 1
+def test_raw_fast_closeout_native_refresh_prepare_mode_uses_batch_native_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _raw_fast_closeout_native_args(tmp_path, "prepare")
+    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
+    calls: list[dict[str, object]] = []
+
+    def fake_run_json(command, *, cwd, timeout):
+        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        if command[3] == "status":
+            return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+        return {
+            "returncode": 0,
+            "json": {
+                "prepared_only": True,
+                "skipped": False,
+                "status_before": status,
+                "build": {"ok": True},
+            },
+        }
+
+    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+
+    status_result = raw_fast_closeout.run_native_refresh_status(args)
+    refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
+
+    assert len(calls) == 2
+    refresh_command = calls[1]["command"]
+    assert isinstance(refresh_command, list)
+    assert refresh_command[1:5] == ["-m", "ops.batch_native_refresh", "refresh", "--prepare-only"]
+    assert status_result["pending_count"] == 1
+    assert status_result["command_returncode"] == 0
+    assert refresh_result["ran"] is True
+    assert refresh_result["prepared_only"] is True
+    assert refresh_result["refresh_mode"] == "prepare"
+    assert refresh_result["status"]["pending_count"] == 1
+def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010110_Bad-Wrapper-Paper.md"
+    write(root / raw_rel, "---\ntitle: Bad\nsource: https://example.test/bad.pdf\n---\n\n## Methodology\n\nTODO\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            "Bad Wrapper Paper",
+            "--source-id",
+            "https://example.test/bad.pdf",
+            "--pattern",
+            "https://example.test/bad.pdf",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert payload["stage"] == "pre_verify"
+    assert payload["raw_fast_ok"] is False
+    _assert_timing_step(payload, "pre_verify")
+    assert "mark_pending" not in payload["timings"]["steps"]
+    assert load_pending_wiki_integration_ledger(state)["pending"] == []
+def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010111_Unsafe-Cleanup-Paper.md"
+    title = "Unsafe Cleanup Paper"
+    source = "https://example.test/unsafe-cleanup-paper.pdf"
+    write(root / raw_rel, _structured_raw_fast_note(title, source))
+    unsafe_tmp = root / "raw" / "clip" / "unsafe-bundle"
+    write(unsafe_tmp / "scratch.txt", "must not be deleted")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            title,
+            "--source-id",
+            source,
+            "--pattern",
+            source,
+            "--tmp",
+            str(unsafe_tmp),
+            "--auto-integrate",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert payload["stage"] == "cleanup_preflight"
+    assert payload["cleanup_preflight"][0]["ok"] is False
+    assert unsafe_tmp.exists()
+    assert load_pending_wiki_integration_ledger(state)["pending"] == []
+def test_raw_fast_closeout_final_verify_only_waives_post_integration_non_raw_hits() -> None:
+    from ops import raw_fast_closeout
+
+    pre = {"raw_fast_ok": True, "non_raw_wiki_hits": [], "raw_fast_blockers": []}
+    final = {"raw_fast_ok": False, "non_raw_wiki_hits": ["concepts/after.md"], "raw_fast_blockers": ["non_raw_wiki_hits"]}
+    assert raw_fast_closeout.final_verify_acceptable(pre, final) is True
+
+    final_with_secret = dict(final, raw_fast_blockers=["non_raw_wiki_hits", "strict_secret_hits"])
+    assert raw_fast_closeout.final_verify_acceptable(pre, final_with_secret) is False
+
+    final_with_tmp_left = dict(final, tmp_absent={"/tmp/raw-fast": False})
+    assert raw_fast_closeout.final_verify_acceptable(pre, final_with_tmp_left) is False
+def test_raw_fast_closeout_fast_final_verify_records_tmp_absence(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    args = argparse.Namespace(state_dir=state, raw_file="raw/clip/2601/26010112_Fast-Final.md")
+    tmp_bundle = tmp_path / "already-cleaned"
+    pre = {
+        "command_returncode": 0,
+        "raw_fast_ok": True,
+        "note_exists": True,
+        "nonzero_size": True,
+        "has_frontmatter": True,
+        "frontmatter_fields_missing": [],
+        "structured_sections_missing": [],
+        "structured_evidence_sections_insufficient": [],
+        "deprecated_standalone_evidence_sections": [],
+        "structured_heading_order_ok": True,
+        "duplicate_strict_ok": True,
+        "non_raw_wiki_hits": [],
+        "remote_markdown_images": 0,
+        "data_uri_images": 0,
+        "missing_local_images": 0,
+        "strict_secret_hits": 0,
+    }
+
+    report = raw_fast_closeout.fast_final_verify_from_pre(args, pre, [tmp_bundle])
+
+    assert report["raw_fast_ok"] is True
+    assert report["fast_final_verify"] is True
+    assert report["tmp_absent"] == {str(tmp_bundle): True}
+    assert Path(report["report_path"]).exists()
+def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
+    args = argparse.Namespace(
+        title="Compact Log Paper",
+        source_id="https://arxiv.org/abs/2601.0101",
+        raw_file="raw/clip/2601/26010112_Compact-Log-Paper.md",
+        resource_status_summary="official abs/pdf/source verified; claimed code unresolved",
+    )
+    output = {
+        "raw_fast_ok": True,
+        "final_verify": {"report_path": "/state/raw_fast_reports/compact_final_verify.json"},
+        "wiki_integration": {"pending_count": 4, "actionable_pending_count": 4, "threshold": 10, "should_integrate": False, "next_required_action": "none"},
+        "native_refresh_status": {"blocked_by_pending_wiki_integration": True, "graph_ready_pending_count": 0, "should_refresh": False},
+    }
+
+    entry = raw_fast_closeout.build_compact_log_entry(args, output)
+
+    assert len(entry.splitlines()) <= 5
+    assert "26010112_Compact-Log-Paper.md" in entry
+    assert "raw_fast_ok=true" in entry
+    assert "checksums" not in entry.lower()
+def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        title="Blocked Native Ledger Paper",
+        source_id="https://arxiv.org/abs/2601.0102",
+        raw_file="raw/clip/2601/26010113_Blocked-Native-Ledger-Paper.md",
+        resource_status_summary="official abs/pdf/source verified",
+    )
+    wiki_status = {
+        "pending_count": 2,
+        "actionable_pending_count": 2,
+        "review_pending_count": 0,
+        "blocking_pending_count": 2,
+        "threshold": 10,
+        "should_integrate": False,
+        "next_required_action": "wiki_integration",
+    }
+    standalone_status = {
+        "command_returncode": 0,
+        "pending_count": 1,
+        "should_refresh": True,
+        "ledger_path": str(tmp_path / "state" / "pending_native_refresh.json"),
+    }
+
+    native_status = raw_fast_closeout.synthesize_blocked_native_refresh_status(
+        args,
+        wiki_status,
+        standalone_status=standalone_status,
+    )
+    output = {
+        "raw_fast_ok": True,
+        "final_verify": {"report_path": "/state/raw_fast_reports/blocked_final_verify.json"},
+        "wiki_integration": wiki_status,
+        "native_refresh_status": raw_fast_closeout.compact_native_refresh_status(native_status),
+    }
+
+    entry = raw_fast_closeout.build_compact_log_entry(args, output)
+
+    assert native_status["blocked_by_pending_wiki_integration"] is True
+    assert native_status["graph_ready_pending_count"] == 0
+    assert native_status["standalone_native_pending_count"] == 1
+    assert native_status["standalone_native_should_refresh"] is True
+    assert "graph-ready pending `0`" in entry
+    assert "standalone native ledger pending `1`" in entry
