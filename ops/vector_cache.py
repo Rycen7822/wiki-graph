@@ -15,13 +15,6 @@ from typing import Any
 GRAPH_FIELD_SEP = "<SEP>"
 
 
-def _compute_mdhash_id(content: str, prefix: str = "") -> str:
-    try:
-        digest = hashlib.md5(str(content).encode("utf-8")).hexdigest()
-    except UnicodeEncodeError:
-        digest = hashlib.md5(str(content).encode("utf-8", errors="replace")).hexdigest()
-    return prefix + digest
-
 
 class VectorCache:
     def __init__(self, path: Path) -> None:
