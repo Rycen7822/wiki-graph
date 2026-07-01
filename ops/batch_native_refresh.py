@@ -695,21 +695,13 @@ def cutover_guard_report(
     }
 
 
-def refresh_cutover(
+def _validate_refresh_cutover_preconditions(
     *,
-    root: Path,
     state_dir: Path,
     workspace_root: Path,
-    workspace_id: str,
-    embedding_profile: str,
-    build_workspace: Any = build_prepared_workspace,
-    finalize_workspace: Any = finalize_prepared_workspace_for_state,
-    restart_service: Any | None = None,
-    query_smoke: Any | None = None,
-    fill_missing_vectors: bool = True,
-    force: bool = False,
-    required_unchanged_paths: list[Path] | None = None,
-) -> dict[str, Any]:
+    required_unchanged_paths: list[Path] | None,
+    query_smoke: Any | None,
+) -> None:
     if not required_unchanged_paths:
         raise ValueError("native refresh cutover requires at least one --require-unchanged-path guard")
     if query_smoke is None:
@@ -717,32 +709,50 @@ def refresh_cutover(
     require_existing_cutover_state_dir(state_dir)
     require_existing_unchanged_paths(required_unchanged_paths)
     require_unchanged_paths_outside_native_outputs(required_unchanged_paths, workspace_root=workspace_root)
-    current_status = status(root, state_dir)
-    refresh_policy = current_status.get("refresh_policy") or native_refresh_policy_status(state_dir)
-    refresh_kind = refresh_policy["next_refresh_kind"]
-    if not current_status["should_refresh"] and not force:
-        result = {
-            "cutover": True,
-            "skipped": True,
-            "cutover_executed": False,
-            "build_executed": False,
-            "restart_executed": False,
-            "query_smoke_executed": False,
-            "pending_clear_executed": False,
-            "status": current_status,
-            "refresh_kind": refresh_kind,
-            "refresh_policy": refresh_policy,
-            "vector_cache_required": True,
-            "fill_missing_vectors": fill_missing_vectors,
-        }
-        unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
-        if unchanged_before:
-            result["unchanged_path_audit"] = assert_required_unchanged_paths(unchanged_before)
-        return result
-    if restart_service is None:
-        raise ValueError("native refresh cutover requires an explicit restart_service hook")
 
-    unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
+
+def _skipped_refresh_cutover_result(
+    *,
+    current_status: dict[str, Any],
+    refresh_kind: str,
+    refresh_policy: dict[str, Any],
+    fill_missing_vectors: bool,
+    unchanged_before: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    result = {
+        "cutover": True,
+        "skipped": True,
+        "cutover_executed": False,
+        "build_executed": False,
+        "restart_executed": False,
+        "query_smoke_executed": False,
+        "pending_clear_executed": False,
+        "status": current_status,
+        "refresh_kind": refresh_kind,
+        "refresh_policy": refresh_policy,
+        "vector_cache_required": True,
+        "fill_missing_vectors": fill_missing_vectors,
+    }
+    if unchanged_before:
+        result["unchanged_path_audit"] = assert_required_unchanged_paths(unchanged_before)
+    return result
+
+
+def _execute_refresh_cutover(
+    *,
+    root: Path,
+    state_dir: Path,
+    workspace_root: Path,
+    workspace_id: str,
+    embedding_profile: str,
+    refresh_kind: str,
+    build_workspace: Any,
+    finalize_workspace: Any,
+    restart_service: Any,
+    query_smoke: Any,
+    fill_missing_vectors: bool,
+    unchanged_before: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     report = build_workspace(
         root=root,
         state_dir=state_dir,
@@ -753,10 +763,29 @@ def refresh_cutover(
     )
     active = finalize_workspace(state_dir=state_dir, reason=native_refresh_reason(refresh_kind, "cutover"))
     service = restart_service(state_dir=state_dir)
-    smoke = query_smoke(state_dir=state_dir, active=active) if query_smoke is not None else None
+    smoke = query_smoke(state_dir=state_dir, active=active)
     if not isinstance(smoke, dict) or smoke.get("ok") is not True:
         raise RuntimeError(f"native refresh cutover query smoke did not report ok=true: {smoke!r}")
     unchanged_path_audit = assert_required_unchanged_paths(unchanged_before) if unchanged_before else None
+    return {
+        "build": report,
+        "active": active,
+        "service": service,
+        "query_smoke": smoke,
+        "unchanged_path_audit": unchanged_path_audit,
+    }
+
+
+def _refresh_cutover_success_result(
+    *,
+    root: Path,
+    state_dir: Path,
+    current_status: dict[str, Any],
+    refresh_kind: str,
+    refresh_policy: dict[str, Any],
+    fill_missing_vectors: bool,
+    execution: dict[str, Any],
+) -> dict[str, Any]:
     pending_cleared = clear_pending(state_dir)
     status_after = status(root, state_dir)
     status_after_policy = status_after.get("refresh_policy") or native_refresh_policy_status(state_dir)
@@ -775,11 +804,11 @@ def refresh_cutover(
         "cutover_executed": True,
         "build_executed": True,
         "restart_executed": True,
-        "query_smoke_executed": smoke is not None,
+        "query_smoke_executed": True,
         "pending_clear_executed": True,
-        "build": report,
-        "active": active,
-        "service": service,
+        "build": execution["build"],
+        "active": execution["active"],
+        "service": execution["service"],
         "pending_cleared": pending_cleared,
         "status_before": current_status,
         "status_after": status_after,
@@ -790,12 +819,72 @@ def refresh_cutover(
         "policy_native_pending_marked_count": 1 if policy_native_pending.get("marked") else 0,
         "vector_cache_required": True,
         "fill_missing_vectors": fill_missing_vectors,
+        "query_smoke": execution["query_smoke"],
     }
-    if smoke is not None:
-        result["query_smoke"] = smoke
-    if unchanged_path_audit is not None:
-        result["unchanged_path_audit"] = unchanged_path_audit
+    if execution.get("unchanged_path_audit") is not None:
+        result["unchanged_path_audit"] = execution["unchanged_path_audit"]
     return result
+
+
+def refresh_cutover(
+    *,
+    root: Path,
+    state_dir: Path,
+    workspace_root: Path,
+    workspace_id: str,
+    embedding_profile: str,
+    build_workspace: Any = build_prepared_workspace,
+    finalize_workspace: Any = finalize_prepared_workspace_for_state,
+    restart_service: Any | None = None,
+    query_smoke: Any | None = None,
+    fill_missing_vectors: bool = True,
+    force: bool = False,
+    required_unchanged_paths: list[Path] | None = None,
+) -> dict[str, Any]:
+    _validate_refresh_cutover_preconditions(
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        required_unchanged_paths=required_unchanged_paths,
+        query_smoke=query_smoke,
+    )
+    current_status = status(root, state_dir)
+    refresh_policy = current_status.get("refresh_policy") or native_refresh_policy_status(state_dir)
+    refresh_kind = refresh_policy["next_refresh_kind"]
+    unchanged_before = snapshot_required_unchanged_paths(required_unchanged_paths)
+    if not current_status["should_refresh"] and not force:
+        return _skipped_refresh_cutover_result(
+            current_status=current_status,
+            refresh_kind=refresh_kind,
+            refresh_policy=refresh_policy,
+            fill_missing_vectors=fill_missing_vectors,
+            unchanged_before=unchanged_before,
+        )
+    if restart_service is None:
+        raise ValueError("native refresh cutover requires an explicit restart_service hook")
+
+    execution = _execute_refresh_cutover(
+        root=root,
+        state_dir=state_dir,
+        workspace_root=workspace_root,
+        workspace_id=workspace_id,
+        embedding_profile=embedding_profile,
+        refresh_kind=refresh_kind,
+        build_workspace=build_workspace,
+        finalize_workspace=finalize_workspace,
+        restart_service=restart_service,
+        query_smoke=query_smoke,
+        fill_missing_vectors=fill_missing_vectors,
+        unchanged_before=unchanged_before,
+    )
+    return _refresh_cutover_success_result(
+        root=root,
+        state_dir=state_dir,
+        current_status=current_status,
+        refresh_kind=refresh_kind,
+        refresh_policy=refresh_policy,
+        fill_missing_vectors=fill_missing_vectors,
+        execution=execution,
+    )
 
 
 def print_json(payload: dict[str, Any]) -> None:
