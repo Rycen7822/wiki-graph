@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
+import tomllib
 
 import pytest
 
@@ -8,6 +11,27 @@ from llm_wiki_native.build import MissingNativeVectorsError
 from llm_wiki_native.cli import build_workspace_from_state, main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from support import write_json, write_jsonl, write_vector_cache
+
+
+def test_pyproject_exposes_native_operator_console_scripts() -> None:
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+
+    scripts = pyproject["project"]["scripts"]
+    assert scripts["llm-wiki-native"] == "llm_wiki_native.cli:main"
+    assert scripts["wiki-graph-native-query-report"] == "ops.collect_native_query_report:main"
+    assert scripts["wiki-graph-native-server-control"] == "ops.native_server_control:main"
+
+
+def test_cli_module_help_works_with_python_m() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "llm_wiki_native.cli", "--help"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Build and audit llm-wiki native workspaces" in result.stdout
+    assert "build-workspace" in result.stdout
 
 
 def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
