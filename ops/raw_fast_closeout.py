@@ -162,6 +162,118 @@ def _load_json_file(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _bool_text(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
+def _unique_nonempty(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _load_bundle_relative_json(bundle_path: Path, payload: dict[str, Any], key: str) -> dict[str, Any] | None:
+    files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
+    rel = files.get(key) if isinstance(files, dict) else None
+    if not rel:
+        return None
+    return _load_json_file(bundle_path.parent / str(rel))
+
+
+def _resource_status_summary(evidence_report: dict[str, Any] | None) -> str:
+    resource = (evidence_report or {}).get("resource_boundary") if isinstance(evidence_report, dict) else None
+    if not isinstance(resource, dict):
+        return "resource_boundary=missing"
+    if resource.get("summary"):
+        return str(resource.get("summary"))
+    hf_statuses = resource.get("hf_statuses") if isinstance(resource.get("hf_statuses"), dict) else {}
+    hf_text = ",".join(f"{key}:{value}" for key, value in sorted(hf_statuses.items())) or "none"
+    return f"resource_boundary={resource.get('status', 'unknown')}; github_count={resource.get('github_count', 0)}; hf={hf_text}"
+
+
+def derive_closeout_args_from_bundle(evidence_bundle_path: Path, *, raw_file: str | None = None, topic_hints: list[str] | None = None) -> dict[str, Any]:
+    """Derive raw-fast closeout fields from a prepared evidence bundle without mutating ledgers or wiki files."""
+    payload = _load_json_file(evidence_bundle_path)
+    if payload is None:
+        return {"ok": False, "error": "invalid_evidence_bundle", "evidence_bundle": str(evidence_bundle_path)}
+    preflight = payload.get("preflight") if isinstance(payload.get("preflight"), dict) else {}
+    source_identity = preflight.get("source_identity") if isinstance(preflight.get("source_identity"), dict) else {}
+    title = str(payload.get("title_guess") or preflight.get("title") or "").strip()
+    source_id = str(payload.get("source_url") or source_identity.get("source_url") or source_identity.get("source_id") or "").strip()
+    derived_raw_file = raw_file or payload.get("next_raw_path") or preflight.get("next_raw_path")
+    if not title or not source_id or not derived_raw_file:
+        return {
+            "ok": False,
+            "error": "missing_required_bundle_fields",
+            "missing": [name for name, value in {"title": title, "source_id": source_id, "raw_file": derived_raw_file}.items() if not value],
+            "evidence_bundle": str(evidence_bundle_path),
+        }
+    evidence_report = _load_bundle_relative_json(evidence_bundle_path, payload, "evidence_report")
+    kind = str(payload.get("kind") or preflight.get("kind") or "paper")
+    patterns = _unique_nonempty([title, source_id, source_identity.get("arxiv_id"), source_identity.get("arxiv_id_base")])
+    hints = topic_hints or ["paper", "raw-fast", kind]
+    hints = _unique_nonempty(hints)
+    resource_summary = _resource_status_summary(evidence_report)
+    argv_tail: list[str] = ["--raw-file", str(derived_raw_file), "--title", title, "--source-id", source_id]
+    for pattern in patterns:
+        argv_tail.extend(["--pattern", pattern])
+    for hint in hints:
+        argv_tail.extend(["--topic-hint", hint])
+    argv_tail.extend(["--resource-status-summary", resource_summary, "--tmp", str(evidence_bundle_path.parent)])
+    return {
+        "ok": True,
+        "evidence_bundle": str(evidence_bundle_path),
+        "raw_file": str(derived_raw_file),
+        "title": title,
+        "source_id": source_id,
+        "patterns": patterns,
+        "topic_hints": hints,
+        "resource_status_summary": resource_summary,
+        "tmp": [str(evidence_bundle_path.parent)],
+        "argv_tail": argv_tail,
+    }
+
+
+def build_raw_fast_session_summary(final_report: dict[str, Any]) -> dict[str, Any]:
+    """Build compact user-facing closeout text from a raw-fast final report."""
+    final_verify = final_report.get("final_verify") if isinstance(final_report.get("final_verify"), dict) else {}
+    wiki = final_report.get("wiki_integration") if isinstance(final_report.get("wiki_integration"), dict) else {}
+    native = final_report.get("native_refresh_status") if isinstance(final_report.get("native_refresh_status"), dict) else {}
+    evidence = final_report.get("evidence_reports") if isinstance(final_report.get("evidence_reports"), dict) else {}
+    tmp_absent = final_verify.get("tmp_absent") if isinstance(final_verify.get("tmp_absent"), dict) else {}
+    tmp_absent_all = all(bool(value) for value in tmp_absent.values()) if tmp_absent else None
+    raw_file = final_report.get("raw_file")
+    raw_fast_value = bool(final_report.get("raw_fast_ok"))
+    final_report_path = final_verify.get("report_path")
+    wiki_pending = wiki.get("pending_count", 0)
+    native_blocked = bool(native.get("blocked_by_pending_wiki_integration"))
+    lines = [
+        f"- raw_fast_ok={_bool_text(raw_fast_value)} raw=`{raw_file}`",
+        f"- final_report=`{final_report_path}` evidence_reports={evidence.get('count', 0)}",
+        f"- tmp_absent_all={_bool_text(tmp_absent_all)} elapsed={final_report.get('timings', {}).get('total_seconds', 'n/a')}s",
+        f"- wiki pending={wiki_pending} actionable={wiki.get('actionable_pending_count', 0)} threshold={wiki.get('threshold')} should_integrate={_bool_text(wiki.get('should_integrate'))}",
+        f"- native blocked_by_wiki={_bool_text(native_blocked)} graph_ready_pending={native.get('graph_ready_pending_count', 0)} standalone_pending={native.get('standalone_native_pending_count', 0)} should_refresh={_bool_text(native.get('should_refresh'))}",
+    ]
+    if final_report.get("compact_log_entry"):
+        lines.append(f"- log: {short_text(str(final_report.get('compact_log_entry')), 240)}")
+    return {
+        "ok": True,
+        "raw_fast_ok": raw_fast_value,
+        "raw_file": raw_file,
+        "final_report": final_report_path,
+        "evidence_report_count": evidence.get("count", 0),
+        "wiki_pending": wiki_pending,
+        "native_blocked_by_wiki": native_blocked,
+        "tmp_absent_all": tmp_absent_all,
+        "markdown": "\n".join(lines) + "\n",
+    }
+
+
 def capture_tmp_evidence_reports(args: argparse.Namespace) -> dict[str, Any]:
     summaries: list[dict[str, Any]] = []
     for idx, tmp_path in enumerate(args.tmp):
@@ -198,6 +310,25 @@ def capture_tmp_evidence_reports(args: argparse.Namespace) -> dict[str, Any]:
                     "table_count": len(digest.get("table_cards") or []),
                     "figure_count": len(digest.get("figure_cards") or []),
                     "warning_count": len(digest.get("quality_warnings") or []),
+                }
+        evidence_report_rel = files.get("evidence_report") if isinstance(files, dict) else None
+        if evidence_report_rel:
+            evidence_report = _load_json_file(tmp_path / str(evidence_report_rel))
+            if evidence_report is not None:
+                summary["standardized_evidence_report"] = {
+                    "status": evidence_report.get("status"),
+                    "bundle_summary": evidence_report.get("bundle_summary") or {},
+                    "paper_digest": evidence_report.get("paper_digest") or {},
+                    "resource_boundary": evidence_report.get("resource_boundary") or {},
+                }
+        agent_brief_rel = files.get("agent_brief") if isinstance(files, dict) else None
+        if agent_brief_rel:
+            agent_brief = _load_json_file(tmp_path / str(agent_brief_rel))
+            if agent_brief is not None:
+                summary["agent_brief"] = {
+                    "next_raw_path": (agent_brief.get("protected_anchors") or {}).get("next_raw_path"),
+                    "evidence_card_count": len(agent_brief.get("evidence_cards") or []),
+                    "duplicate_summary": agent_brief.get("duplicate_summary") or {},
                 }
         label = "evidence_bundle_summary" if idx == 0 else f"evidence_bundle_summary_{idx + 1}"
         report_path = report_path_for(args, label)

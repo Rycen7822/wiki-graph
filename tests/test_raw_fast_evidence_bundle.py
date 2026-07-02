@@ -1,5 +1,6 @@
 import sys
 import argparse
+import datetime as dt
 import json
 import subprocess
 from pathlib import Path
@@ -162,12 +163,42 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     payload = json.loads(result.stdout)
 
     assert payload["ok"] is True
-    for key in ["paper_digest", "paper_digest_markdown", "resource_boundary_draft", "resource_boundary_draft_markdown", "note_block_drafts", "localized_figures", "localized_figures_markdown"]:
+    for key in [
+        "paper_digest",
+        "paper_digest_markdown",
+        "resource_boundary_draft",
+        "resource_boundary_draft_markdown",
+        "note_block_drafts",
+        "localized_figures",
+        "localized_figures_markdown",
+        "raw_fast_preflight",
+        "agent_brief",
+        "agent_brief_markdown",
+        "evidence_report",
+        "evidence_report_markdown",
+        "note_candidate",
+        "note_candidate_markdown",
+        "agent_handoff",
+        "agent_handoff_markdown",
+    ]:
         assert key in payload["files"]
         assert (workdir / payload["files"][key]).exists()
+    assert payload["preflight"]["ok"] is True
+    assert payload["agent_automation"]["ok"] is True
 
     digest = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
     assert digest["ok"] is True
+    resource_draft = json.loads((workdir / "resource_boundary_draft.json").read_text(encoding="utf-8"))
+    assert resource_draft["github"][0]["url"] == "https://github.com/example/sidecar-paper"
+    assert resource_draft["github"][0]["status"] == "not_checked"
+    assert resource_draft["github"][0]["source"] == "source_exposed_exact_url"
+    evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
+    assert evidence_report["resource_boundary"]["github_count"] >= 1
+    assert evidence_report["resource_boundary"]["review_required"] is False
+    handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["resource_review_required"] is False
+    assert handoff["manual_reference_paths"] == []
+    assert "https://github.com/example/sidecar-paper" in handoff["resource_status_summary"]
     localized = json.loads((workdir / "localized_figures.json").read_text(encoding="utf-8"))
     assert localized["ok"] is True
     localized_entry = localized["entries"][0]
@@ -414,3 +445,87 @@ def test_raw_fast_evidence_bundle_resource_probe_contracts_are_explicit() -> Non
     assert skipped["skipped"] is True
     assert skipped["probes"] == []
     assert skipped["urls"] == ["https://example.test/project", "https://huggingface.co/example/model"]
+
+
+def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_path: Path) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "agent-automation-sidecars"
+    state_dir = tmp_path / "state"
+    write(
+        state_dir / "pending_wiki_integration.json",
+        json.dumps({"pending": [{"raw_path": "raw/clip/2601/26010101_Foo-Paper.md", "status": "pending"}]}),
+    )
+    source_url = "https://arxiv.org/abs/2601.0101"
+    title = "Foo Paper"
+    frontmatter = raw_fast_evidence_bundle.build_frontmatter(title, source_url, "arxiv")
+    preflight = raw_fast_evidence_bundle.build_raw_fast_preflight(
+        root,
+        title,
+        source_url,
+        "arxiv",
+        workdir=workdir,
+        state_dir=state_dir,
+        now=dt.datetime(2026, 1, 1, 12, 0),
+    )
+    digest = {
+        "ok": True,
+        "metadata_card": {"title": title, "source_url": source_url},
+        "abstract_cards": [{"text": "A compact abstract card grounded in the source."}],
+        "section_cards": [{"section": "Method", "text": "A method card."}],
+        "equation_cards": [{"label": "eq:loss", "text": "L = x"}],
+        "table_cards": [],
+        "figure_cards": [],
+        "result_cards": [{"text": "A result card."}],
+        "quality_warnings": ["source text is short"],
+    }
+    resource_boundary = raw_fast_evidence_bundle.summarize_resource_boundary(
+        {"ok": True, "probes": [{"ok": True, "type": "arxiv", "id": "2601.0101", "status": "detected", "url": source_url}], "urls": [source_url]},
+        metadata={"title": title, "source_url": source_url},
+    )
+    files: dict[str, str] = {}
+    bundle_payload = {
+        "ok": True,
+        "kind": "arxiv",
+        "source_url": source_url,
+        "title_guess": title,
+        "warnings": [],
+        "files": files,
+        "next_raw_path": preflight["next_raw_path"],
+    }
+
+    summary = raw_fast_evidence_bundle.write_agent_automation_sidecars(
+        workdir,
+        files,
+        bundle_payload,
+        frontmatter=frontmatter,
+        preflight=preflight,
+        digest=digest,
+        resource_boundary=resource_boundary,
+    )
+
+    assert preflight["ok"] is True
+    assert preflight["next_raw_path"] == "raw/clip/2601/26010102_Foo-Paper.md"
+    assert preflight["duplicate_hits"]["raw"]
+    assert preflight["queue_status"]["wiki_pending_count"] == 1
+    assert summary["ok"] is True
+    for key in ["raw_fast_preflight", "agent_brief", "agent_brief_markdown", "evidence_report", "evidence_report_markdown", "note_candidate", "note_candidate_markdown", "agent_handoff", "agent_handoff_markdown"]:
+        assert key in files
+        assert (workdir / files[key]).exists()
+    brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
+    assert brief["protected_anchors"]["next_raw_path"] == preflight["next_raw_path"]
+    assert brief["duplicate_summary"]["raw"] >= 1
+    assert brief["source_refs"]["paper_digest"] == "paper_digest.json"
+    evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
+    assert evidence_report["resource_boundary"]["status"] == "standardized"
+    candidate_md = (workdir / "note_candidate.md").read_text(encoding="utf-8")
+    body = candidate_md.split("---", 2)[-1]
+    assert "https://" not in body
+    assert "## 资源与复现状态" not in body
+    assert "## Evidence trail" not in body
+    assert "<!-- advisory:" in body
+    assert not (root / "agent_brief.json").exists()
+    assert not (root / "evidence_report.json").exists()
+    assert not (root / "note_candidate.md").exists()
+    assert wiki_root_machine_pollution(root) == []
