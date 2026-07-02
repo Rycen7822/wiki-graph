@@ -407,14 +407,105 @@ def extract_urls(text: str) -> list[str]:
     return sorted({u.rstrip(".,;:") for u in raw})
 
 
-def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[str]) -> dict[str, Any]:
+GITHUB_EXCLUDED_OWNER_SEGMENTS = {"features", "topics", "collections", "marketplace", "pricing", "about", "login", "search"}
+RESOURCE_HEALTH_MAX_CANDIDATES = 8
+
+
+def _normalized_url_host(url: str) -> str:
+    return urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _resource_url_candidate(url: str) -> dict[str, Any] | None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+    base = {"url": url, "source": "source_exposed_exact_url", "status": "not_checked"}
+    if host == "github.com" and len(parts) >= 2 and parts[0].lower() not in GITHUB_EXCLUDED_OWNER_SEGMENTS:
+        owner, repo = parts[0], re.sub(r"\.git$", "", parts[1])
+        if owner and repo:
+            return {**base, "type": "github", "repo": f"{owner}/{repo}"}
+    if host == "huggingface.co" and parts:
+        if len(parts) >= 3 and parts[0] in {"datasets", "spaces"}:
+            return {**base, "type": "hf", "hf_kind": parts[0], "repo": f"{parts[1]}/{parts[2]}"}
+        if len(parts) >= 2:
+            return {**base, "type": "hf", "hf_kind": "models", "repo": f"{parts[0]}/{parts[1]}"}
+    if host and host not in {"arxiv.org", "export.arxiv.org", "doi.org", "dx.doi.org"} and re.search(r"project|code|artifact|software|release|demo|model|dataset", url, re.I):
+        return {**base, "type": "project_page"}
+    return None
+
+
+def probe_exact_link_health(url: str, *, timeout: int = 8, max_bytes: int = 1024) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        path = Path(urllib.request.url2pathname(parsed.path))
+        return {"ok": path.exists(), "chosen": "file", "url": url, "status": "verified_present" if path.exists() else "probe_failed", "error": None if path.exists() else "file_missing"}
+    attempts: list[dict[str, Any]] = []
+    for method in ["HEAD", "GET"]:
+        try:
+            req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
+            if method == "GET":
+                req.add_header("Range", f"bytes=0-{max_bytes - 1}")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                code = getattr(response, "status", None)
+                item = {"method": method, "ok": code is not None and 200 <= int(code) < 400, "http_code": code, "effective_url": response.geturl(), "content_type": response.headers.get("content-type")}
+                attempts.append(item)
+                if item["ok"]:
+                    return {"ok": True, "chosen": method, "url": url, "status": "verified_present", "attempts": attempts}
+        except urllib.error.HTTPError as exc:
+            item = {"method": method, "ok": False, "http_code": exc.code, "error": type(exc).__name__, "message": str(exc)[:300]}
+            attempts.append(item)
+            if method == "HEAD" and exc.code in {403, 405}:
+                continue
+        except Exception as exc:
+            attempts.append({"method": method, "ok": False, "error": type(exc).__name__, "message": str(exc)[:300]})
+    return {"ok": False, "chosen": attempts[-1].get("method") if attempts else None, "url": url, "status": "probe_failed", "attempts": attempts, "error": attempts[-1].get("error") if attempts else "probe_failed"}
+
+
+def classify_source_exposed_resources(urls: list[str], *, health_mode: str = "direct", timeout: int = 8) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for url in urls:
+        candidate = _resource_url_candidate(url)
+        if not candidate:
+            continue
+        key = (candidate["type"], candidate.get("repo") or candidate["url"])
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    health_enabled = health_mode == "direct"
+    for candidate in candidates[:RESOURCE_HEALTH_MAX_CANDIDATES]:
+        if not health_enabled:
+            candidate["health"] = {"skipped": True, "reason": "resource_health_disabled"}
+            continue
+        health = probe_exact_link_health(candidate["url"], timeout=timeout)
+        candidate["health"] = health
+        candidate["status"] = "verified_present" if health.get("ok") else "probe_failed"
+    for candidate in candidates[RESOURCE_HEALTH_MAX_CANDIDATES:]:
+        candidate["health"] = {"skipped": True, "reason": "candidate_limit"}
+    review_required = any(item.get("status") == "probe_failed" for item in candidates)
+    return {
+        "ok": True,
+        "health_mode": health_mode,
+        "review_required": review_required,
+        "candidates": candidates,
+        "github": [item for item in candidates if item.get("type") == "github"],
+        "hf": [item for item in candidates if item.get("type") == "hf"],
+        "project_pages": [item for item in candidates if item.get("type") == "project_page"],
+    }
+
+
+def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[str], *, health_mode: str = "direct", timeout: int = 8) -> dict[str, Any]:
     urls = set(extract_urls(text))
     for item in links_payload.get("links") or []:
         if isinstance(item, dict) and item.get("uri"):
             urls.add(str(item["uri"]))
     probes_set = set(probes)
+    effective_health_mode = "none" if "none" in probes_set else health_mode
+    sorted_urls = sorted(urls)
+    source_exposed = classify_source_exposed_resources(sorted_urls, health_mode=effective_health_mode, timeout=timeout)
     if "none" in probes_set:
-        return {"ok": True, "skipped": True, "urls": sorted(urls), "probes": []}
+        return {"ok": True, "skipped": True, "urls": sorted_urls, "source_exposed_resources": source_exposed, "probes": []}
     doi_strings = sorted(set(re.findall(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, flags=re.I)))[:50]
     arxiv_ids = sorted(set(re.findall(r"arXiv[: ]?(\d{4}\.\d{4,5})", text, flags=re.I)))[:50]
     results: list[dict[str, Any]] = []
@@ -424,7 +515,7 @@ def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[
     if "arxiv" in probes_set:
         for arxiv_id in arxiv_ids:
             results.append({"ok": True, "type": "arxiv", "id": arxiv_id, "status": "detected", "url": f"https://arxiv.org/abs/{arxiv_id}", "error": None, "evidence": {"matched_text": arxiv_id}})
-    return {"ok": True, "urls": sorted(urls), "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "probes": results}
+    return {"ok": True, "urls": sorted_urls, "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "source_exposed_resources": source_exposed, "probes": results}
 
 
 def title_from_text(text: str) -> str:
@@ -648,21 +739,42 @@ def arxiv_api_title(workdir: Path) -> str | None:
 
 def summarize_resource_boundary(resource_probe: dict[str, Any], metadata: dict[str, Any] | None = None, source_inventory: dict[str, Any] | None = None, pdf_info: dict[str, Any] | None = None, secret_scan: dict[str, Any] | None = None) -> dict[str, Any]:
     metadata = metadata or {}
+    source_exposed = resource_probe.get("source_exposed_resources") if isinstance(resource_probe.get("source_exposed_resources"), dict) else {}
+    hf_buckets = {
+        "models": {"status": "not_checked", "items": []},
+        "datasets": {"status": "not_checked", "items": []},
+        "spaces": {"status": "not_checked", "items": []},
+    }
+    for item in source_exposed.get("hf") or []:
+        kind = item.get("hf_kind") or "models"
+        bucket = hf_buckets.setdefault(kind, {"status": "not_checked", "items": []})
+        bucket.setdefault("items", []).append(item)
+    for bucket in hf_buckets.values():
+        statuses = {entry.get("status") for entry in bucket.get("items") or []}
+        if "probe_failed" in statuses:
+            bucket["status"] = "probe_failed"
+        elif "verified_present" in statuses:
+            bucket["status"] = "verified_present"
+        elif bucket.get("items"):
+            bucket["status"] = "not_checked"
+
     draft: dict[str, Any] = {
         "ok": True,
         "advisory": True,
         "metadata": metadata,
-        "github": [],
-        "project_pages": [],
-        "hf": {
-            "models": {"status": "not_checked"},
-            "datasets": {"status": "not_checked"},
-            "spaces": {"status": "not_checked"},
-        },
+        "health_mode": source_exposed.get("health_mode", "none"),
+        "review_required": bool(source_exposed.get("review_required")),
+        "manual_reason": None,
+        "github": source_exposed.get("github") or [],
+        "project_pages": source_exposed.get("project_pages") or [],
+        "hf": hf_buckets,
         "doi": [],
         "arxiv": [],
         "warnings": [],
     }
+    if draft["review_required"]:
+        failed = [item for item in (source_exposed.get("candidates") or []) if item.get("status") == "probe_failed"]
+        draft["manual_reason"] = {"stage": "resource_health", "error": "source_exposed_link_probe_failed", "failed_urls": [item.get("url") for item in failed]}
     for probe in resource_probe.get("probes") or []:
         ptype = str(probe.get("type") or "")
         if ptype in {"doi", "arxiv"}:
@@ -676,11 +788,35 @@ def summarize_resource_boundary(resource_probe: dict[str, Any], metadata: dict[s
     return draft
 
 
+def resource_status_summary(resource_boundary: dict[str, Any] | None) -> str:
+    if not resource_boundary:
+        return "resource_boundary=missing"
+    github = resource_boundary.get("github") or []
+    projects = resource_boundary.get("project_pages") or []
+    hf = resource_boundary.get("hf") or {}
+    github_text = ";".join(f"{item.get('status')}:{item.get('url')}" for item in github) or "none"
+    project_text = ";".join(f"{item.get('status')}:{item.get('url')}" for item in projects) or "none"
+    hf_text = ",".join(f"{key}:{value.get('status')}" for key, value in sorted(hf.items())) or "none"
+    review = "yes" if resource_boundary.get("review_required") else "no"
+    return f"source_exposed_resources github={github_text}; hf={hf_text}; project_pages={project_text}; review_required={review}"
+
+
 def render_resource_boundary_markdown(draft: dict[str, Any]) -> str:
-    lines = ["# Resource boundary draft", "", "Advisory sidecar: read and verify before synthesizing the final resource section.", "", "## GitHub", "- not_checked", "", "## Hugging Face"]
+    lines = ["# Resource boundary draft", "", "Advisory sidecar: source-exposed exact-link resource triage. Keep this out of raw-note body/frontmatter.", "", f"- health_mode: {draft.get('health_mode')}", f"- review_required: {draft.get('review_required')}", "", "## GitHub"]
+    if draft.get("github"):
+        for item in draft.get("github") or []:
+            lines.append(f"- {item.get('url')}: status={item.get('status')}, repo={item.get('repo')}")
+    else:
+        lines.append("- none")
+    lines.append("\n## Hugging Face")
     for kind, bucket in (draft.get("hf") or {}).items():
-        lines.append(f"- {kind}: status={bucket.get('status')}")
-    lines.extend(["", "## Project pages", "- not_checked"])
+        lines.append(f"- {kind}: status={bucket.get('status')}, count={len(bucket.get('items') or [])}")
+    lines.append("\n## Project pages")
+    if draft.get("project_pages"):
+        for item in draft.get("project_pages") or []:
+            lines.append(f"- {item.get('url')}: status={item.get('status')}")
+    else:
+        lines.append("- none")
     if draft.get("doi"):
         lines.append("\n## DOI")
         for item in draft["doi"]:
@@ -689,6 +825,9 @@ def render_resource_boundary_markdown(draft: dict[str, Any]) -> str:
         lines.append("\n## arXiv")
         for item in draft["arxiv"]:
             lines.append(f"- {item.get('id')}: status={item.get('status')}")
+    if draft.get("manual_reason"):
+        lines.append("\n## Manual follow-up reason")
+        lines.append(f"- {json.dumps(draft.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
     if draft.get("warnings"):
         lines.append("\n## Warnings")
         for warning in draft["warnings"]:
@@ -937,6 +1076,448 @@ def next_raw_path(root: Path, title: str, now: dt.datetime | None = None) -> str
     return f"raw/clip/{yymm}/{yymmdd}{seq:02d}_{slugify(title)}.md"
 
 
+def _source_identity(url: str, kind: str) -> dict[str, Any]:
+    identity: dict[str, Any] = {"source_url": url, "source_id": url, "kind": kind}
+    arxiv_id = arxiv_id_from_url(url)
+    if arxiv_id:
+        base_id = re.sub(r"v\d+$", "", arxiv_id)
+        identity.update(
+            {
+                "arxiv_id": arxiv_id,
+                "arxiv_id_base": base_id,
+                "source_id": f"arxiv:{arxiv_id}",
+                "canonical_abs_url": f"https://arxiv.org/abs/{arxiv_id}",
+                "canonical_pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+            }
+        )
+    return identity
+
+
+def _duplicate_terms(title: str, url: str, kind: str) -> list[str]:
+    terms = [title, url]
+    identity = _source_identity(url, kind)
+    for key in ["arxiv_id", "arxiv_id_base", "canonical_abs_url", "canonical_pdf_url"]:
+        value = identity.get(key)
+        if isinstance(value, str) and value not in terms:
+            terms.append(value)
+    return [term for term in terms if term]
+
+
+def _duplicate_bucket(rel: str) -> str:
+    if rel.startswith("raw/"):
+        return "raw"
+    if rel.startswith("_meta/"):
+        return "meta"
+    if rel == "log.md" or rel.endswith("/log.md"):
+        return "log"
+    return "compiled"
+
+
+def scan_duplicate_hits(root: Path, title: str, url: str, kind: str, *, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
+    terms = _duplicate_terms(title, url, kind)
+    buckets: dict[str, list[dict[str, Any]]] = {"raw": [], "compiled": [], "meta": [], "log": []}
+    if not root.exists():
+        return buckets
+    lowered_terms = [(term, term.lower()) for term in terms]
+    for path in sorted(root.rglob("*.md")):
+        if sum(len(items) for items in buckets.values()) >= limit:
+            break
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:1_000_000]
+        except OSError:
+            continue
+        lower = text.lower()
+        matched = [term for term, lowered in lowered_terms if lowered and lowered in lower]
+        if not matched:
+            continue
+        rel = path.relative_to(root).as_posix()
+        buckets[_duplicate_bucket(rel)].append({"path": rel, "matched_terms": matched[:5]})
+    return buckets
+
+
+def _load_pending_count(path: Path) -> int | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        pending = data.get("pending")
+        if isinstance(pending, list):
+            return len(pending)
+        pending_count = data.get("pending_count")
+        if isinstance(pending_count, int):
+            return pending_count
+    return None
+
+
+def read_queue_status(state_dir: Path | None) -> dict[str, Any]:
+    if state_dir is None:
+        return {"checked": False, "reason": "state_dir_not_provided"}
+    wiki_path = state_dir / "pending_wiki_integration.json"
+    native_path = state_dir / "pending_native_refresh.json"
+    wiki_count = _load_pending_count(wiki_path)
+    native_count = _load_pending_count(native_path)
+    return {
+        "checked": True,
+        "state_dir": str(state_dir),
+        "wiki_ledger_path": str(wiki_path),
+        "native_ledger_path": str(native_path),
+        "wiki_pending_count": wiki_count or 0,
+        "native_pending_count": native_count or 0,
+        "wiki_ledger_exists": wiki_path.exists(),
+        "native_ledger_exists": native_path.exists(),
+    }
+
+
+def build_raw_fast_preflight(
+    root: Path,
+    title: str,
+    url: str,
+    kind: str,
+    *,
+    workdir: Path,
+    state_dir: Path | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    now = now or dt.datetime.now().astimezone()
+    duplicate_hits = scan_duplicate_hits(root, title, url, kind)
+    duplicate_summary = {bucket: len(items) for bucket, items in duplicate_hits.items()}
+    return {
+        "ok": True,
+        "timestamp": now.isoformat(timespec="minutes"),
+        "root": str(root),
+        "workdir": str(workdir),
+        "kind": kind,
+        "title": title,
+        "source_identity": _source_identity(url, kind),
+        "next_raw_path": next_raw_path(root, title, now=now),
+        "duplicate_terms": _duplicate_terms(title, url, kind),
+        "duplicate_hits": duplicate_hits,
+        "duplicate_summary": duplicate_summary,
+        "queue_status": read_queue_status(state_dir),
+    }
+
+
+def render_preflight_markdown(preflight: dict[str, Any]) -> str:
+    lines = [
+        "# Raw-fast preflight",
+        "",
+        f"- title: {preflight.get('title')}",
+        f"- kind: {preflight.get('kind')}",
+        f"- next_raw_path: `{preflight.get('next_raw_path')}`",
+    ]
+    duplicate_summary = preflight.get("duplicate_summary") or {}
+    lines.append(f"- duplicate_hits: raw={duplicate_summary.get('raw', 0)}, compiled={duplicate_summary.get('compiled', 0)}, meta={duplicate_summary.get('meta', 0)}, log={duplicate_summary.get('log', 0)}")
+    queue = preflight.get("queue_status") or {}
+    if queue.get("checked"):
+        lines.append(f"- queues: wiki_pending={queue.get('wiki_pending_count', 0)}, native_pending={queue.get('native_pending_count', 0)}")
+    else:
+        lines.append(f"- queues: not checked ({queue.get('reason')})")
+    lines.append("\n## Duplicate hits")
+    for bucket, hits in (preflight.get("duplicate_hits") or {}).items():
+        lines.append(f"\n### {bucket}")
+        if not hits:
+            lines.append("- none")
+        for hit in hits[:10]:
+            lines.append(f"- `{hit.get('path')}` — {', '.join(hit.get('matched_terms') or [])}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 12) -> list[dict[str, Any]]:
+    if not digest:
+        return []
+    cards: list[dict[str, Any]] = []
+    for bucket, label in [
+        ("abstract_cards", "abstract"),
+        ("section_cards", "section"),
+        ("equation_cards", "equation"),
+        ("result_cards", "result"),
+        ("table_cards", "table"),
+        ("figure_cards", "figure"),
+    ]:
+        for card in digest.get(bucket) or []:
+            if len(cards) >= max_cards:
+                return cards
+            text = compact_ws(str(card.get("text") or card.get("caption") or card.get("section") or card))[:500]
+            cards.append({"kind": label, "text": text, "source_bucket": bucket})
+    return cards
+
+
+def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | None, digest: dict[str, Any] | None, resource_boundary: dict[str, Any] | None) -> dict[str, Any]:
+    files = bundle.get("files") or {}
+    duplicate_summary = (preflight or {}).get("duplicate_summary") or {}
+    resource_boundary = resource_boundary or {}
+    return {
+        "ok": True,
+        "protected_anchors": {
+            "title": bundle.get("title_guess") or (preflight or {}).get("title"),
+            "kind": bundle.get("kind") or (preflight or {}).get("kind"),
+            "source_url": bundle.get("source_url"),
+            "next_raw_path": bundle.get("next_raw_path") or (preflight or {}).get("next_raw_path"),
+            "warnings": bundle.get("warnings") or [],
+        },
+        "duplicate_summary": duplicate_summary,
+        "queue_status": (preflight or {}).get("queue_status") or {"checked": False},
+        "evidence_cards": _brief_cards_from_digest(digest),
+        "resource_caveats": {
+            "status": "standardized" if resource_boundary else "missing",
+            "github_count": len(resource_boundary.get("github") or []),
+            "hf_statuses": {key: value.get("status") for key, value in (resource_boundary.get("hf") or {}).items()},
+            "review_required": bool(resource_boundary.get("review_required")),
+            "manual_reason": resource_boundary.get("manual_reason"),
+            "summary": resource_status_summary(resource_boundary),
+            "policy": "Keep resource/probe/link-health detail out of the raw note body and frontmatter except canonical source provenance.",
+        },
+        "source_refs": {
+            "evidence_bundle": "evidence_bundle.json",
+            "paper_digest": files.get("paper_digest") or "paper_digest.json",
+            "resource_boundary": files.get("resource_boundary_draft") or "resource_boundary_draft.json",
+            "raw_text": files.get("raw_text"),
+            "layout_text": files.get("layout_text"),
+        },
+        "agent_actions": [
+            "Read this brief first; reopen cited sidecars only for uncertain claims.",
+            "Write or patch the canonical raw note under next_raw_path only after duplicate review.",
+            "Run raw-fast closeout; do not run native refresh while wiki integration is pending.",
+        ],
+    }
+
+
+def render_agent_brief_markdown(brief: dict[str, Any]) -> str:
+    anchors = brief.get("protected_anchors") or {}
+    lines = ["# Agent brief", "", f"- title: {anchors.get('title')}", f"- source_url: {anchors.get('source_url')}", f"- next_raw_path: `{anchors.get('next_raw_path')}`"]
+    dup = brief.get("duplicate_summary") or {}
+    lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
+    resource = brief.get("resource_caveats") or {}
+    lines.append(f"- resource status: {resource.get('status')} — {resource.get('policy')}")
+    lines.append("\n## Evidence cards")
+    for card in brief.get("evidence_cards") or []:
+        lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
+    if not brief.get("evidence_cards"):
+        lines.append("- no compact evidence cards; inspect `paper.raw.txt` or `paper_digest.json`.")
+    lines.append("\n## Next actions")
+    for action in brief.get("agent_actions") or []:
+        lines.append(f"- {action}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_evidence_report(bundle: dict[str, Any], *, preflight: dict[str, Any] | None, digest: dict[str, Any] | None, resource_boundary: dict[str, Any] | None) -> dict[str, Any]:
+    digest = digest or {}
+    resource_boundary = resource_boundary or {}
+    return {
+        "ok": True,
+        "status": "standardized",
+        "bundle_summary": {
+            "kind": bundle.get("kind"),
+            "source_url": bundle.get("source_url"),
+            "title_guess": bundle.get("title_guess"),
+            "next_raw_path": bundle.get("next_raw_path") or (preflight or {}).get("next_raw_path"),
+            "warnings": bundle.get("warnings") or [],
+        },
+        "preflight": {
+            "duplicate_summary": (preflight or {}).get("duplicate_summary") or {},
+            "queue_status": (preflight or {}).get("queue_status") or {"checked": False},
+        },
+        "paper_digest": {
+            "status": "standardized" if digest else "missing",
+            "abstract_cards": len(digest.get("abstract_cards") or []),
+            "section_cards": len(digest.get("section_cards") or []),
+            "equation_cards": len(digest.get("equation_cards") or []),
+            "result_cards": len(digest.get("result_cards") or []),
+            "warnings": len(digest.get("quality_warnings") or []),
+        },
+        "resource_boundary": {
+            "status": "standardized" if resource_boundary else "missing",
+            "github_count": len(resource_boundary.get("github") or []),
+            "github": resource_boundary.get("github") or [],
+            "project_pages": resource_boundary.get("project_pages") or [],
+            "hf_statuses": {key: value.get("status") for key, value in (resource_boundary.get("hf") or {}).items()},
+            "review_required": bool(resource_boundary.get("review_required")),
+            "manual_reason": resource_boundary.get("manual_reason"),
+            "summary": resource_status_summary(resource_boundary),
+            "policy": "External resource/probe details stay in evidence/closeout reports, not raw-note body.",
+        },
+    }
+
+
+def render_evidence_report_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("bundle_summary") or {}
+    preflight = report.get("preflight") or {}
+    digest = report.get("paper_digest") or {}
+    resource = report.get("resource_boundary") or {}
+    return (
+        "# Standardized evidence report\n\n"
+        f"- title: {summary.get('title_guess')}\n"
+        f"- source_url: {summary.get('source_url')}\n"
+        f"- next_raw_path: `{summary.get('next_raw_path')}`\n"
+        f"- duplicate_summary: {json.dumps(preflight.get('duplicate_summary') or {}, ensure_ascii=False, sort_keys=True)}\n"
+        f"- paper_digest: status={digest.get('status')}, abstract_cards={digest.get('abstract_cards')}, section_cards={digest.get('section_cards')}, equation_cards={digest.get('equation_cards')}, result_cards={digest.get('result_cards')}\n"
+        f"- resource_boundary: status={resource.get('status')}, github_count={resource.get('github_count')}, hf_statuses={json.dumps(resource.get('hf_statuses') or {}, ensure_ascii=False, sort_keys=True)}\n"
+        f"- policy: {resource.get('policy')}\n"
+    )
+
+
+def build_note_candidate(frontmatter: dict[str, Any], *, preflight: dict[str, Any] | None, digest: dict[str, Any] | None) -> dict[str, Any]:
+    title = frontmatter.get("title") or (preflight or {}).get("title") or "Untitled raw-fast note"
+    cards = _brief_cards_from_digest(digest, max_cards=8)
+    sections = [
+        ("一句话总结", "<!-- advisory: synthesize one source-grounded sentence; do not copy URLs or resource status. -->"),
+        ("论文摘要（中文）", "<!-- advisory: summarize the abstract and problem setting from evidence cards. -->"),
+        ("Motivation", "<!-- advisory: explain the research gap and why this paper matters. -->"),
+        ("Methodology", "<!-- advisory: integrate objectives, formulas, architecture, and method evidence in prose. -->"),
+        ("关键实验结果 / 作者结论", "<!-- advisory: write conclusions supported by result/table/figure cards, not copied tables. -->"),
+        ("对未来研究的启发", "<!-- advisory: list durable research implications. -->"),
+        ("可能的局限", "<!-- advisory: list limitations that are explicit or strongly implied by the source. -->"),
+        ("可继续追问的问题", "<!-- advisory: list follow-up questions for future reading. -->"),
+    ]
+    return {
+        "ok": True,
+        "advisory": True,
+        "title": title,
+        "next_raw_path": (preflight or {}).get("next_raw_path"),
+        "frontmatter": frontmatter,
+        "evidence_card_count": len(cards),
+        "sections": [{"heading": heading, "placeholder": placeholder} for heading, placeholder in sections],
+        "policy": "Candidate is deterministic scaffolding only; agent must synthesize scientific prose and run raw-fast verification.",
+    }
+
+
+def render_note_candidate_markdown(candidate: dict[str, Any]) -> str:
+    lines = [yamlish(candidate.get("frontmatter") or {}), ""]
+    lines.append("<!-- advisory: guarded candidate; fill prose from source evidence, then run raw-fast verifier. -->")
+    for section in candidate.get("sections") or []:
+        lines.extend(["", f"## {section.get('heading')}", "", section.get("placeholder") or ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], evidence_report: dict[str, Any], note_candidate: dict[str, Any], closeout_args: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw_resource = evidence_report.get("resource_boundary")
+    resource = raw_resource if isinstance(raw_resource, dict) else {}
+    resource_review_required = bool(resource.get("review_required"))
+    manual_paths: list[str] = []
+    source_refs = brief.get("source_refs") or {}
+    source_refs["note_candidate"] = "note_candidate.md"
+    source_refs["evidence_report"] = "evidence_report.md"
+    source_refs["agent_brief"] = "agent_brief.md"
+    return {
+        "ok": True,
+        "status": "ready" if not resource_review_required else "manual_required",
+        "protected_anchors": brief.get("protected_anchors") or {},
+        "duplicate_summary": brief.get("duplicate_summary") or {},
+        "queue_status": brief.get("queue_status") or {},
+        "evidence_cards": brief.get("evidence_cards") or [],
+        "resource_status_summary": resource.get("summary") or resource_status_summary(resource),
+        "resource_review_required": resource_review_required,
+        "manual_reason": resource.get("manual_reason") if resource_review_required else None,
+        "manual_reference_paths": manual_paths,
+        "source_refs": source_refs,
+        "closeout_args": closeout_args,
+        "closeout_args_path": None,
+        "agent_actions": [
+            "Read this handoff first; reopen referenced sidecars only for uncertain scientific claims or reported failures.",
+            "Do not run broad GitHub/HF/project discovery when resource_review_required is false.",
+            "Write the canonical raw note under protected_anchors.next_raw_path, then run closeout with generated closeout_args when available.",
+        ],
+        "note_candidate": {"path": "note_candidate.md", "advisory": bool(note_candidate.get("advisory", True))},
+    }
+
+
+def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
+    anchors = handoff.get("protected_anchors") or {}
+    lines = [
+        "# Raw-fast agent handoff",
+        "",
+        f"- status: {handoff.get('status')}",
+        f"- title: {anchors.get('title')}",
+        f"- source_url: {anchors.get('source_url')}",
+        f"- next_raw_path: `{anchors.get('next_raw_path')}`",
+        f"- resource_review_required: {handoff.get('resource_review_required')}",
+        f"- resource_status_summary: {handoff.get('resource_status_summary')}",
+    ]
+    dup = handoff.get("duplicate_summary") or {}
+    lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
+    if handoff.get("manual_reason"):
+        lines.append("\n## Manual follow-up")
+        lines.append(f"- reason: {json.dumps(handoff.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
+        for path in handoff.get("manual_reference_paths") or []:
+            lines.append(f"- read if needed: `{path}`")
+    lines.append("\n## Source refs")
+    for key, value in sorted((handoff.get("source_refs") or {}).items()):
+        if value:
+            lines.append(f"- {key}: `{value}`")
+    lines.append("\n## Evidence cards")
+    for card in handoff.get("evidence_cards") or []:
+        lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
+    if not handoff.get("evidence_cards"):
+        lines.append("- no compact evidence cards; inspect cited sidecars only for uncertain scientific claims.")
+    lines.append("\n## Next actions")
+    for action in handoff.get("agent_actions") or []:
+        lines.append(f"- {action}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_agent_automation_sidecars(
+    workdir: Path,
+    files: dict[str, str],
+    bundle: dict[str, Any],
+    *,
+    frontmatter: dict[str, Any],
+    preflight: dict[str, Any],
+    digest: dict[str, Any] | None,
+    resource_boundary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    write_json(workdir / "raw_fast_preflight.json", preflight)
+    write_text(workdir / "raw_fast_preflight.md", render_preflight_markdown(preflight))
+    files["raw_fast_preflight"] = "raw_fast_preflight.json"
+    files["raw_fast_preflight_markdown"] = "raw_fast_preflight.md"
+
+    brief = build_agent_brief(bundle, preflight=preflight, digest=digest, resource_boundary=resource_boundary)
+    write_json(workdir / "agent_brief.json", brief)
+    write_text(workdir / "agent_brief.md", render_agent_brief_markdown(brief))
+    files["agent_brief"] = "agent_brief.json"
+    files["agent_brief_markdown"] = "agent_brief.md"
+
+    report = build_evidence_report(bundle, preflight=preflight, digest=digest, resource_boundary=resource_boundary)
+    write_json(workdir / "evidence_report.json", report)
+    write_text(workdir / "evidence_report.md", render_evidence_report_markdown(report))
+    files["evidence_report"] = "evidence_report.json"
+    files["evidence_report_markdown"] = "evidence_report.md"
+
+    candidate = build_note_candidate(frontmatter, preflight=preflight, digest=digest)
+    write_json(workdir / "note_candidate.json", candidate)
+    write_text(workdir / "note_candidate.md", render_note_candidate_markdown(candidate))
+    files["note_candidate"] = "note_candidate.json"
+    files["note_candidate_markdown"] = "note_candidate.md"
+
+    handoff = build_agent_handoff(bundle, brief=brief, evidence_report=report, note_candidate=candidate)
+    write_json(workdir / "agent_handoff.json", handoff)
+    write_text(workdir / "agent_handoff.md", render_agent_handoff_markdown(handoff))
+    files["agent_handoff"] = "agent_handoff.json"
+    files["agent_handoff_markdown"] = "agent_handoff.md"
+
+    return {
+        "ok": True,
+        "status": "written",
+        "files": {
+            key: files[key]
+            for key in [
+                "raw_fast_preflight",
+                "agent_brief",
+                "agent_brief_markdown",
+                "evidence_report",
+                "evidence_report_markdown",
+                "note_candidate",
+                "note_candidate_markdown",
+                "agent_handoff",
+                "agent_handoff_markdown",
+            ]
+        },
+        "brief_cards": len(brief.get("evidence_cards") or []),
+        "handoff_status": handoff.get("status"),
+        "resource_review_required": bool(handoff.get("resource_review_required")),
+    }
+
+
 def scan_secrets(workdir: Path) -> dict[str, Any]:
     hits: list[dict[str, Any]] = []
     placeholder_hits: list[dict[str, Any]] = []
@@ -1180,6 +1761,8 @@ def process_pdf(
     resource_draft: bool = False,
     localize_figures: bool = False,
     image_slug: str | None = None,
+    state_dir: Path | None = None,
+    resource_health: str = "direct",
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     warnings: list[str] = []
@@ -1237,7 +1820,9 @@ def process_pdf(
     files["section_inventory"] = "section_inventory.json"
     files["figure_table_inventory"] = "figure_table_inventory.json"
 
-    resource_probe = timings.record("resource_probe", build_resource_probe, text, links, probes)
+    tex_files_for_resources, tex_text_for_resources = read_tex_bundle(workdir)
+    resource_text = text + ("\n" + tex_text_for_resources if tex_text_for_resources else "")
+    resource_probe = timings.record("resource_probe", build_resource_probe, resource_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12))
     write_json(workdir / "resource_probe.json", resource_probe)
     files["resource_probe"] = "resource_probe.json"
 
@@ -1252,7 +1837,7 @@ def process_pdf(
     files["candidate_frontmatter"] = "candidate_frontmatter.json"
     files["note_skeleton"] = "note_skeleton.md"
 
-    _write_pdf_enrichment_sidecars(
+    enrichment = _write_pdf_enrichment_sidecars(
         root=root,
         workdir=workdir,
         files=files,
@@ -1268,6 +1853,7 @@ def process_pdf(
         localize_figures=localize_figures,
         image_slug=image_slug,
     )
+    preflight = timings.record("raw_fast_preflight", build_raw_fast_preflight, root, title, url, kind, workdir=workdir, state_dir=state_dir)
 
     payload = {
         "ok": True,
@@ -1282,9 +1868,21 @@ def process_pdf(
         "docling": docling_result,
         "title_guess": title,
         "files": files,
-        "next_raw_path": next_raw_path(root, title),
+        "next_raw_path": preflight["next_raw_path"],
+        "preflight": preflight,
         "warnings": warnings,
     }
+    payload["agent_automation"] = timings.record(
+        "agent_automation_sidecars",
+        write_agent_automation_sidecars,
+        workdir,
+        files,
+        payload,
+        frontmatter=fm,
+        preflight=preflight,
+        digest=enrichment.get("paper_digest"),
+        resource_boundary=enrichment.get("resource_draft"),
+    )
     attach_timings(payload, timings)
     write_json(workdir / "evidence_bundle.json", payload)
     return payload
@@ -1303,11 +1901,13 @@ def process_arxiv(
     resource_draft: bool = False,
     localize_figures: bool = False,
     image_slug: str | None = None,
+    state_dir: Path | None = None,
+    resource_health: str = "direct",
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     arxiv_id = arxiv_id_from_url(url)
     if not arxiv_id:
-        return process_pdf(url, "direct-pdf", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug)
+        return process_pdf(url, "direct-pdf", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
     api_url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"id_list": arxiv_id})
     abs_url = f"https://arxiv.org/abs/{arxiv_id}"
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
@@ -1322,7 +1922,7 @@ def process_arxiv(
     tex_text = "\n".join((workdir / "source" / p).read_text(encoding="utf-8", errors="replace")[:200000] for p in tex_files[:20])
     tex_figures = figure_table_inventory(tex_text)
     write_json(workdir / "source_inventory.json", {"eprint": eprint, "source_extract": source_extract, "tex_files": tex_files[:200], "figure_table_items": tex_figures})
-    payload = process_pdf(pdf_url, "arxiv", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug)
+    payload = process_pdf(pdf_url, "arxiv", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
     payload["arxiv"] = {"id": arxiv_id, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200]}
     payload.setdefault("files", {})["api"] = "api.xml"
     payload.setdefault("files", {})["abs_html"] = "abs.html"
@@ -1338,6 +1938,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
     parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, default=None, help="Optional native state dir to read pending queue counts for preflight; never mutated by this command")
     parser.add_argument("--probe", action="append", default=None, choices=["arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests.")
     parser.add_argument("--pdf-backend", choices=["docling", "pdftotext", "auto"], default="docling")
     parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if the requested structured PDF backend fails instead of falling back to pdftotext evidence")
@@ -1345,6 +1946,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-digest", action="store_true", help="Write paper_digest.json/md and deterministic note block drafts as temp sidecars")
     parser.add_argument("--resource-draft", action="store_true", help="Write resource_boundary_draft.json/md from completed probes")
     parser.add_argument("--localize-figures", action="store_true", help="Render/copy safe source figures into the evidence workdir for temporary inspection; do not embed them in structured raw notes")
+    parser.add_argument("--resource-health", choices=["direct", "none"], default="direct", help="Exact-link health mode for source-exposed GitHub/HF/project URLs. --probe none disables network health.")
     parser.add_argument("--image-slug", default=None, help="Required with --localize-figures; slug under the workdir-local localized_figures_assets/ directory")
     return parser.parse_args()
 
@@ -1354,6 +1956,7 @@ def main() -> int:
     args = parse_args()
     root = args.root.resolve()
     workdir = args.workdir.resolve()
+    state_dir = args.state_dir.resolve() if args.state_dir else None
     if workdir == root or workdir.is_relative_to(root):
         print_json({"ok": False, "stage": "preflight", "error": "workdir_inside_wiki_root", "root": str(root), "workdir": str(workdir), "timings": timings.snapshot()})
         return 1
@@ -1364,9 +1967,9 @@ def main() -> int:
     probes = args.probe if args.probe is not None else ["arxiv", "doi"]
     kind = detect_kind(args.url, args.kind)
     if kind == "arxiv":
-        payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug)
+        payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
     else:
-        payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug)
+        payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
     attach_timings(payload, timings)
     write_json(workdir / "evidence_bundle.json", payload)
     print_json(payload)

@@ -398,3 +398,124 @@ def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tm
     assert native_status["standalone_native_should_refresh"] is True
     assert "graph-ready pending `0`" in entry
     assert "standalone native ledger pending `1`" in entry
+
+
+def test_raw_fast_closeout_derives_args_from_evidence_bundle_without_mutation(tmp_path: Path) -> None:
+    source_url = "https://arxiv.org/abs/2601.0101"
+    tmp_bundle = tmp_path / "bundle"
+    write(
+        tmp_bundle / "evidence_report.json",
+        json.dumps(
+            {
+                "resource_boundary": {
+                    "status": "standardized",
+                    "github_count": 0,
+                    "hf_statuses": {"models": "not_checked"},
+                }
+            }
+        ),
+    )
+    write(
+        tmp_bundle / "evidence_bundle.json",
+        json.dumps(
+            {
+                "ok": True,
+                "kind": "arxiv",
+                "source_url": source_url,
+                "title_guess": "Closeout Derived Paper",
+                "next_raw_path": "raw/clip/2601/26010114_Closeout-Derived-Paper.md",
+                "preflight": {
+                    "next_raw_path": "raw/clip/2601/26010114_Closeout-Derived-Paper.md",
+                    "source_identity": {"arxiv_id_base": "2601.0101"},
+                },
+                "files": {"evidence_report": "evidence_report.json"},
+            }
+        ),
+    )
+
+    derived = raw_fast_closeout.derive_closeout_args_from_bundle(tmp_bundle / "evidence_bundle.json")
+
+    assert derived["ok"] is True
+    assert derived["raw_file"] == "raw/clip/2601/26010114_Closeout-Derived-Paper.md"
+    assert derived["title"] == "Closeout Derived Paper"
+    assert derived["source_id"] == source_url
+    assert "Closeout Derived Paper" in derived["patterns"]
+    assert source_url in derived["patterns"]
+    assert "2601.0101" in derived["patterns"]
+    assert derived["topic_hints"] == ["paper", "raw-fast", "arxiv"]
+    assert "resource_boundary=standardized" in derived["resource_status_summary"]
+    assert derived["tmp"] == [str(tmp_bundle)]
+    assert "--raw-file" in derived["argv_tail"]
+    assert not (tmp_bundle / "pending_wiki_integration.json").exists()
+
+
+def test_raw_fast_closeout_captures_standardized_evidence_report(tmp_path: Path) -> None:
+    tmp_bundle = tmp_path / "bundle"
+    state = tmp_path / "state"
+    write(
+        tmp_bundle / "evidence_report.json",
+        json.dumps(
+            {
+                "status": "standardized",
+                "resource_boundary": {"status": "standardized", "github_count": 0, "hf_statuses": {"models": "not_checked"}},
+                "paper_digest": {"status": "standardized", "equation_cards": 1},
+            }
+        ),
+    )
+    write(tmp_bundle / "agent_brief.json", json.dumps({"protected_anchors": {"next_raw_path": "raw/clip/2601/26010114_Report.md"}, "evidence_cards": [{"kind": "abstract"}]}))
+    write(
+        tmp_bundle / "evidence_bundle.json",
+        json.dumps(
+            {
+                "ok": True,
+                "kind": "arxiv",
+                "source_url": "https://arxiv.org/abs/2601.0101",
+                "title_guess": "Report Capture Paper",
+                "files": {"evidence_report": "evidence_report.json", "agent_brief": "agent_brief.json"},
+                "timings": {"total_seconds": 3.0},
+            }
+        ),
+    )
+    args = argparse.Namespace(tmp=[tmp_bundle], state_dir=state, raw_file="raw/clip/2601/26010114_Report.md")
+
+    captured = raw_fast_closeout.capture_tmp_evidence_reports(args)
+
+    assert captured["count"] == 1
+    summary = captured["summaries"][0]
+    assert summary["standardized_evidence_report"]["resource_boundary"]["status"] == "standardized"
+    assert summary["agent_brief"]["evidence_card_count"] == 1
+    report_path = Path(summary["report_path"])
+    assert report_path.exists()
+    saved = json.loads(report_path.read_text(encoding="utf-8"))
+    assert saved["standardized_evidence_report"]["paper_digest"]["status"] == "standardized"
+
+
+def test_raw_fast_closeout_session_summary_is_compact_and_actionable(tmp_path: Path) -> None:
+    final_report = {
+        "ok": True,
+        "raw_fast_ok": True,
+        "raw_file": "raw/clip/2601/26010115_Summary-Paper.md",
+        "final_verify": {
+            "report_path": str(tmp_path / "state" / "raw_fast_reports" / "summary_final_verify.json"),
+            "tmp_absent": {str(tmp_path / "bundle"): True},
+        },
+        "evidence_reports": {"count": 1, "summaries": [{"report_path": str(tmp_path / "state" / "raw_fast_reports" / "summary_evidence.json")} ]},
+        "wiki_integration": {"pending_count": 5, "actionable_pending_count": 5, "threshold": 10, "should_integrate": False, "next_required_action": "none"},
+        "native_refresh_status": {"blocked_by_pending_wiki_integration": True, "graph_ready_pending_count": 0, "standalone_native_pending_count": 1, "should_refresh": False},
+        "compact_log_entry": "- 2026-01-01 raw-fast clip: `raw/clip/2601/26010115_Summary-Paper.md` — raw_fast_ok=true",
+        "timings": {"total_seconds": 17.25},
+    }
+
+    summary = raw_fast_closeout.build_raw_fast_session_summary(final_report)
+
+    assert summary["ok"] is True
+    assert summary["raw_fast_ok"] is True
+    assert summary["raw_file"] == final_report["raw_file"]
+    assert summary["final_report"] == final_report["final_verify"]["report_path"]
+    assert summary["wiki_pending"] == 5
+    assert summary["native_blocked_by_wiki"] is True
+    assert summary["tmp_absent_all"] is True
+    assert "raw_fast_ok=true" in summary["markdown"]
+    assert "wiki pending=5" in summary["markdown"]
+    assert "stdout_tail" not in summary["markdown"]
+    assert len(summary["markdown"].splitlines()) <= 8
