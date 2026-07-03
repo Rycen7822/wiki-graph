@@ -194,7 +194,6 @@ def test_raw_fast_ingest_prepare_main_failure_raises_manual_reference_reminder(t
 
 @pytest.mark.requires_fitz
 def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args(tmp_path: Path) -> None:
-    pytest.importorskip("docling.document_converter")
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
     _write_tiny_pdf(source_pdf)
