@@ -154,6 +154,23 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     ledger = load_pending_wiki_integration_ledger(state)
     assert ledger["pending"][0]["raw_path"] == raw_rel
     assert "resources" not in ledger["pending"][0]["required_sections"]
+def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_and_plan_without_local_payload() -> None:
+    compact = raw_fast_closeout.compact_auto_integrate(
+        {
+            "runner": "local",
+            "plan_path": "/tmp/plan.json",
+            "dry_run": False,
+            "local_result": {"validation": {"input_fingerprints": {"raw": "bulk"}}},
+            "post_status": {"pending_count": 0, "should_integrate": False},
+        }
+    )
+
+    assert compact["runner"] == "local"
+    assert compact["plan_path"] == "/tmp/plan.json"
+    assert compact["post_status"]["pending_count"] == 0
+    assert "local_result" not in compact
+
+
 def test_raw_fast_closeout_native_refresh_defaults_to_status_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     args = _raw_fast_closeout_native_args(tmp_path, "status")
     status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
@@ -249,6 +266,14 @@ def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: P
     assert result.returncode != 0
     assert payload["stage"] == "pre_verify"
     assert payload["raw_fast_ok"] is False
+    pre_verify = payload["pre_verify"]
+    assert pre_verify["verifier_path"].endswith("raw_fast_note_verify.py")
+    assert pre_verify["diagnostic_hint"]["path"].endswith("raw_fast_note_verify.py")
+    assert "repair anchor" in pre_verify["diagnostic_hint"]["message"]
+    diagnostics = {item["code"]: item for item in pre_verify["blocker_diagnostics"]}
+    assert "structured_evidence_sections_insufficient" in diagnostics
+    assert "figure_table_evidence_integrated" in diagnostics
+    assert diagnostics["figure_table_evidence_integrated"]["fix_hint"].startswith("Integrate figure/table")
     _assert_timing_step(payload, "pre_verify")
     assert "mark_pending" not in payload["timings"]["steps"]
     assert load_pending_wiki_integration_ledger(state)["pending"] == []

@@ -121,6 +121,27 @@ def test_query_smoke_request_posts_native_query_data() -> None:
         ),
         ("close",),
     ]
+
+
+def test_query_smoke_request_accepts_zvec_lexical_backend() -> None:
+    class Response:
+        status = 200
+
+        def read(self) -> bytes:
+            return b'{"context_blocks":[],"trace":{"retrieval_backend":"zvec+lexical","vector_hit_count":1}}'
+
+        def close(self) -> None:
+            pass
+
+    result = batch_native_refresh.query_smoke_request(
+        "http://127.0.0.1:9621/query/data",
+        query="native smoke",
+        urlopen=lambda request, *, timeout: Response(),
+    )
+
+    assert result["ok"] is True
+
+
 def test_query_smoke_request_posts_explicit_query_vector_without_echoing_full_vector() -> None:
     calls = []
 

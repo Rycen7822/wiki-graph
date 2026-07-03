@@ -15,6 +15,14 @@ from support import sample_wiki, write  # noqa: E402
 from ops import raw_fast_closeout  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
+
+LEGACY_EXTRACTOR_KEY = "pdf" + "totext"
+LEGACY_RAW_TEXT_KEY = "raw" + "_text"
+LEGACY_LAYOUT_TEXT_KEY = "layout" + "_text"
+LEGACY_RAW_TEXT_FILE = "paper." + "raw" + ".txt"
+LEGACY_LAYOUT_TEXT_FILE = "paper." + "layout" + ".txt"
+
+
 def _write_tiny_pdf(path: Path) -> None:
     fitz = pytest.importorskip("fitz")
     doc = fitz.open()
@@ -76,6 +84,122 @@ The fixture has one synthetic limitation.
 \end{document}
 """.strip(),
     )
+
+
+def _write_tex_first_source_fixture(workdir: Path) -> None:
+    write(workdir / "source" / "defs.tex", r"\newcommand{\loss}{\mathcal{L}}")
+    write(
+        workdir / "source" / "main.tex",
+        r"""
+\title{TeX First Fixture Paper}
+\begin{document}
+\maketitle
+\begin{abstract}
+This paper tests that raw-fast uses arXiv TeX source before any PDF text extraction.
+\end{abstract}
+\section{Introduction}
+The TeX source contains the main paper prose and should be the default evidence.
+\section{Method}
+The method minimizes $\loss=x+y$ and defines the exact objective in source.
+\begin{equation}
+\loss=x+y
+\label{eq:tex-first-loss}
+\end{equation}
+\section{Results}
+The TeX-backed result states that source-first handoff is sufficient.
+\section{Limitations}
+The fixture limitation is synthetic and intentionally short.
+\end{document}
+""".strip(),
+    )
+
+
+def _write_fake_docling_outputs(workdir: Path, markdown: str = "# Docling Fallback Paper\n\nAbstract\nDocling text is the PDF fallback.\n\n## Method\nFallback method text.") -> None:
+    write(workdir / "docling.md", markdown)
+    write(workdir / "docling.json", json.dumps({"ok": True, "markdown_chars": len(markdown)}) + "\n")
+
+
+def test_raw_fast_evidence_bundle_title_from_text_skips_docling_image_placeholder() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    text = "<!-- image -->\n\n## Next-Generation Agentic Reinforcement Learning Systems Enable Self-Evolving Agents\n\n## Abstract\nBody"
+
+    assert raw_fast_evidence_bundle.title_from_text(text) == "Next-Generation Agentic Reinforcement Learning Systems Enable Self-Evolving Agents"
+
+
+def test_raw_fast_evidence_bundle_pdf_title_falls_back_to_url_stem_when_docling_only_has_placeholders() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    title = raw_fast_evidence_bundle.pdf_title_from_text_or_url("<!-- image -->\n\n<!-- formula-not-decoded -->", "https://raw.githubusercontent.com/areal-project/AReaL/main/docs/paper/AReaL2.0_report.pdf")
+
+    assert title == "AReaL2.0_report"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_id"),
+    [
+        ("https://paperswithcode.co/paper/2606.28436", "2606.28436"),
+        ("https://paperswithcode.co/paper/arxiv/2606.30410v2", "2606.30410"),
+        ("https://huggingface.co/papers/2606.02572", "2606.02572"),
+        ("https://www.alphaxiv.org/abs/2606.04036", "2606.04036"),
+        ("https://alphaxiv.org/overview/2606.04036v3?tab=discussion", "2606.04036"),
+    ],
+)
+def test_raw_fast_evidence_bundle_recognizes_cross_site_arxiv_routes(url: str, expected_id: str) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    assert raw_fast_evidence_bundle.arxiv_id_from_url(url) == expected_id
+    assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "arxiv"
+
+
+def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "cross-site-arxiv"
+    supplied_url = "https://huggingface.co/papers/2606.02572"
+
+    def fake_fetch_text(url: str, timeout: int) -> dict:
+        if "export.arxiv.org" in url:
+            return {"ok": True, "status": 200, "text": "<feed><entry><title>Cross Site Fixture Paper</title></entry></feed>"}
+        return {"ok": True, "status": 200, "text": "<html><title>Cross Site Fixture Paper</title></html>"}
+
+    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake tar")
+        return {"ok": True, "url": url, "dest": str(dest), "bytes": dest.stat().st_size, "sha256": "fake"}
+
+    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
+        _write_tex_first_source_fixture(workdir)
+        return {"ok": True, "extracted_count": 2, "errors": []}
+
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
+
+    payload = raw_fast_evidence_bundle.process_arxiv(
+        supplied_url,
+        root,
+        workdir,
+        "docling",
+        False,
+        ["none"],
+        30,
+        paper_digest=True,
+        resource_draft=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["kind"] == "arxiv"
+    assert payload["source_url"] == "https://arxiv.org/abs/2606.02572"
+    assert payload["supplied_url"] == supplied_url
+    assert payload["arxiv"]["id"] == "2606.02572"
+    assert payload["arxiv"]["supplied_url"] == supplied_url
+    frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
+    assert frontmatter["source"] == "https://arxiv.org/abs/2606.02572"
+    assert supplied_url not in frontmatter.values()
+
+
 def test_raw_fast_evidence_bundle_process_pdf_has_named_sidecar_seams() -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -88,8 +212,149 @@ def test_raw_fast_evidence_bundle_process_pdf_has_named_sidecar_seams() -> None:
     }
 
     assert {name for name in expected_helpers if callable(getattr(raw_fast_evidence_bundle, name, None))} == expected_helpers
+
+
+def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "tex-first-arxiv"
+
+    def fake_fetch_text(url: str, timeout: int) -> dict:
+        if "export.arxiv.org" in url:
+            return {"ok": True, "status": 200, "text": "<feed><entry><title>TeX First Fixture Paper</title></entry></feed>"}
+        return {"ok": True, "status": 200, "text": "<html><title>TeX First Fixture Paper</title></html>"}
+
+    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake eprint tarball")
+        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
+
+    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
+        _write_tex_first_source_fixture(workdir)
+        return {"ok": True, "extracted_count": 2, "errors": []}
+
+    def forbidden_process_pdf(*args, **kwargs):
+        raise AssertionError("arXiv TeX-success route must not call process_pdf or parse PDF text")
+
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "process_pdf", forbidden_process_pdf)
+
+    payload = raw_fast_evidence_bundle.process_arxiv(
+        "https://arxiv.org/abs/2600.00001",
+        root,
+        workdir,
+        "docling",
+        False,
+        ["none"],
+        5,
+        raw_fast_evidence_bundle.TimingRecorder(),
+        paper_digest=True,
+        resource_draft=True,
+        resource_health="none",
+    )
+
+    assert payload["ok"] is True
+    assert payload["pdf_backend_effective"] == "tex_source"
+    assert LEGACY_EXTRACTOR_KEY not in payload
+    assert LEGACY_RAW_TEXT_KEY not in payload["files"]
+    assert LEGACY_LAYOUT_TEXT_KEY not in payload["files"]
+    assert not (workdir / LEGACY_RAW_TEXT_FILE).exists()
+    assert not (workdir / LEGACY_LAYOUT_TEXT_FILE).exists()
+    read_plan = json.loads((workdir / "tex_read_plan.json").read_text(encoding="utf-8"))
+    assert read_plan["source_kind"] == "tex_source"
+    assert read_plan["fallback_used"] is False
+    assert read_plan["main_tex"] == "source/main.tex"
+    assert read_plan["first_reads"]
+    handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["source_read_plan"]["source_kind"] == "tex_source"
+    assert handoff["manual_reference_policy"]["mode"] == "only_on_manual_required"
+    assert handoff["manual_reference_policy"]["manual_references_visible"] is False
+    assert handoff["automation_next_action"]["action"] == "follow_source_read_plan"
+    assert handoff["manual_reference_paths"] == []
+    brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
+    assert brief["evidence_cards"][0]["kind"] == "abstract"
+    assert brief["evidence_cards"][0]["source_bucket"] == "abstract_card"
+    handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
+    assert "Default next action: read the TeX spans" in handoff_md
+    assert "Manual references are hidden unless this handoff reports manual_required=true" in handoff_md
+    assert LEGACY_RAW_TEXT_FILE not in handoff_md
+    assert LEGACY_LAYOUT_TEXT_FILE not in handoff_md
+
+
+def test_raw_fast_evidence_bundle_direct_pdf_uses_docling_without_legacy_pdf_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "docling-direct-pdf"
+
+    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"%PDF fake fixture")
+        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
+
+    def fake_docling(pdf: Path, workdir_arg: Path, strict: bool = False, timeout: int = 120) -> dict:
+        _write_fake_docling_outputs(workdir_arg)
+        return {"ok": True, "markdown": str(workdir_arg / "docling.md"), "json": str(workdir_arg / "docling.json"), "markdown_chars": (workdir_arg / "docling.md").stat().st_size}
+
+    assert not hasattr(raw_fast_evidence_bundle, "run_" + LEGACY_EXTRACTOR_KEY)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "run_pdfinfo", lambda pdf, out: {"ok": True, "returncode": 0})
+    monkeypatch.setattr(raw_fast_evidence_bundle, "extract_pdf_links", lambda pdf, out: {"ok": True, "links": []})
+    monkeypatch.setattr(raw_fast_evidence_bundle, "run_docling", fake_docling)
+
+    payload = raw_fast_evidence_bundle.process_pdf(
+        "https://example.test/docling-only.pdf",
+        "direct-pdf",
+        root,
+        workdir,
+        "docling",
+        False,
+        ["none"],
+        5,
+        raw_fast_evidence_bundle.TimingRecorder(),
+        paper_digest=True,
+        resource_draft=True,
+        resource_health="none",
+    )
+
+    assert payload["ok"] is True
+    assert payload["pdf_backend_effective"] == "docling"
+    assert LEGACY_EXTRACTOR_KEY not in payload
+    assert LEGACY_RAW_TEXT_KEY not in payload["files"]
+    assert LEGACY_LAYOUT_TEXT_KEY not in payload["files"]
+    assert (workdir / "docling.md").exists()
+    assert (workdir / "docling.json").exists()
+    assert not (workdir / LEGACY_RAW_TEXT_FILE).exists()
+    assert not (workdir / LEGACY_LAYOUT_TEXT_FILE).exists()
+    handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["source_read_plan"]["source_kind"] == "docling_pdf"
+
+
+def test_raw_fast_evidence_bundle_digest_ignores_stale_legacy_pdf_text_files(tmp_path: Path) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    workdir = tmp_path / "digest-source-priority"
+    _write_fake_docling_outputs(workdir)
+    write(workdir / LEGACY_LAYOUT_TEXT_FILE, f"Stale {LEGACY_EXTRACTOR_KEY} layout must not become a source priority.")
+    write(workdir / LEGACY_RAW_TEXT_FILE, f"Stale {LEGACY_EXTRACTOR_KEY} raw text must not become a source priority.")
+
+    digest = raw_fast_evidence_bundle.build_paper_digest(
+        workdir,
+        "Docling Fallback Paper",
+        "https://example.test/docling-only.pdf",
+        files={"docling_markdown": "docling.md"},
+    )
+
+    assert digest["source_priority"] == ["docling"]
+    assert LEGACY_EXTRACTOR_KEY not in digest["source_priority"]
+    assert LEGACY_LAYOUT_TEXT_FILE not in digest["files_used"]
+    assert LEGACY_RAW_TEXT_FILE not in digest["files_used"]
 @pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
+    pytest.importorskip("docling.document_converter")
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
     _write_tiny_pdf(source_pdf)
@@ -119,11 +384,17 @@ def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docli
     assert payload["ok"] is True
     assert payload["kind"] == "direct-pdf"
     assert payload["pdf_backend_requested"] == "docling"
+    assert payload["pdf_backend_effective"] == "docling"
     assert (workdir / "paper.pdf").exists()
-    assert (workdir / "paper.layout.txt").exists()
+    assert (workdir / "docling.md").exists()
+    assert (workdir / "docling.json").exists()
+    assert not (workdir / LEGACY_LAYOUT_TEXT_FILE).exists()
+    assert not (workdir / LEGACY_RAW_TEXT_FILE).exists()
+    assert (workdir / "source_read_plan.json").exists()
     assert (workdir / "note_skeleton.md").exists()
     assert (workdir / "evidence_bundle.json").exists()
     assert "raw/clip/" in payload["next_raw_path"]
+    assert payload["source_read_plan"]["source_kind"] == "docling_pdf"
     secret_scan = json.loads((workdir / "secret_scan.json").read_text(encoding="utf-8"))
     assert secret_scan["strict_secret_hits"] == []
     assert not (root / "evidence_bundle.json").exists()

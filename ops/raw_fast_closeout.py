@@ -141,6 +141,54 @@ def raw_fast_ok(report: Any) -> bool:
     return isinstance(report, dict) and bool(report.get("raw_fast_ok"))
 
 
+CLOSEOUT_BLOCKER_DIAGNOSTICS = {
+    "structured_evidence_sections_insufficient": ("Formula or figure/table evidence is not integrated into the allowed narrative sections.", "Use nested structured evidence diagnostics; edit the raw note content, not verifier code."),
+    "figure_table_evidence_integrated": ("Methodology, Results, and Limitations lack figure/table evidence or an explicit checked absence statement.", "Integrate figure/table evidence into Methodology, Results, or Limitations, or explicitly state that the source exposes no useful figures/tables."),
+    "formula_evidence_in_methodology": ("Methodology lacks formula/objective evidence or an explicit checked absence statement.", "Integrate formula/objective evidence into Methodology, or explicitly state that the source exposes no central reusable formula/objective."),
+    "obsidian_math_delimiters": ("Raw-note formulas use non-rendering MathJax delimiters for Obsidian.", "Use Obsidian-renderable dollar math: convert inline \\(...\\) to $...$ and display \\[...\\] to $$...$$."),
+}
+
+
+def _closeout_diagnostic_entry(code: str, *, verifier_path: Path, parent_code: str | None = None) -> dict[str, str]:
+    summary, fix_hint = CLOSEOUT_BLOCKER_DIAGNOSTICS.get(
+        code,
+        ("Raw-fast verifier reported this blocker.", "Use the report fields and verifier path as the repair anchor."),
+    )
+    entry = {
+        "code": code,
+        "summary": summary,
+        "fix_hint": fix_hint,
+        "owner_path": str(verifier_path),
+        "owner_function": "integrated_evidence_issues" if code in {"figure_table_evidence_integrated", "formula_evidence_in_methodology"} else "main",
+        "inspect_hint": "Read owner_path for verifier rule details when needed.",
+    }
+    if parent_code:
+        entry["parent_code"] = parent_code
+    return entry
+
+
+def augment_verifier_report(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any]:
+    verifier_path = Path(args.verifier).expanduser().resolve(strict=False)
+    report.setdefault("verifier_path", str(verifier_path))
+    if "blocker_diagnostics" not in report:
+        diagnostics: list[dict[str, str]] = []
+        for blocker in report.get("raw_fast_blockers") or []:
+            blocker_code = str(blocker)
+            diagnostics.append(_closeout_diagnostic_entry(blocker_code, verifier_path=verifier_path))
+            if blocker_code == "structured_evidence_sections_insufficient":
+                for issue in report.get("structured_evidence_sections_insufficient") or []:
+                    diagnostics.append(_closeout_diagnostic_entry(str(issue), verifier_path=verifier_path, parent_code=blocker_code))
+        report["blocker_diagnostics"] = diagnostics
+    report.setdefault(
+        "diagnostic_hint",
+        {
+            "path": str(verifier_path),
+            "message": "Use blocker_diagnostics as the repair anchor; rerun closeout after updating the raw note.",
+        },
+    )
+    return report
+
+
 def report_path_for(args: argparse.Namespace, label: str) -> Path:
     safe_raw = re.sub(r"[^0-9A-Za-z_.-]+", "_", args.raw_file).strip("_") or "raw_note"
     path = args.state_dir / "raw_fast_reports" / f"{safe_raw}_{label}.json"
@@ -360,6 +408,7 @@ def verify_note(args: argparse.Namespace, tmp_paths: list[Path] | None = None, l
     report = {"command_returncode": result["returncode"], **report, "stderr_tail": result.get("stderr_tail", "")}
     if result.get("error"):
         report["runner_error"] = {"error": result.get("error"), "message": result.get("message")}
+    report = augment_verifier_report(args, report)
     report["report_path"] = write_report(args, label, report)
     return report
 
@@ -495,8 +544,10 @@ def compact_auto_integrate(auto: dict[str, Any]) -> dict[str, Any]:
             "ran",
             "skipped",
             "skip_reason",
+            "runner",
             "runner_returncode",
             "prompt_path",
+            "plan_path",
         ]
         if key in auto
     }

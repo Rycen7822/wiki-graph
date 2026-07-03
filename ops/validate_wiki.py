@@ -26,6 +26,43 @@ def validation_reuse_status(path: Path, *, fresh: bool, rejections: list[str] | 
     return status
 
 
+def validation_summary(report: dict[str, Any]) -> dict[str, Any]:
+    raw_errors = report.get("errors")
+    raw_warnings = report.get("warnings")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    warnings = raw_warnings if isinstance(raw_warnings, list) else []
+    summary: dict[str, Any] = {
+        "ok": not errors,
+        "errors_count": len(errors),
+        "warnings_count": len(warnings),
+        "generated_at": report.get("generated_at"),
+        "compiled_count": report.get("compiled_count"),
+        "index_total": report.get("index_total"),
+        "index_wikilinks": report.get("index_wikilinks"),
+        "active_raw_clips": report.get("active_raw_clips"),
+        "raw_clip_map_snapshot": report.get("raw_clip_map_snapshot"),
+        "broken_wikilinks": report.get("broken_wikilinks"),
+        "missing_source_refs": report.get("missing_source_refs"),
+        "raw_filename_drift": report.get("raw_filename_drift"),
+        "wiki_root_machine_pollution": report.get("wiki_root_machine_pollution"),
+        "report_path": report.get("report_path"),
+        "reused_validation_report": report.get("reused_validation_report"),
+    }
+    if report.get("validation_reuse"):
+        summary["validation_reuse"] = report.get("validation_reuse")
+    if report.get("raw_clip_map_sync"):
+        raw_sync = report.get("raw_clip_map_sync")
+        if isinstance(raw_sync, dict):
+            summary["raw_clip_map_sync"] = {
+                "ok": raw_sync.get("ok"),
+                "changed": raw_sync.get("changed"),
+                "reason": raw_sync.get("reason"),
+                "active_raw_clips": raw_sync.get("active_raw_clips"),
+                "current_snapshot": raw_sync.get("current_snapshot"),
+            }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 def load_reusable_validation_report(path: Path, root: Path, state_dir: Path, workdir: Path | None, *, full: bool) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -59,6 +96,7 @@ def main() -> int:
     parser.add_argument("--write-report", action="store_true")
     parser.add_argument("--sync-raw-map-snapshot", action="store_true", help="Synchronize _meta/raw-clip-map.md Active raw clips marker before validation")
     parser.add_argument("--allow-errors", action="store_true")
+    parser.add_argument("--summary-only", action="store_true", help="Print a compact validation summary while preserving any full --write-report JSON on disk")
     parser.add_argument("--reuse-validation-report", type=Path)
     args = parser.parse_args()
 
@@ -72,7 +110,7 @@ def main() -> int:
             full=args.full,
         )
         if reused_report is not None:
-            print_json(reused_report)
+            print_json(validation_summary(reused_report) if args.summary_only else reused_report)
             return 0 if args.allow_errors or not reused_report["errors"] else 1
 
     validate_kwargs: dict[str, Any] = {"full": args.full, "write_report": args.write_report}
@@ -86,7 +124,7 @@ def main() -> int:
     )
     if reuse_status is not None:
         report["validation_reuse"] = reuse_status
-    print_json(report)
+    print_json(validation_summary(report) if args.summary_only else report)
     return 0 if args.allow_errors or not report["errors"] else 1
 
 
