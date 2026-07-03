@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 from support import sample_wiki, write  # noqa: E402
 from ops import batch_native_refresh  # noqa: E402
 from ops import batch_wiki_integration  # noqa: E402
+from ops.wiki_integration_plan import _canonical_plan_hash  # noqa: E402
 from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD  # noqa: E402
@@ -62,3 +63,125 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
     assert "references/raw-fast-batch-wiki-integration.md" in prompt
     assert "references/wiki-core-operations.md" in prompt
     assert "references/wiki-operational-pitfalls.md" not in prompt
+
+
+def _write_plan(path: Path, root: Path, state: Path, operations: list[dict], *, compiled_page_writes: list[dict] | None = None, plan_hash: str | None = None) -> dict:
+    compiled_page_writes = compiled_page_writes or []
+    plan = {
+        "schema_version": 1,
+        "dry_run": True,
+        "writes_wiki": False,
+        "root": str(root),
+        "state_dir": str(state),
+        "reason": "threshold",
+        "operations": operations,
+        "compiled_page_writes": compiled_page_writes,
+    }
+    plan["plan_hash"] = plan_hash or _canonical_plan_hash(operations, compiled_page_writes)
+    write(path, json.dumps(plan, ensure_ascii=False, indent=2))
+    return plan
+
+
+def test_apply_plan_cli_updates_machine_owned_maps_and_log(tmp_path: Path, capsys) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wiki-graph" / "state"
+    write(root / "log.md", "# Wiki Log\n")
+    raw_path = "raw/clip/2601/26010102_New-Paper.md"
+    plan_path = state / "wiki_integration_plans" / "plan.json"
+    plan = _write_plan(
+        plan_path,
+        root,
+        state,
+        [
+            {
+                "op": "raw_map_upsert",
+                "raw_path": raw_path,
+                "title": "New Paper",
+                "source_id": "https://arxiv.org/abs/2601.0102",
+                "required_sections": ["summary", "abstract"],
+            },
+            {"op": "topic_map_route", "topic": "local execution", "raw_path": raw_path, "title": "New Paper"},
+            {"op": "log_batch_entry", "routed_paths": [raw_path], "review_paths": [], "reason": "threshold"},
+        ],
+    )
+
+    code = batch_wiki_integration.main(
+        [
+            "apply-plan",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--plan",
+            str(plan_path),
+            "--reason",
+            "threshold",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["applied"] is True
+    assert payload["writes_wiki"] is True
+    assert payload["plan_hash"] == plan["plan_hash"]
+    assert payload["operations_applied"] == 3
+    assert raw_path in (root / "_meta" / "raw-clip-map.md").read_text(encoding="utf-8")
+    assert "New Paper" in (root / "_meta" / "raw-clip-map.md").read_text(encoding="utf-8")
+    assert "local execution" in (root / "_meta" / "topic-map.md").read_text(encoding="utf-8")
+    assert (root / "log.md").read_text(encoding="utf-8").count(plan["plan_hash"]) == 1
+
+    assert batch_wiki_integration.main(["apply-plan", "--root", str(root), "--state-dir", str(state), "--plan", str(plan_path)]) == 0
+    capsys.readouterr()
+    assert (root / "_meta" / "raw-clip-map.md").read_text(encoding="utf-8").count(raw_path) == 1
+    assert (root / "_meta" / "topic-map.md").read_text(encoding="utf-8").count("local execution") == 1
+    assert (root / "log.md").read_text(encoding="utf-8").count(plan["plan_hash"]) == 1
+
+
+def test_apply_plan_cli_fails_closed_for_manual_or_unsupported_ops(tmp_path: Path, capsys) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wiki-graph" / "state"
+    write(root / "log.md", "# Wiki Log\n")
+    before = {
+        path: path.read_text(encoding="utf-8")
+        for path in [root / "_meta" / "raw-clip-map.md", root / "_meta" / "topic-map.md", root / "log.md"]
+    }
+    cases = [
+        ([{"op": "review_queue_add", "raw_path": "raw/clip/2601/review.md", "title": "Review"}], [], "manual_review_required"),
+        ([{"op": "unknown_op", "raw_path": "raw/clip/2601/bad.md"}], [], "unsupported_operation"),
+        ([], [{"path": "concepts/new.md", "content": "# New"}], "compiled_page_writes_not_supported"),
+    ]
+    for idx, (operations, compiled, expected_error) in enumerate(cases):
+        plan_path = state / "wiki_integration_plans" / f"bad-{idx}.json"
+        _write_plan(plan_path, root, state, operations, compiled_page_writes=compiled)
+
+        code = batch_wiki_integration.main(["apply-plan", "--root", str(root), "--state-dir", str(state), "--plan", str(plan_path)])
+        payload = json.loads(capsys.readouterr().out)
+
+        assert code == 13
+        assert payload["applied"] is False
+        assert expected_error in payload["errors"]
+        for path, text in before.items():
+            assert path.read_text(encoding="utf-8") == text
+
+
+def test_apply_plan_cli_rejects_plan_hash_mismatch_without_writes(tmp_path: Path, capsys) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wiki-graph" / "state"
+    raw_map = root / "_meta" / "raw-clip-map.md"
+    before = raw_map.read_text(encoding="utf-8")
+    plan_path = state / "wiki_integration_plans" / "bad-hash.json"
+    _write_plan(
+        plan_path,
+        root,
+        state,
+        [{"op": "raw_map_upsert", "raw_path": "raw/clip/2601/new.md", "title": "New"}],
+        plan_hash="not-the-canonical-hash",
+    )
+
+    code = batch_wiki_integration.main(["apply-plan", "--root", str(root), "--state-dir", str(state), "--plan", str(plan_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 13
+    assert payload["applied"] is False
+    assert "plan_hash_mismatch" in payload["errors"]
+    assert raw_map.read_text(encoding="utf-8") == before

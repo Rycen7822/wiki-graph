@@ -251,6 +251,42 @@ def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
     assert report_path.parent == state / "validation_reports"
 
 
+def test_validate_wiki_cli_summary_only_keeps_full_report_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    root = validation_reuse_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_wiki.py",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(workdir),
+            "--full",
+            "--write-report",
+            "--summary-only",
+        ],
+    )
+
+    assert validate_wiki_cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ok"] is True
+    assert payload["errors_count"] == 0
+    assert payload["warnings_count"] == 0
+    assert payload["compiled_count"] == 4
+    assert payload["active_raw_clips"] == 1
+    assert "report_path" in payload
+    assert "input_fingerprints" not in payload
+    full_report = json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))
+    assert "input_fingerprints" in full_report
+    assert full_report["errors"] == []
+
+
 def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path: Path) -> None:
     root = validation_reuse_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"

@@ -35,7 +35,7 @@ Retired live-storage boundary:
 
 - `ops.custom_kg_incremental` exposes only native manifest helper commands (`export-manifest`, `audit-manifest-content`); old live-storage commands were removed after native cutover.
 
-Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, old `pending_wikigraph_refresh.json` writes, or direct `custom_kg` live-storage mutation into production paths.
+Do not reintroduce service restarts, systemd commands, `rag_storage` swaps, retired wikigraph refresh ledger writes, or direct `custom_kg` live-storage mutation into production paths.
 
 ## Common commands
 
@@ -148,18 +148,3 @@ python3 -m pytest -q -rs \
   tests/test_zvec_workspace.py \
   tests/test_zvec_workspace_real.py
 ```
-
-A bare `python3 -m pytest -q` from the repo root may collect vendored/reference packages that need separate environment setup. Prefer the focused `tests/` gates above unless you are intentionally testing those packages too.
-
-## Safety rules
-
-- Treat the path in `LLM_WIKI_ROOT` as the human wiki, not a scratch directory.
-- Use repo-local `wiki_test/` or temporary state directories for destructive tests and rehearsals.
-- Keep generated evidence, logs, service output, native state, and sidecars out of the human wiki root.
-- Do not clear pending ledgers, cut over workspaces, or promote active pointers without an explicit validation run.
-- Prefer native refresh state (`pending_native_refresh.json`) over retired wikigraph refresh state.
-- If a command mentions retired wikigraph/custom_kg live-storage mutation, update or remove the caller; production no longer maintains mutation compatibility shims.
-
-## Worknotes
-
-Longer context and historical decisions are kept in `worknotes/`. Review those notes before publishing if your deployment treats operator notes as private.

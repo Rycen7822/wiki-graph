@@ -22,7 +22,14 @@ from ops.wiki_native_wiki_integration_pending import (
     pending_wiki_integration_status,
     record_pending_wiki_integration_failure,
 )
-from ops.wiki_integration_plan import build_wiki_integration_plan, write_wiki_integration_plan_report
+from ops.validate_wiki import validation_summary
+from ops.wiki_integration_plan import (
+    apply_wiki_integration_plan,
+    build_wiki_integration_plan,
+    load_wiki_integration_plan,
+    write_wiki_integration_plan_report,
+)
+from ops.wiki_native_validation import validate_wiki
 
 
 DEFAULT_NATIVE_WORKDIR = Path(__file__).resolve().parents[1]
@@ -125,6 +132,53 @@ def build_runner_command(integration_command: str | None, prompt: str, prompt_pa
     return ["hermes", "-z", prompt, "--skills", "llm-wiki"]
 
 
+def run_integrate_local(
+    root: Path,
+    state_dir: Path,
+    *,
+    reason: str,
+    plan_path: Path,
+    workdir: Path | None = None,
+    dry_run: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    plan = load_wiki_integration_plan(plan_path)
+    apply_result = apply_wiki_integration_plan(root, state_dir, plan, reason=reason, dry_run=dry_run)
+    if apply_result.get("errors"):
+        return 13, {"local_runner": True, "plan_path": str(plan_path), **apply_result}
+    if dry_run:
+        return 0, {"local_runner": True, "plan_path": str(plan_path), **apply_result}
+
+    validation = validate_wiki(
+        root,
+        state_dir,
+        workdir or DEFAULT_NATIVE_WORKDIR,
+        full=True,
+        write_report=True,
+        sync_raw_map_snapshot=True,
+    )
+    validation_compact = validation_summary(validation)
+    validation_ok = not bool(validation.get("errors"))
+    if not validation_ok:
+        failure = record_pending_wiki_integration_failure(state_dir, "local-validation-failed", "local integration validation reported errors")
+        return 14, {
+            "local_runner": True,
+            "plan_path": str(plan_path),
+            "apply": apply_result,
+            "validation": validation_compact,
+            "failure": failure,
+        }
+    clear = clear_pending_wiki_integration_after_success(root, state_dir, reason=reason)
+    post_status = pending_wiki_integration_status(root, state_dir, reason=reason)
+    return 0, {
+        "local_runner": True,
+        "plan_path": str(plan_path),
+        "apply": apply_result,
+        "validation": validation_compact,
+        "clear_success": clear,
+        "post_status": post_status,
+    }
+
+
 def run_auto_integration(
     root: Path,
     state_dir: Path,
@@ -133,18 +187,24 @@ def run_auto_integration(
     dry_run: bool = False,
     integration_command: str | None = None,
     timeout: int = 7200,
+    runner: str = "local",
 ) -> tuple[int, dict[str, Any]]:
     pre_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
     plan = build_wiki_integration_plan(root, state_dir, reason=reason, threshold=threshold)
     plan_path = write_wiki_integration_plan_report(state_dir, plan)
     prompt = build_auto_integration_prompt(root, state_dir, pre_status, reason, plan=plan, plan_path=plan_path)
     prompt_path = write_auto_integration_prompt(state_dir, prompt)
-    command = build_runner_command(integration_command, prompt, prompt_path, root, state_dir, reason)
+    effective_runner = "external" if integration_command else runner
+    if effective_runner == "local":
+        command = ["integrate-local", "--plan", str(plan_path)]
+    else:
+        command = build_runner_command(integration_command, prompt, prompt_path, root, state_dir, reason)
     redacted_command = ["<prompt>" if part == prompt else part for part in command]
     base: dict[str, Any] = {
         "dry_run": dry_run,
         "would_run": bool(pre_status.get("should_integrate")) and not bool(pre_status.get("should_review")),
         "ran": False,
+        "runner": effective_runner,
         "pre_status": pre_status,
         "prompt_path": str(prompt_path),
         "plan_path": str(plan_path),
@@ -159,6 +219,23 @@ def run_auto_integration(
         return 0, {**base, "skipped": True, "skip_reason": "integration_not_required"}
     if dry_run:
         return 0, {**base, "skipped": False}
+    if effective_runner == "local":
+        local_code, local_result = run_integrate_local(
+            root,
+            state_dir,
+            reason=reason,
+            plan_path=plan_path,
+            workdir=DEFAULT_NATIVE_WORKDIR,
+        )
+        result = {**base, "ran": True, "runner_returncode": local_code, "local_result": local_result}
+        if local_code != 0:
+            return local_code, result
+        post_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
+        result["post_status"] = post_status
+        if post_status.get("should_integrate") or post_status.get("should_review"):
+            failure = record_pending_wiki_integration_failure(state_dir, "auto-integrate-incomplete", "local integration returned successfully but pending wiki integration ledger still requires action")
+            return 12, {**result, "failure": failure}
+        return 0, result
 
     env = os.environ.copy()
     env.update(
@@ -189,7 +266,7 @@ def run_auto_integration(
     return 0, result
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manage raw-fast llm-wiki pending integration batches")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -210,7 +287,8 @@ def main() -> int:
     mark_parser.add_argument("--threshold", type=int, default=None, help=f"Set/override pending batch threshold for this ledger (default {DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD} for new ledgers)")
     mark_parser.add_argument("--auto-integrate", action="store_true", help="After marking, immediately launch the configured wiki-integration runner if the threshold/preflight says integration is required")
     mark_parser.add_argument("--auto-integrate-dry-run", action="store_true", help="With --auto-integrate, print the generated runner prompt/command without launching it")
-    mark_parser.add_argument("--integration-command", default=None, help="Optional command template for auto integration; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to Hermes CLI.")
+    mark_parser.add_argument("--integration-command", default=None, help="Optional command template for auto integration; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to local deterministic integration.")
+    mark_parser.add_argument("--auto-integrate-runner", choices=["local", "hermes"], default="local", help="Runner for --auto-integrate when --integration-command is not set")
     mark_parser.add_argument("--auto-integrate-timeout", type=int, default=7200)
 
     auto_parser = sub.add_parser("auto-integrate", help="Launch the configured wiki-integration runner when pending raw-fast notes require integration")
@@ -218,7 +296,8 @@ def main() -> int:
     auto_parser.add_argument("--reason", default="threshold", choices=["threshold", "pre-query", "query", "manual", "integrate", "wiki-query"])
     auto_parser.add_argument("--threshold", type=int, default=None, help="Override ledger threshold for this decision")
     auto_parser.add_argument("--dry-run", action="store_true", help="Write the prompt and print the command without launching the runner")
-    auto_parser.add_argument("--integration-command", default=None, help="Optional command template; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to Hermes CLI.")
+    auto_parser.add_argument("--integration-command", default=None, help="Optional command template; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to local deterministic integration.")
+    auto_parser.add_argument("--runner", choices=["local", "hermes"], default="local", help="Runner to use when --integration-command is not set")
     auto_parser.add_argument("--timeout", type=int, default=7200)
 
     should_parser = sub.add_parser("should-integrate", help="Return whether batch wiki integration should run for this reason")
@@ -227,12 +306,25 @@ def main() -> int:
     should_parser.add_argument("--threshold", type=int, default=None, help="Override ledger threshold for this decision")
     should_parser.add_argument("--exit-code", action="store_true", help="Exit 10 when integration is needed, 11 when manual review is needed, 0 when no action is needed")
 
+    apply_parser = sub.add_parser("apply-plan", help="Apply a deterministic wiki integration plan to machine-owned map/log surfaces")
+    add_common_paths(apply_parser)
+    apply_parser.add_argument("--plan", type=Path, required=True)
+    apply_parser.add_argument("--reason", default="integrate")
+    apply_parser.add_argument("--dry-run", action="store_true")
+
+    local_parser = sub.add_parser("integrate-local", help="Apply a deterministic plan, validate, and clear pending wiki integration")
+    add_common_paths(local_parser)
+    local_parser.add_argument("--plan", type=Path, default=None)
+    local_parser.add_argument("--reason", default="threshold", choices=["threshold", "pre-query", "query", "manual", "integrate", "wiki-query"])
+    local_parser.add_argument("--threshold", type=int, default=None)
+    local_parser.add_argument("--dry-run", action="store_true")
+
     clear_parser = sub.add_parser("clear-success", help="Clear pending wiki-integration ledger after successful batch integration and validation")
     add_common_paths(clear_parser)
     clear_parser.add_argument("--reason", default="external-success")
     clear_parser.add_argument("--integrated-path", action="append", default=[])
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     root = args.root.resolve()
     state_dir = args.state_dir.resolve()
 
@@ -262,6 +354,7 @@ def main() -> int:
                 dry_run=args.auto_integrate_dry_run,
                 integration_command=args.integration_command,
                 timeout=args.auto_integrate_timeout,
+                runner=args.auto_integrate_runner,
             )
             print_json({"marked": entry, "status_after_mark": status, "auto_integrate": auto_result})
             return code
@@ -276,6 +369,7 @@ def main() -> int:
             dry_run=args.dry_run,
             integration_command=args.integration_command,
             timeout=args.timeout,
+            runner=args.runner,
         )
         print_json(result)
         return code
@@ -288,6 +382,19 @@ def main() -> int:
             if status.get("should_review"):
                 return 11
         return 0
+    if args.command == "apply-plan":
+        plan = load_wiki_integration_plan(args.plan)
+        result = apply_wiki_integration_plan(root, state_dir, plan, reason=args.reason, dry_run=args.dry_run)
+        print_json(result)
+        return 0 if not result.get("errors") else 13
+    if args.command == "integrate-local":
+        plan_path = args.plan
+        if plan_path is None:
+            plan = build_wiki_integration_plan(root, state_dir, reason=args.reason, threshold=args.threshold)
+            plan_path = write_wiki_integration_plan_report(state_dir, plan)
+        code, result = run_integrate_local(root, state_dir, reason=args.reason, plan_path=plan_path, dry_run=args.dry_run)
+        print_json(result)
+        return code
     if args.command == "clear-success":
         print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason))
         return 0

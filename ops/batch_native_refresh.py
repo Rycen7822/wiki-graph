@@ -485,7 +485,8 @@ def query_smoke_request(
     if not result["ok"]:
         raise RuntimeError(f"query smoke failed: url={url} status={status_code}")
     trace = body.get("trace") if isinstance(body, dict) else None
-    if not isinstance(trace, dict) or trace.get("retrieval_backend") != "zvec":
+    retrieval_backend = trace.get("retrieval_backend") if isinstance(trace, dict) else None
+    if not isinstance(trace, dict) or not str(retrieval_backend or "").startswith("zvec"):
         raise RuntimeError(f"query smoke did not prove zvec retrieval: url={url} status={status_code}")
     vector_hit_count = trace.get("vector_hit_count")
     if type(vector_hit_count) is not int or vector_hit_count <= 0:
@@ -738,6 +739,116 @@ def _skipped_refresh_cutover_result(
     return result
 
 
+def state_input_fingerprints(state_dir: Path) -> dict[str, dict[str, Any]]:
+    from ops import native_zvec_materialize
+
+    return native_zvec_materialize.state_input_fingerprints(state_dir)
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def active_already_fresh_report(*, state_dir: Path, workspace_root: Path) -> dict[str, Any]:
+    active = _read_json_object(active_workspace_path(state_dir))
+    if not active:
+        return {"fresh": False, "reason": "active_pointer_missing"}
+    workspace_id = str(active.get("workspace_id") or "")
+    if not workspace_id or active.get("status") != "active":
+        return {"fresh": False, "reason": "active_pointer_not_active", "active": active}
+    report_path = Path(workspace_root) / workspace_id / "build_report.json"
+    report = _read_json_object(report_path)
+    if not report or report.get("ok") is not True:
+        return {"fresh": False, "reason": "active_build_report_missing_or_not_ok", "active": active, "build_report": str(report_path)}
+    if str(report.get("workspace_id") or "") != workspace_id:
+        return {"fresh": False, "reason": "workspace_id_mismatch", "active": active, "build_report": str(report_path)}
+    current_fingerprints = state_input_fingerprints(state_dir)
+    if report.get("input_fingerprints") != current_fingerprints:
+        return {
+            "fresh": False,
+            "reason": "state_input_fingerprints_mismatch",
+            "active": active,
+            "build_report": str(report_path),
+        }
+    raw_native_report = report.get("native_report")
+    native_report = raw_native_report if isinstance(raw_native_report, dict) else {}
+    active_hash = active.get("source_manifest_hash")
+    report_hash = native_report.get("source_manifest_hash") or report.get("source_manifest_hash")
+    if active_hash and report_hash and active_hash != report_hash:
+        return {"fresh": False, "reason": "source_manifest_hash_mismatch", "active": active, "build_report": str(report_path)}
+    if report.get("counts") and active.get("counts") and report.get("counts") != active.get("counts"):
+        return {"fresh": False, "reason": "counts_mismatch", "active": active, "build_report": str(report_path)}
+    return {
+        "fresh": True,
+        "reason": "active_build_report_input_fingerprints_match",
+        "active": active,
+        "build_report": str(report_path),
+    }
+
+
+def _execute_active_already_fresh_cutover(
+    *,
+    state_dir: Path,
+    active: dict[str, Any],
+    restart_service: Any,
+    query_smoke: Any,
+    unchanged_before: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    service = restart_service(state_dir=state_dir)
+    smoke = query_smoke(state_dir=state_dir, active=active)
+    if not isinstance(smoke, dict) or smoke.get("ok") is not True:
+        raise RuntimeError(f"native refresh active-fresh query smoke did not report ok=true: {smoke!r}")
+    unchanged_path_audit = assert_required_unchanged_paths(unchanged_before) if unchanged_before else None
+    return {"active": active, "service": service, "query_smoke": smoke, "unchanged_path_audit": unchanged_path_audit}
+
+
+def _active_already_fresh_success_result(
+    *,
+    root: Path,
+    state_dir: Path,
+    current_status: dict[str, Any],
+    refresh_kind: str,
+    refresh_policy: dict[str, Any],
+    fill_missing_vectors: bool,
+    freshness: dict[str, Any],
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    pending_cleared = clear_pending(state_dir)
+    status_after = status(root, state_dir)
+    status_after_policy = status_after.get("refresh_policy") or native_refresh_policy_status(state_dir)
+    result = {
+        "cutover": True,
+        "skipped": False,
+        "active_already_fresh": True,
+        "cutover_executed": True,
+        "build_executed": False,
+        "restart_executed": True,
+        "query_smoke_executed": True,
+        "pending_clear_executed": True,
+        "active": execution["active"],
+        "service": execution["service"],
+        "pending_cleared": pending_cleared,
+        "status_before": current_status,
+        "status_after": status_after,
+        "refresh_kind": refresh_kind,
+        "refresh_policy": refresh_policy,
+        "next_refresh_kind_after_success": status_after_policy["next_refresh_kind"],
+        "policy_native_pending": {"marked": False, "reason": "active_already_fresh"},
+        "policy_native_pending_marked_count": 0,
+        "vector_cache_required": True,
+        "fill_missing_vectors": fill_missing_vectors,
+        "query_smoke": execution["query_smoke"],
+        "active_freshness": freshness,
+    }
+    if execution.get("unchanged_path_audit") is not None:
+        result["unchanged_path_audit"] = execution["unchanged_path_audit"]
+    return result
+
+
 def _execute_refresh_cutover(
     *,
     root: Path,
@@ -861,6 +972,26 @@ def refresh_cutover(
         )
     if restart_service is None:
         raise ValueError("native refresh cutover requires an explicit restart_service hook")
+    if not force and refresh_kind == REFRESH_KIND_INCREMENTAL:
+        freshness = active_already_fresh_report(state_dir=state_dir, workspace_root=workspace_root)
+        if freshness.get("fresh") is True:
+            execution = _execute_active_already_fresh_cutover(
+                state_dir=state_dir,
+                active=freshness["active"],
+                restart_service=restart_service,
+                query_smoke=query_smoke,
+                unchanged_before=unchanged_before,
+            )
+            return _active_already_fresh_success_result(
+                root=root,
+                state_dir=state_dir,
+                current_status=current_status,
+                refresh_kind=refresh_kind,
+                refresh_policy=refresh_policy,
+                fill_missing_vectors=fill_missing_vectors,
+                freshness=freshness,
+                execution=execution,
+            )
 
     execution = _execute_refresh_cutover(
         root=root,

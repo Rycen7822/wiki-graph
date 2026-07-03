@@ -228,17 +228,63 @@ def fetch_text(url: str, timeout: int, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) 
         return {"ok": False, "url": url, "error": type(exc).__name__, "message": str(exc)}
 
 
-def detect_kind(url: str, requested: str) -> str:
-    if requested != "auto":
-        return requested
-    if re.search(r"arxiv\.org/(abs|pdf|html)/\d{4}\.\d{4,5}", url):
-        return "arxiv"
-    return "direct-pdf"
+ARXIV_ID_IN_PATH_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
+ARXIV_DIRECT_HOSTS = {"arxiv.org", "export.arxiv.org"}
+
+
+def _url_host(url: str) -> str:
+    return urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _path_parts(url: str) -> list[str]:
+    parsed = urllib.parse.urlparse(url)
+    return [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+
+
+def _first_arxiv_id(parts: list[str]) -> str | None:
+    for part in parts:
+        match = ARXIV_ID_IN_PATH_RE.fullmatch(part)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _last_arxiv_id(parts: list[str]) -> str | None:
+    for part in reversed(parts):
+        match = ARXIV_ID_IN_PATH_RE.fullmatch(part)
+        if match:
+            return match.group(1)
+    return None
 
 
 def arxiv_id_from_url(url: str) -> str | None:
-    match = re.search(r"arxiv\.org/(?:abs|pdf|html)/(\d{4}\.\d{4,5})(?:v\d+)?", url)
-    return match.group(1) if match else None
+    host = _url_host(url)
+    parts = _path_parts(url)
+    if host in ARXIV_DIRECT_HOSTS:
+        if parts and parts[0] in {"abs", "pdf", "html", "e-print"}:
+            return _first_arxiv_id(parts[1:])
+        return None
+    if host == "paperswithcode.co":
+        if parts[:1] == ["paper"]:
+            return _last_arxiv_id(parts[1:])
+        return None
+    if host == "huggingface.co":
+        if parts[:1] == ["papers"]:
+            return _first_arxiv_id(parts[1:])
+        return None
+    if host == "alphaxiv.org":
+        if parts and parts[0] in {"abs", "paper", "papers", "overview"}:
+            return _last_arxiv_id(parts[1:])
+        return None
+    return None
+
+
+def detect_kind(url: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if arxiv_id_from_url(url):
+        return "arxiv"
+    return "direct-pdf"
 
 
 def safe_extract_tar(tar_path: Path, dest: Path) -> dict[str, Any]:
@@ -277,17 +323,6 @@ def safe_extract_tar(tar_path: Path, dest: Path) -> dict[str, Any]:
 def run_pdfinfo(pdf: Path, out: Path) -> dict[str, Any]:
     result = run_command(["pdfinfo", str(pdf)], timeout=60)
     write_text(out, result.get("stdout") or "")
-    return {k: v for k, v in result.items() if k not in {"stdout", "stderr"}} | {"stderr_tail": (result.get("stderr") or "")[-800:]}
-
-
-def run_pdftotext(pdf: Path, out: Path, layout: bool) -> dict[str, Any]:
-    command = ["pdftotext"]
-    if layout:
-        command.append("-layout")
-    command += [str(pdf), str(out)]
-    result = run_command(command, timeout=120)
-    if not out.exists():
-        write_text(out, "")
     return {k: v for k, v in result.items() if k not in {"stdout", "stderr"}} | {"stderr_tail": (result.get("stderr") or "")[-800:]}
 
 
@@ -522,9 +557,19 @@ def title_from_text(text: str) -> str:
     for line in text.splitlines():
         stripped = line.strip()
         stripped = re.sub(r"^#{1,6}\s+", "", stripped).strip()
+        if placeholder_title(stripped):
+            continue
         if 5 <= len(stripped) <= 180 and not stripped.lower().startswith(("abstract", "arxiv", "http")):
             return stripped
     return "Untitled Paper"
+
+
+def pdf_title_from_text_or_url(text: str, url: str) -> str:
+    title = title_from_text(text)
+    if not placeholder_title(title):
+        return title
+    stem = Path(urllib.parse.urlparse(url).path).stem
+    return stem or "Untitled Paper"
 
 
 def slugify(text: str, max_len: int = 96) -> str:
@@ -581,6 +626,101 @@ def read_tex_bundle(workdir: Path, limit_per_file: int = 200_000) -> tuple[list[
         except OSError:
             continue
     return tex_files, "\n".join(chunks)
+
+
+def _plain_tex_prose(text: str) -> str:
+    stripped = re.sub(r"%.*", " ", text or "")
+    stripped = re.sub(r"\\begin\{[^{}]+\}|\\end\{[^{}]+\}", " ", stripped)
+    stripped = re.sub(r"\\[A-Za-z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?", " ", stripped)
+    stripped = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", " ", stripped)
+    return compact_ws(stripped, max_len=20_000)
+
+
+def score_tex_file(workdir: Path, path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"ok": False, "path": str(path), "score": 0, "reason": f"read_failed:{type(exc).__name__}"}
+    lowered_name = path.name.lower()
+    support_name = any(token in lowered_name for token in ["defs", "macro", "preamble", "supplement", "appendix"])
+    section_count = len(re.findall(r"\\(?:section|subsection|subsubsection)\*?\{", text))
+    prose_chars = len(_plain_tex_prose(text))
+    markers = {
+        "begin_document": "\\begin{document}" in text,
+        "abstract": bool(re.search(r"\\begin\{abstract\}|\\abstract\b", text, re.I)),
+        "maketitle": "\\maketitle" in text,
+        "title": bool(tex_command_arg(text, "title")),
+    }
+    score = prose_chars // 80 + section_count * 20
+    if markers["begin_document"]:
+        score += 100
+    if markers["abstract"]:
+        score += 80
+    if markers["maketitle"]:
+        score += 20
+    if markers["title"]:
+        score += 20
+    if support_name:
+        score -= 80
+    usable = score >= 120 and prose_chars >= 120 and (markers["begin_document"] or markers["abstract"] or section_count >= 2)
+    return {
+        "ok": usable,
+        "path": str(path.relative_to(workdir)),
+        "score": score,
+        "prose_chars": prose_chars,
+        "section_count": section_count,
+        "markers": markers,
+        "reason": "usable" if usable else "insufficient_main_tex_signals",
+    }
+
+
+def select_main_tex_source(workdir: Path) -> dict[str, Any]:
+    scored = [score_tex_file(workdir, path) for path in collect_tex_files(workdir)]
+    usable = [item for item in scored if item.get("ok")]
+    if not usable:
+        return {"ok": False, "candidates": scored, "reason": "no_usable_tex"}
+    best = sorted(usable, key=lambda item: (int(item.get("score") or 0), int(item.get("prose_chars") or 0)), reverse=True)[0]
+    return {"ok": True, "main_tex": best["path"], "candidates": scored}
+
+
+def _line_number_for_patterns(lines: list[str], patterns: list[str]) -> int | None:
+    for idx, line in enumerate(lines, start=1):
+        if any(re.search(pattern, line, re.I) for pattern in patterns):
+            return idx
+    return None
+
+
+def build_source_read_plan(workdir: Path, *, source_kind: str, main_rel: str, fallback_used: bool) -> dict[str, Any]:
+    path = workdir / main_rel
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    if source_kind == "tex_source":
+        targets = [
+            ("abstract + introduction", [r"\\begin\{abstract\}", r"\\section\*?\{[^{}]*(introduction|motivation)"]),
+            ("method / objective", [r"\\section\*?\{[^{}]*(method|approach|model|objective)"]),
+            ("main results", [r"\\section\*?\{[^{}]*(result|experiment|evaluation)"]),
+            ("limitations / discussion", [r"\\section\*?\{[^{}]*(limitation|discussion|conclusion)"]),
+        ]
+    else:
+        targets = [
+            ("abstract + introduction", [r"^#*\s*(abstract|introduction)\b"]),
+            ("method / objective", [r"^#*\s*(method|approach|model|objective)\b"]),
+            ("main results", [r"^#*\s*(result|experiment|evaluation)\b"]),
+            ("limitations / discussion", [r"^#*\s*(limitation|discussion|conclusion)\b"]),
+        ]
+    first_reads: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for reason, patterns in targets:
+        offset = _line_number_for_patterns(lines, patterns) or 1
+        if offset in seen:
+            continue
+        seen.add(offset)
+        first_reads.append({"path": main_rel, "offset": offset, "limit": 220 if len(first_reads) else 180, "reason": reason})
+    if not first_reads:
+        first_reads.append({"path": main_rel, "offset": 1, "limit": 220, "reason": "source overview"})
+    return {"ok": True, "source_kind": source_kind, "main_tex": main_rel if source_kind == "tex_source" else None, "main_path": main_rel, "fallback_used": fallback_used, "first_reads": first_reads[:4]}
 
 
 def extract_tex_abstract(tex: str) -> str:
@@ -722,7 +862,9 @@ def placeholder_title(text: str | None) -> bool:
     value = compact_ws(text or "", max_len=220).lower()
     if not value or value in {"untitled paper", "paper"}:
         return True
-    return bool(re.fullmatch(r"(?:<!--\s*)?(?:image|figure|img)(?:\s*-->)?", value)) or value.startswith("<!-- image")
+    if value.startswith("<!--") and value.endswith("-->"):
+        return True
+    return bool(re.fullmatch(r"(?:<!--\s*)?(?:image|figure|img|formula-not-decoded)(?:\s*-->)?", value)) or value.startswith("<!-- image")
 
 
 def arxiv_api_title(workdir: Path) -> str | None:
@@ -838,10 +980,9 @@ def render_resource_boundary_markdown(draft: dict[str, Any]) -> str:
 def build_paper_digest(workdir: Path, title: str, source_url: str, resource_probe: dict[str, Any] | None = None, files: dict[str, str] | None = None) -> dict[str, Any]:
     tex_files, tex_text = read_tex_bundle(workdir)
     text_candidates: list[str] = []
-    for rel in ["docling.md", "paper.layout.txt", "paper.raw.txt"]:
-        path = workdir / rel
-        if path.exists():
-            text_candidates.append(read_text(path, limit=100_000))
+    docling_path = workdir / "docling.md"
+    if docling_path.exists():
+        text_candidates.append(read_text(docling_path, limit=100_000))
     combined_text = "\n".join(text_candidates)
     api_title = arxiv_api_title(workdir)
     tex_title = tex_command_arg(tex_text, "title") if tex_text else None
@@ -862,16 +1003,17 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
     limitation_cards = [card for card in section_cards if re.search(r"limitation|discussion|caveat|局限", card.get("heading", ""), re.I)][:10]
     warnings: list[str] = []
     if not tex_text:
-        warnings.append("tex_source_missing; digest fell back to PDF text inventory")
+        warnings.append("tex_source_missing; digest fell back to Docling PDF text" if docling_path.exists() else "tex_source_missing; no Docling PDF text available")
     if not equation_cards:
         warnings.append("no_tex_equation_cards_detected")
     if not figure_cards:
         warnings.append("no_figure_cards_detected")
+    source_priority = [name for name, present in [("arxiv_api", (workdir / "api.xml").exists()), ("tex_source", bool(tex_text)), ("docling", docling_path.exists() and not tex_text)] if present]
     return {
         "ok": True,
-        "source_priority": [name for name, present in [("arxiv_api", (workdir / "api.xml").exists()), ("tex_source", bool(tex_text)), ("docling", (workdir / "docling.md").exists()), ("pdftotext", (workdir / "paper.layout.txt").exists())] if present],
+        "source_priority": source_priority,
         "metadata_card": {"title": metadata_title, "source_url": source_url, "tex_files": [str(p.relative_to(workdir)) for p in tex_files[:20]]},
-        "abstract_card": {"text": abstract, "source": "tex_source" if extract_tex_abstract(tex_text) else "pdf_text" if abstract else "missing"},
+        "abstract_card": {"text": abstract, "source": "tex_source" if extract_tex_abstract(tex_text) else "docling_pdf" if abstract and docling_path.exists() else "missing"},
         "section_cards": section_cards[:40],
         "equation_cards": equation_cards,
         "table_cards": table_cards,
@@ -1227,18 +1369,33 @@ def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 
     if not digest:
         return []
     cards: list[dict[str, Any]] = []
-    for bucket, label in [
-        ("abstract_cards", "abstract"),
-        ("section_cards", "section"),
-        ("equation_cards", "equation"),
-        ("result_cards", "result"),
-        ("table_cards", "table"),
-        ("figure_cards", "figure"),
-    ]:
-        for card in digest.get(bucket) or []:
+    abstract = digest.get("abstract_card") or {}
+    if abstract.get("text"):
+        cards.append({"kind": "abstract", "text": compact_ws(str(abstract.get("text")))[:500], "source_bucket": "abstract_card"})
+
+    section_cards = list(digest.get("section_cards") or [])
+
+    def section_rank(card: dict[str, Any]) -> int:
+        heading = str(card.get("heading") or card.get("section") or "")
+        for rank, pattern in enumerate([r"abstract|introduction|motivation", r"method|approach|model|objective", r"result|experiment|evaluation", r"limitation|discussion|conclusion"]):
+            if re.search(pattern, heading, re.I):
+                return rank
+        if re.search(r"appendix|supplement", heading, re.I):
+            return 9
+        return 5
+
+    priority_buckets: list[tuple[str, str, list[dict[str, Any]]]] = [
+        ("section_cards", "section", sorted(section_cards, key=section_rank)),
+        ("result_cards", "result", list(digest.get("result_cards") or [])),
+        ("equation_cards", "equation", list(digest.get("equation_cards") or [])),
+        ("table_cards", "table", list(digest.get("table_cards") or [])),
+        ("figure_cards", "figure", list(digest.get("figure_cards") or [])),
+    ]
+    for bucket, label, bucket_cards in priority_buckets:
+        for card in bucket_cards:
             if len(cards) >= max_cards:
                 return cards
-            text = compact_ws(str(card.get("text") or card.get("caption") or card.get("section") or card))[:500]
+            text = compact_ws(str(card.get("text") or card.get("caption") or card.get("heading") or card.get("section") or card))[:500]
             cards.append({"kind": label, "text": text, "source_bucket": bucket})
     return cards
 
@@ -1247,6 +1404,18 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
     files = bundle.get("files") or {}
     duplicate_summary = (preflight or {}).get("duplicate_summary") or {}
     resource_boundary = resource_boundary or {}
+    source_read_plan = bundle.get("source_read_plan") if isinstance(bundle.get("source_read_plan"), dict) else None
+    source_refs = {
+        "evidence_bundle": "evidence_bundle.json",
+        "paper_digest": files.get("paper_digest") or "paper_digest.json",
+        "resource_boundary": files.get("resource_boundary_draft") or "resource_boundary_draft.json",
+    }
+    if files.get("tex_read_plan"):
+        source_refs["tex_read_plan"] = files.get("tex_read_plan")
+    if files.get("source_read_plan"):
+        source_refs["source_read_plan"] = files.get("source_read_plan")
+    if files.get("docling_markdown") and (source_read_plan or {}).get("source_kind") == "docling_pdf":
+        source_refs["docling_markdown"] = files.get("docling_markdown")
     return {
         "ok": True,
         "protected_anchors": {
@@ -1259,6 +1428,7 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         "duplicate_summary": duplicate_summary,
         "queue_status": (preflight or {}).get("queue_status") or {"checked": False},
         "evidence_cards": _brief_cards_from_digest(digest),
+        "source_read_plan": source_read_plan,
         "resource_caveats": {
             "status": "standardized" if resource_boundary else "missing",
             "github_count": len(resource_boundary.get("github") or []),
@@ -1268,15 +1438,9 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
             "summary": resource_status_summary(resource_boundary),
             "policy": "Keep resource/probe/link-health detail out of the raw note body and frontmatter except canonical source provenance.",
         },
-        "source_refs": {
-            "evidence_bundle": "evidence_bundle.json",
-            "paper_digest": files.get("paper_digest") or "paper_digest.json",
-            "resource_boundary": files.get("resource_boundary_draft") or "resource_boundary_draft.json",
-            "raw_text": files.get("raw_text"),
-            "layout_text": files.get("layout_text"),
-        },
+        "source_refs": source_refs,
         "agent_actions": [
-            "Read this brief first; reopen cited sidecars only for uncertain claims.",
+            "Read this brief first; follow source_read_plan before reopening any advisory sidecars.",
             "Write or patch the canonical raw note under next_raw_path only after duplicate review.",
             "Run raw-fast closeout; do not run native refresh while wiki integration is pending.",
         ],
@@ -1294,7 +1458,7 @@ def render_agent_brief_markdown(brief: dict[str, Any]) -> str:
     for card in brief.get("evidence_cards") or []:
         lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
     if not brief.get("evidence_cards"):
-        lines.append("- no compact evidence cards; inspect `paper.raw.txt` or `paper_digest.json`.")
+        lines.append("- no compact evidence cards; follow source_read_plan, then inspect `paper_digest.json` only if source spans are insufficient.")
     lines.append("\n## Next actions")
     for action in brief.get("agent_actions") or []:
         lines.append(f"- {action}")
@@ -1320,7 +1484,7 @@ def build_evidence_report(bundle: dict[str, Any], *, preflight: dict[str, Any] |
         },
         "paper_digest": {
             "status": "standardized" if digest else "missing",
-            "abstract_cards": len(digest.get("abstract_cards") or []),
+            "abstract_cards": 1 if (digest.get("abstract_card") or {}).get("text") else 0,
             "section_cards": len(digest.get("section_cards") or []),
             "equation_cards": len(digest.get("equation_cards") or []),
             "result_cards": len(digest.get("result_cards") or []),
@@ -1390,6 +1554,22 @@ def render_note_candidate_markdown(candidate: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def manual_reference_policy(*, visible: bool = False) -> dict[str, Any]:
+    return {
+        "mode": "only_on_manual_required",
+        "manual_references_visible": visible,
+        "fallback_trigger": "script_failure_or_handoff_manual_required",
+    }
+
+
+def handoff_automation_next_action(source_read_plan: dict[str, Any] | None, *, manual_required: bool) -> dict[str, Any]:
+    if manual_required:
+        return {"action": "read_manual_reference_paths", "reason": "manual_required", "manual_reference_policy": "only_on_manual_required"}
+    if source_read_plan:
+        return {"action": "follow_source_read_plan", "manual_reference_policy": "only_on_manual_required"}
+    return {"action": "read_agent_handoff", "manual_reference_policy": "only_on_manual_required"}
+
+
 def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], evidence_report: dict[str, Any], note_candidate: dict[str, Any], closeout_args: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_resource = evidence_report.get("resource_boundary")
     resource = raw_resource if isinstance(raw_resource, dict) else {}
@@ -1399,6 +1579,7 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
     source_refs["note_candidate"] = "note_candidate.md"
     source_refs["evidence_report"] = "evidence_report.md"
     source_refs["agent_brief"] = "agent_brief.md"
+    source_read_plan = brief.get("source_read_plan") if isinstance(brief.get("source_read_plan"), dict) else None
     return {
         "ok": True,
         "status": "ready" if not resource_review_required else "manual_required",
@@ -1406,15 +1587,18 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "duplicate_summary": brief.get("duplicate_summary") or {},
         "queue_status": brief.get("queue_status") or {},
         "evidence_cards": brief.get("evidence_cards") or [],
+        "source_read_plan": source_read_plan,
         "resource_status_summary": resource.get("summary") or resource_status_summary(resource),
         "resource_review_required": resource_review_required,
+        "manual_reference_policy": manual_reference_policy(visible=resource_review_required),
+        "automation_next_action": handoff_automation_next_action(source_read_plan, manual_required=resource_review_required),
         "manual_reason": resource.get("manual_reason") if resource_review_required else None,
         "manual_reference_paths": manual_paths,
         "source_refs": source_refs,
         "closeout_args": closeout_args,
         "closeout_args_path": None,
         "agent_actions": [
-            "Read this handoff first; reopen referenced sidecars only for uncertain scientific claims or reported failures.",
+            "Read this handoff first; follow source_read_plan before reopening advisory sidecars.",
             "Do not run broad GitHub/HF/project discovery when resource_review_required is false.",
             "Write the canonical raw note under protected_anchors.next_raw_path, then run closeout with generated closeout_args when available.",
         ],
@@ -1435,12 +1619,26 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
         f"- resource_status_summary: {handoff.get('resource_status_summary')}",
     ]
     dup = handoff.get("duplicate_summary") or {}
+    raw_policy = handoff.get("manual_reference_policy")
+    policy = raw_policy if isinstance(raw_policy, dict) else manual_reference_policy(visible=bool(handoff.get("manual_reference_paths")))
+    lines.append(f"- manual_reference_policy: {policy.get('mode')} (manual_references_visible={policy.get('manual_references_visible')})")
+    if not policy.get("manual_references_visible"):
+        lines.append("- Manual references are hidden unless this handoff reports manual_required=true or the prepare script fails.")
     lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
     if handoff.get("manual_reason"):
         lines.append("\n## Manual follow-up")
         lines.append(f"- reason: {json.dumps(handoff.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
         for path in handoff.get("manual_reference_paths") or []:
             lines.append(f"- read if needed: `{path}`")
+    source_plan = handoff.get("source_read_plan") if isinstance(handoff.get("source_read_plan"), dict) else None
+    if source_plan:
+        lines.append("\n## Default source reads")
+        if source_plan.get("source_kind") == "tex_source":
+            lines.append("Default next action: read the TeX spans below. Do not read advisory sidecars before these spans unless this handoff reports manual_required.")
+        else:
+            lines.append("Default next action: read the Docling PDF spans below. Do not use legacy PDF text extraction or advisory sidecars before these spans unless this handoff reports manual_required.")
+        for item in source_plan.get("first_reads") or []:
+            lines.append(f"- `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
     lines.append("\n## Source refs")
     for key, value in sorted((handoff.get("source_refs") or {}).items()):
         if value:
@@ -1778,40 +1976,31 @@ def process_pdf(
 
     pdfinfo = timings.record("pdfinfo", run_pdfinfo, pdf_path, workdir / "pdfinfo.txt")
     files["pdfinfo"] = "pdfinfo.txt"
-    layout = timings.record("pdftotext_layout", run_pdftotext, pdf_path, workdir / "paper.layout.txt", layout=True)
-    raw = timings.record("pdftotext_raw", run_pdftotext, pdf_path, workdir / "paper.raw.txt", layout=False)
-    files["layout_text"] = "paper.layout.txt"
-    files["raw_text"] = "paper.raw.txt"
     links = timings.record("pdf_links", extract_pdf_links, pdf_path, workdir / "links.json")
     files["links"] = "links.json"
     if not links.get("ok"):
         warnings.append(f"PyMuPDF link extraction failed: {links.get('error')}: {links.get('message')}")
 
-    docling_result: dict[str, Any] | None = None
-    if pdf_backend in {"docling", "auto"}:
-        docling_result = timings.record("docling", run_docling, pdf_path, workdir, strict=strict_pdf_backend, timeout=timeout)
-        if (workdir / "docling.md").exists():
-            files["docling_markdown"] = "docling.md"
-        if (workdir / "docling.json").exists():
-            files["docling_json"] = "docling.json"
-        if not docling_result.get("ok"):
-            message = f"Docling extraction failed: {docling_result.get('error')}: {docling_result.get('message')}"
-            warnings.append(message)
-            if strict_pdf_backend:
-                payload = {"ok": False, "kind": kind, "workdir": str(workdir), "fetch": fetch, "pdf_backend_requested": pdf_backend, "docling": docling_result, "warnings": warnings}
-                attach_timings(payload, timings)
-                write_json(workdir / "evidence_bundle.json", payload)
-                return payload
-    if pdf_backend == "pdftotext":
-        docling_result = timings.record("docling", lambda: {"ok": False, "skipped": True, "reason": "pdf_backend=pdftotext"})
+    docling_result = timings.record("docling", run_docling, pdf_path, workdir, strict=strict_pdf_backend, timeout=timeout)
+    if (workdir / "docling.md").exists():
+        files["docling_markdown"] = "docling.md"
+    if (workdir / "docling.json").exists():
+        files["docling_json"] = "docling.json"
+    if not docling_result.get("ok"):
+        message = f"Docling extraction failed: {docling_result.get('error')}: {docling_result.get('message')}"
+        warnings.append(message)
+        if strict_pdf_backend:
+            payload = {"ok": False, "kind": kind, "workdir": str(workdir), "fetch": fetch, "pdf_backend_requested": pdf_backend, "pdf_backend_effective": "docling_failed", "docling": docling_result, "warnings": warnings}
+            attach_timings(payload, timings)
+            write_json(workdir / "evidence_bundle.json", payload)
+            return payload
 
     text = ""
-    for candidate in [workdir / "docling.md", workdir / "paper.layout.txt", workdir / "paper.raw.txt"]:
-        if candidate.exists():
-            ctext = read_text(candidate)
-            if ctext.strip():
-                text += "\n" + ctext
-    title = title_from_text(text) or Path(urllib.parse.urlparse(url).path).stem
+    if (workdir / "docling.md").exists():
+        ctext = read_text(workdir / "docling.md")
+        if ctext.strip():
+            text += "\n" + ctext
+    title = pdf_title_from_text_or_url(text, url)
     inventory = timings.record("inventory", lambda: {"ok": True, "sections": section_inventory(text), "figures": figure_table_inventory(text)})
     sections = inventory["sections"]
     figures = inventory["figures"]
@@ -1837,6 +2026,12 @@ def process_pdf(
     files["candidate_frontmatter"] = "candidate_frontmatter.json"
     files["note_skeleton"] = "note_skeleton.md"
 
+    source_read_plan: dict[str, Any] | None = None
+    if (workdir / "docling.md").exists():
+        source_read_plan = build_source_read_plan(workdir, source_kind="docling_pdf", main_rel="docling.md", fallback_used=True)
+        write_json(workdir / "source_read_plan.json", source_read_plan)
+        files["source_read_plan"] = "source_read_plan.json"
+
     enrichment = _write_pdf_enrichment_sidecars(
         root=root,
         workdir=workdir,
@@ -1861,11 +2056,11 @@ def process_pdf(
         "source_url": url,
         "workdir": str(workdir),
         "pdf_backend_requested": pdf_backend,
-        "pdf_backend_effective": "docling" if docling_result and docling_result.get("ok") and pdf_backend in {"docling", "auto"} else "pdftotext",
+        "pdf_backend_effective": "docling" if docling_result.get("ok") else "docling_failed",
         "fetch": fetch,
         "pdfinfo": pdfinfo,
-        "pdftotext": {"layout": layout, "raw": raw},
         "docling": docling_result,
+        "source_read_plan": source_read_plan,
         "title_guess": title,
         "files": files,
         "next_raw_path": preflight["next_raw_path"],
@@ -1905,6 +2100,7 @@ def process_arxiv(
     resource_health: str = "direct",
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
+    supplied_url = url
     arxiv_id = arxiv_id_from_url(url)
     if not arxiv_id:
         return process_pdf(url, "direct-pdf", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
@@ -1919,11 +2115,87 @@ def process_arxiv(
     eprint = timings.record("arxiv_eprint_fetch", fetch_url_to_file, eprint_url, workdir / "eprint.tar", timeout)
     source_extract = timings.record("arxiv_source_extract", lambda: safe_extract_tar(workdir / "eprint.tar", workdir / "source") if eprint.get("ok") else {"ok": False, "errors": ["eprint fetch failed"], "extracted_count": 0})
     tex_files = [str(p.relative_to(workdir / "source")) for p in (workdir / "source").rglob("*.tex")] if (workdir / "source").exists() else []
-    tex_text = "\n".join((workdir / "source" / p).read_text(encoding="utf-8", errors="replace")[:200000] for p in tex_files[:20])
+    _, tex_text = read_tex_bundle(workdir)
     tex_figures = figure_table_inventory(tex_text)
-    write_json(workdir / "source_inventory.json", {"eprint": eprint, "source_extract": source_extract, "tex_files": tex_files[:200], "figure_table_items": tex_figures})
+    tex_selection = select_main_tex_source(workdir)
+    write_json(workdir / "source_inventory.json", {"eprint": eprint, "source_extract": source_extract, "tex_files": tex_files[:200], "figure_table_items": tex_figures, "tex_selection": tex_selection})
+    if tex_selection.get("ok"):
+        files: dict[str, str] = {"api": "api.xml", "abs_html": "abs.html", "source_inventory": "source_inventory.json"}
+        main_tex = str(tex_selection["main_tex"])
+        source_read_plan = build_source_read_plan(workdir, source_kind="tex_source", main_rel=main_tex, fallback_used=False)
+        write_json(workdir / "tex_read_plan.json", source_read_plan)
+        files["tex_read_plan"] = "tex_read_plan.json"
+        sections = extract_tex_section_cards(tex_text)
+        write_json(workdir / "section_inventory.json", {"sections": sections})
+        write_json(workdir / "figure_table_inventory.json", {"items": tex_figures})
+        files["section_inventory"] = "section_inventory.json"
+        files["figure_table_inventory"] = "figure_table_inventory.json"
+        main_tex_text = read_text(workdir / main_tex, limit=200_000)
+        title = arxiv_api_title(workdir) or tex_command_arg(main_tex_text, "title") or tex_command_arg(tex_text, "title") or title_from_text(_plain_tex_prose(main_tex_text))
+        links = {"ok": True, "links": []}
+        resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12))
+        write_json(workdir / "resource_probe.json", resource_probe)
+        files["resource_probe"] = "resource_probe.json"
+        secret_scan = timings.record("secret_scan", scan_secrets, workdir)
+        write_json(workdir / "secret_scan.json", secret_scan)
+        files["secret_scan"] = "secret_scan.json"
+        fm = timings.record("candidate_frontmatter", build_frontmatter, title, abs_url, "arxiv")
+        write_json(workdir / "candidate_frontmatter.json", fm)
+        skeleton = timings.record("note_skeleton", build_note_skeleton, fm)
+        write_text(workdir / "note_skeleton.md", skeleton)
+        files["candidate_frontmatter"] = "candidate_frontmatter.json"
+        files["note_skeleton"] = "note_skeleton.md"
+        enrichment = _write_pdf_enrichment_sidecars(
+            root=root,
+            workdir=workdir,
+            files=files,
+            timings=timings,
+            title=title,
+            url=abs_url,
+            pdfinfo={},
+            resource_probe=resource_probe,
+            secret_scan=secret_scan,
+            frontmatter=fm,
+            resource_draft=resource_draft,
+            paper_digest=paper_digest,
+            localize_figures=localize_figures,
+            image_slug=image_slug,
+        )
+        preflight = timings.record("raw_fast_preflight", build_raw_fast_preflight, root, title, abs_url, "arxiv", workdir=workdir, state_dir=state_dir)
+        payload = {
+            "ok": True,
+            "kind": "arxiv",
+            "source_url": abs_url,
+            "supplied_url": supplied_url,
+            "workdir": str(workdir),
+            "pdf_backend_requested": pdf_backend,
+            "pdf_backend_effective": "tex_source",
+            "fetch": eprint,
+            "source_read_plan": source_read_plan,
+            "title_guess": title,
+            "files": files,
+            "next_raw_path": preflight["next_raw_path"],
+            "preflight": preflight,
+            "warnings": [],
+            "arxiv": {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection},
+        }
+        payload["agent_automation"] = timings.record(
+            "agent_automation_sidecars",
+            write_agent_automation_sidecars,
+            workdir,
+            files,
+            payload,
+            frontmatter=fm,
+            preflight=preflight,
+            digest=enrichment.get("paper_digest"),
+            resource_boundary=enrichment.get("resource_draft"),
+        )
+        attach_timings(payload, timings)
+        write_json(workdir / "evidence_bundle.json", payload)
+        return payload
     payload = process_pdf(pdf_url, "arxiv", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
-    payload["arxiv"] = {"id": arxiv_id, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200]}
+    payload["supplied_url"] = supplied_url
+    payload["arxiv"] = {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection}
     payload.setdefault("files", {})["api"] = "api.xml"
     payload.setdefault("files", {})["abs_html"] = "abs.html"
     payload.setdefault("files", {})["source_inventory"] = "source_inventory.json"
@@ -1940,8 +2212,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=None, help="Optional native state dir to read pending queue counts for preflight; never mutated by this command")
     parser.add_argument("--probe", action="append", default=None, choices=["arxiv", "doi", "none"], help="Probe class to run; repeatable. Default is arxiv+doi only. Use --probe none for offline tests.")
-    parser.add_argument("--pdf-backend", choices=["docling", "pdftotext", "auto"], default="docling")
-    parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if the requested structured PDF backend fails instead of falling back to pdftotext evidence")
+    parser.add_argument("--pdf-backend", choices=["docling", "auto"], default="docling")
+    parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if Docling PDF fallback fails instead of continuing with degraded PDF evidence")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--paper-digest", action="store_true", help="Write paper_digest.json/md and deterministic note block drafts as temp sidecars")
     parser.add_argument("--resource-draft", action="store_true", help="Write resource_boundary_draft.json/md from completed probes")

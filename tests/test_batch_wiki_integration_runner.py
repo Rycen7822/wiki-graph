@@ -15,6 +15,56 @@ from ops.wiki_native_wiki_integration_pending import DEFAULT_PENDING_WIKI_INTEGR
 from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import mark_pending_wiki_integration  # noqa: E402
 from ops.wiki_native_wiki_integration_pending import pending_wiki_integration_status  # noqa: E402
+def test_batch_wiki_integration_auto_integrate_defaults_to_local_runner_at_threshold(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    write(
+        root / "index.md",
+        "# LLM Wiki Index\n\n> Last updated: 2026-05-18 16:00 | Total pages: 4\n\n"
+        "## Concepts\n\n- [[foo]] - Foo page.\n\n"
+        "## Queries\n\n- [[bar]] - Bar page.\n\n"
+        "## Meta\n\n- [[raw-clip-map]] - Raw clip map.\n- [[topic-map]] - Topic map.\n",
+    )
+    state = tmp_path / "work" / "wikigraph" / "state"
+    for idx in range(10):
+        mark_pending_wiki_integration(
+            state,
+            root,
+            raw_path=f"raw/clip/2601/260108{idx:02d}_Paper.md",
+            title=f"Paper {idx}",
+            topic_hints=["local runner topic"],
+            required_sections=["summary"],
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.batch_wiki_integration",
+            "auto-integrate",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--reason",
+            "threshold",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["ran"] is True
+    assert payload["runner"] == "local"
+    assert payload["command"][0] == "integrate-local"
+    assert payload["local_result"]["apply"]["operations_applied"] >= 11
+    assert payload["local_result"]["validation"]["errors_count"] == 0
+    assert "input_fingerprints" not in payload["local_result"]["validation"]
+    assert payload["post_status"]["pending_count"] == 0
+    assert load_pending_wiki_integration_ledger(state)["pending"] == []
+    assert len(batch_native_refresh.pending_entries(state)) == 1
+
+
 def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_threshold_and_requires_cleared_ledger(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
