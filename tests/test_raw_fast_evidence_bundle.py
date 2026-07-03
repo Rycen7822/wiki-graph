@@ -354,7 +354,6 @@ def test_raw_fast_evidence_bundle_digest_ignores_stale_legacy_pdf_text_files(tmp
     assert LEGACY_RAW_TEXT_FILE not in digest["files_used"]
 @pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
-    pytest.importorskip("docling.document_converter")
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
     _write_tiny_pdf(source_pdf)
