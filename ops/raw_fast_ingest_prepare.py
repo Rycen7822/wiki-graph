@@ -19,7 +19,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ops.raw_fast_evidence_bundle import detect_kind, manual_reference_policy, render_agent_handoff_markdown, slugify
+from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, detect_kind, manual_reference_policy, render_agent_handoff_markdown, slugify
 from ops.raw_fast_closeout import derive_closeout_args_from_bundle
 
 PROD_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
@@ -209,7 +209,36 @@ def write_closeout_artifacts(workdir: Path, paths: dict[str, Any]) -> dict[str, 
     return {"closeout_args": closeout_args, "closeout_args_path": str(args_path.resolve()), "closeout_command_preview_path": str(preview_path.resolve())}
 
 
-def update_agent_handoff(workdir: Path, closeout: dict[str, Any]) -> dict[str, Any]:
+def write_assemble_artifacts(workdir: Path, paths: dict[str, Any], closeout: dict[str, Any]) -> dict[str, Any]:
+    raw_closeout_args = closeout.get("closeout_args")
+    closeout_args = raw_closeout_args if isinstance(raw_closeout_args, dict) else {}
+    preview_path = workdir / "assemble_command.preview.sh"
+    report_path = workdir / ASSEMBLED_RAW_NOTE_REPORT_FILE
+    command = [
+        sys.executable,
+        "-m",
+        "ops.raw_fast_note_assemble",
+        "--root",
+        str(paths["root"]),
+        "--workdir",
+        str(workdir),
+        "--body-draft",
+        RAW_BODY_DRAFT_FILE,
+        "--output-report",
+        str(report_path),
+    ]
+    if closeout_args.get("raw_file"):
+        command.extend(["--raw-file", str(closeout_args["raw_file"])])
+    preview_path.write_text("#!/usr/bin/env bash\nset -euo pipefail\ncd " + shlex.quote(str(Path(__file__).resolve().parents[1])) + "\n" + " ".join(shlex.quote(str(part)) for part in command) + "\n", encoding="utf-8")
+    return {
+        "command_preview_path": str(preview_path.resolve()),
+        "report_path": str(report_path.resolve()),
+        "body_draft_path": str((workdir / RAW_BODY_DRAFT_FILE).resolve()),
+        "raw_file": closeout_args.get("raw_file"),
+    }
+
+
+def update_agent_handoff(workdir: Path, closeout: dict[str, Any], assemble: dict[str, Any] | None = None) -> dict[str, Any]:
     handoff_path = workdir / "agent_handoff.json"
     if handoff_path.exists():
         handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
@@ -221,10 +250,28 @@ def update_agent_handoff(workdir: Path, closeout: dict[str, Any]) -> dict[str, A
             "manual_reference_policy": manual_reference_policy(visible=False),
             "automation_next_action": {"action": "read_agent_handoff", "manual_reference_policy": "only_on_manual_required"},
             "resource_review_required": False,
+            "agent_actions": [],
         }
+    handoff["body_draft"] = {"path": RAW_BODY_DRAFT_FILE, "contract": "body_only_no_frontmatter"}
+    raw_source_refs = handoff.get("source_refs")
+    source_refs = raw_source_refs if isinstance(raw_source_refs, dict) else {}
+    source_refs["body_draft"] = RAW_BODY_DRAFT_FILE
+    handoff["source_refs"] = source_refs
     handoff["closeout_args"] = closeout["closeout_args"]
     handoff["closeout_args_path"] = closeout["closeout_args_path"]
     handoff["closeout_command_preview_path"] = closeout["closeout_command_preview_path"]
+    if assemble is not None:
+        handoff["assemble"] = {
+            "command_preview_path": assemble["command_preview_path"],
+            "report_path": assemble["report_path"],
+            "body_draft_path": assemble["body_draft_path"],
+            "raw_file": assemble.get("raw_file"),
+        }
+    handoff["agent_actions"] = [
+        "Read this handoff first; use Default source reads and the sanitized scientific digest for body synthesis.",
+        f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
+        "Run assemble_command.preview.sh to create the canonical raw note from script-owned metadata, then run closeout_command.preview.sh.",
+    ]
     if not closeout["closeout_args"].get("ok"):
         handoff["status"] = "manual_required"
         handoff["manual_reason"] = {"stage": "closeout_args", "error": closeout["closeout_args"].get("error")}
@@ -312,7 +359,8 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
         return output
 
     closeout = write_closeout_artifacts(workdir, paths)
-    handoff = update_agent_handoff(workdir, closeout)
+    assemble = write_assemble_artifacts(workdir, paths, closeout)
+    handoff = update_agent_handoff(workdir, closeout, assemble)
     resource_review_required = bool(handoff.get("resource_review_required")) or handoff.get("status") == "manual_required"
     output.update(
         {
@@ -320,6 +368,7 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
             "resource_review_required": resource_review_required,
             "closeout_args_path": closeout["closeout_args_path"],
             "closeout_command_preview_path": closeout["closeout_command_preview_path"],
+            "assemble_command_preview_path": assemble["command_preview_path"],
         }
     )
     if resource_review_required:

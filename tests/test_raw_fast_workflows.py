@@ -81,6 +81,43 @@ def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadat
     assert result.returncode != 0
     assert {"resource_status", "source_pdf", "authors", "arxiv_version"} <= set(payload["frontmatter_fields_extra"])
     assert "frontmatter_fields_extra" in payload["raw_fast_blockers"]
+
+
+def test_raw_fast_verifier_accepts_source_resource_link_metadata(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    raw_rel = "raw/clip/2601/26010110_Resource-Link-Metadata-Paper.md"
+    note = _structured_raw_fast_note("Resource Link Metadata Paper", "https://arxiv.org/abs/2606.32039").replace(
+        "capture_route: \"test synthetic route\"\n",
+        "capture_route: \"test synthetic route\"\n"
+        "github_links:\n"
+        "  - https://github.com/Tencent-Hunyuan/GEAR\n"
+        "huggingface_model_links:\n"
+        "  - https://huggingface.co/BinLin203/GEAR-VQ\n"
+        "huggingface_dataset_links:\n"
+        "  - https://huggingface.co/datasets/BinLin203/GEAR-Data\n",
+    )
+    write(root / raw_rel, note)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RAW_FAST_VERIFIER),
+            "--wiki",
+            str(root),
+            "--raw-file",
+            raw_rel,
+            "--structured-paper",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["frontmatter_fields_extra"] == []
+    assert "frontmatter_fields_extra" not in payload["raw_fast_blockers"]
+
+
 def test_raw_fast_verifier_rejects_remote_markdown_images(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     raw_rel = "raw/clip/2601/26010108_Remote-Image-Paper.md"

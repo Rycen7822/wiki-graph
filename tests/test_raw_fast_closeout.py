@@ -154,13 +154,31 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     ledger = load_pending_wiki_integration_ledger(state)
     assert ledger["pending"][0]["raw_path"] == raw_rel
     assert "resources" not in ledger["pending"][0]["required_sections"]
-def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_and_plan_without_local_payload() -> None:
+def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_plan_and_native_summary_without_local_payload() -> None:
     compact = raw_fast_closeout.compact_auto_integrate(
         {
             "runner": "local",
             "plan_path": "/tmp/plan.json",
             "dry_run": False,
-            "local_result": {"validation": {"input_fingerprints": {"raw": "bulk"}}},
+            "local_result": {
+                "validation": {"input_fingerprints": {"raw": "bulk"}},
+                "native_refresh": {
+                    "native_refresh": True,
+                    "skipped": False,
+                    "runs": [
+                        {
+                            "refresh_kind": "incremental",
+                            "build_executed": True,
+                            "cutover_executed": True,
+                            "active_already_fresh": False,
+                            "pending_cleared": True,
+                            "fill_missing_vectors": True,
+                            "active": {"workspace_id": "candidate-after-wiki"},
+                        }
+                    ],
+                    "status_after": {"pending_count": 0, "should_refresh": False},
+                },
+            },
             "post_status": {"pending_count": 0, "should_integrate": False},
         }
     )
@@ -168,6 +186,11 @@ def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_and_plan_without_
     assert compact["runner"] == "local"
     assert compact["plan_path"] == "/tmp/plan.json"
     assert compact["post_status"]["pending_count"] == 0
+    assert compact["native_refresh"]["run_count"] == 1
+    assert compact["native_refresh"]["runs"][0]["build_executed"] is True
+    assert compact["native_refresh"]["runs"][0]["active_already_fresh"] is False
+    assert compact["native_refresh"]["runs"][0]["active_workspace_id"] == "candidate-after-wiki"
+    assert compact["native_refresh"]["status_after"]["pending_count"] == 0
     assert "local_result" not in compact
 
 

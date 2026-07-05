@@ -10,10 +10,13 @@ import argparse
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
+from ops import batch_native_refresh
 from ops.wiki_native_cli import DEFAULT_STATE_DIR, DEFAULT_WIKI_ROOT, print_json
 from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success
 from ops.wiki_native_wiki_integration_pending import (
@@ -132,6 +135,273 @@ def build_runner_command(integration_command: str | None, prompt: str, prompt_pa
     return ["hermes", "-z", prompt, "--skills", "llm-wiki"]
 
 
+def _unquote_env_value(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
+def _load_dotenv_values(workdir: Path | None) -> dict[str, str]:
+    if workdir is None:
+        return {}
+    path = Path(workdir) / ".env"
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        values[key] = _unquote_env_value(value)
+    return values
+
+
+def _native_refresh_config(workdir: Path | None) -> dict[str, str]:
+    config = _load_dotenv_values(workdir)
+    for key, value in os.environ.items():
+        if key.startswith("LLM_WIKI_NATIVE_") and str(value).strip():
+            config[key] = value
+    return config
+
+
+def _config_value(config: dict[str, str], *names: str) -> str | None:
+    for name in names:
+        value = str(config.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _query_data_url_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return urlunparse(parsed._replace(path="/query/data", params="", query="", fragment=""))
+
+
+def _float_config(config: dict[str, str], name: str, default: float) -> float:
+    value = _config_value(config, name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _default_restart_command(workdir: Path) -> str:
+    cd_command = f"cd {shlex.quote(str(workdir))} && {shlex.quote(sys.executable)} -m ops.native_server_control restart"
+    return f"sh -lc {shlex.quote(cd_command)}"
+
+
+def _path_from_config(value: str, *, workdir: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = workdir / path
+    return path
+
+
+def _native_refresh_required_unchanged_paths(root: Path, workdir: Path, config: dict[str, str]) -> list[Path]:
+    raw_paths = _config_value(config, "LLM_WIKI_NATIVE_UNCHANGED_PATHS")
+    if raw_paths:
+        return [_path_from_config(part, workdir=workdir) for part in raw_paths.split(os.pathsep) if part.strip()]
+    raw_path = _config_value(config, "LLM_WIKI_NATIVE_UNCHANGED_PATH")
+    if raw_path:
+        return [_path_from_config(raw_path, workdir=workdir)]
+    fallback = root / "_meta"
+    return [fallback if fallback.exists() else root]
+
+
+def _native_refresh_cutover_args(
+    *,
+    root: Path,
+    state_dir: Path,
+    workdir: Path,
+    workspace_id: str,
+) -> tuple[argparse.Namespace, Path, list[Path], dict[str, Any]]:
+    config = _native_refresh_config(workdir)
+    restart_command = _config_value(config, "LLM_WIKI_NATIVE_RESTART_COMMAND") or _default_restart_command(workdir)
+    health_url = _config_value(config, "LLM_WIKI_NATIVE_HEALTH_URL")
+    smoke_url = (
+        _config_value(config, "LLM_WIKI_NATIVE_SMOKE_URL")
+        or _query_data_url_from_url(_config_value(config, "LLM_WIKI_NATIVE_SERVER_URL"))
+        or _query_data_url_from_url(health_url)
+        or "http://127.0.0.1:9621/query/data"
+    )
+    smoke_query = _config_value(config, "LLM_WIKI_NATIVE_SMOKE_QUERY") or "native graph refresh smoke"
+    workspace_root_value = _config_value(config, "LLM_WIKI_NATIVE_WORKSPACE_ROOT")
+    workspace_root = _path_from_config(workspace_root_value, workdir=workdir) if workspace_root_value else batch_native_refresh.default_workspace_root(state_dir)
+    required_unchanged_paths = _native_refresh_required_unchanged_paths(root, workdir, config)
+    args = argparse.Namespace(
+        restart_command=restart_command,
+        health_url=health_url,
+        health_timeout=_float_config(config, "LLM_WIKI_NATIVE_HEALTH_TIMEOUT", 10.0),
+        smoke_url=smoke_url,
+        smoke_query=smoke_query,
+        smoke_mode=_config_value(config, "LLM_WIKI_NATIVE_SMOKE_MODE") or "mix",
+        smoke_workspace_id=_config_value(config, "LLM_WIKI_NATIVE_SMOKE_WORKSPACE_ID"),
+        workspace_id=workspace_id,
+        smoke_query_vector_json=_config_value(config, "LLM_WIKI_NATIVE_SMOKE_QUERY_VECTOR_JSON"),
+        smoke_query_vector_file=(
+            _path_from_config(_config_value(config, "LLM_WIKI_NATIVE_SMOKE_QUERY_VECTOR_FILE"), workdir=workdir)
+            if _config_value(config, "LLM_WIKI_NATIVE_SMOKE_QUERY_VECTOR_FILE")
+            else None
+        ),
+        smoke_query_vector_source=_config_value(config, "LLM_WIKI_NATIVE_SMOKE_QUERY_VECTOR_SOURCE") or "active-first-vector",
+        smoke_timeout=_float_config(config, "LLM_WIKI_NATIVE_SMOKE_TIMEOUT", 10.0),
+    )
+    summary = {
+        "workspace_root": str(workspace_root),
+        "restart_command_present": bool(restart_command),
+        "health_url": health_url,
+        "smoke_url": smoke_url,
+        "smoke_query_present": bool(smoke_query),
+        "smoke_mode": args.smoke_mode,
+        "smoke_query_vector_source": args.smoke_query_vector_source,
+        "required_unchanged_paths": [str(path) for path in required_unchanged_paths],
+    }
+    return args, workspace_root, required_unchanged_paths, summary
+
+
+def _native_refresh_failure(
+    *,
+    reason: str,
+    message: str,
+    status_before: dict[str, Any],
+    status_after: dict[str, Any],
+    runs: list[dict[str, Any]],
+    guard: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    exception_type: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "native_refresh": True,
+        "skipped": False,
+        "runs": runs,
+        "status_before": status_before,
+        "status_after": status_after,
+        "failure": {"reason": reason, "message": message},
+    }
+    if exception_type:
+        payload["failure"]["exception_type"] = exception_type
+    if guard is not None:
+        payload["guard"] = guard
+    if config is not None:
+        payload["config"] = config
+    return payload
+
+
+def run_native_refresh_after_wiki_integration(
+    root: Path,
+    state_dir: Path,
+    *,
+    workdir: Path | None = None,
+    reason: str,
+    max_passes: int = 2,
+) -> tuple[int, dict[str, Any]]:
+    native_workdir = (workdir or DEFAULT_NATIVE_WORKDIR).resolve()
+    status_before = batch_native_refresh.status(root, state_dir)
+    if not status_before.get("should_refresh"):
+        return 0, {
+            "native_refresh": True,
+            "skipped": True,
+            "skip_reason": "native_refresh_not_required",
+            "runs": [],
+            "status_before": status_before,
+            "status_after": status_before,
+        }
+
+    runs: list[dict[str, Any]] = []
+    for pass_index in range(max_passes):
+        current_status = batch_native_refresh.status(root, state_dir)
+        if not current_status.get("should_refresh"):
+            return 0, {
+                "native_refresh": True,
+                "skipped": False,
+                "runs": runs,
+                "status_before": status_before,
+                "status_after": current_status,
+            }
+        workspace_id = f"native-{time.strftime('%Y%m%d%H%M%S')}-{pass_index + 1}"
+        args, workspace_root, required_unchanged_paths, config_summary = _native_refresh_cutover_args(
+            root=root,
+            state_dir=state_dir,
+            workdir=native_workdir,
+            workspace_id=workspace_id,
+        )
+        guard = batch_native_refresh.cutover_guard_report(
+            state_dir=state_dir,
+            workspace_root=workspace_root,
+            restart_command=args.restart_command,
+            smoke_url=args.smoke_url,
+            smoke_query=args.smoke_query,
+            smoke_mode=args.smoke_mode,
+            required_unchanged_paths=required_unchanged_paths,
+            check_paths=True,
+        )
+        if not guard.get("ok"):
+            return 15, _native_refresh_failure(
+                reason="native-refresh-guard-missing",
+                message="native refresh cutover guards are incomplete; graph freshness was not claimed",
+                status_before=status_before,
+                status_after=current_status,
+                runs=runs,
+                guard=guard,
+                config=config_summary,
+            )
+        try:
+            refresh_result = batch_native_refresh.refresh_cutover(
+                root=root,
+                state_dir=state_dir,
+                workspace_root=workspace_root,
+                workspace_id=workspace_id,
+                embedding_profile="conservative",
+                build_workspace=batch_native_refresh.build_prepared_workspace,
+                finalize_workspace=batch_native_refresh.finalize_prepared_workspace_for_state,
+                restart_service=batch_native_refresh.restart_service_from_args(args),
+                query_smoke=batch_native_refresh.query_smoke_from_args(args),
+                fill_missing_vectors=True,
+                force=True,
+                required_unchanged_paths=required_unchanged_paths,
+            )
+        except Exception as exc:
+            return 16, _native_refresh_failure(
+                reason="native-refresh-failed",
+                message=str(exc),
+                status_before=status_before,
+                status_after=batch_native_refresh.status(root, state_dir),
+                runs=runs,
+                guard=guard,
+                config=config_summary,
+                exception_type=type(exc).__name__,
+            )
+        runs.append(refresh_result)
+
+    final_status = batch_native_refresh.status(root, state_dir)
+    if final_status.get("should_refresh"):
+        return 17, _native_refresh_failure(
+            reason="native-refresh-incomplete",
+            message=f"native refresh still pending after {max_passes} guarded pass(es)",
+            status_before=status_before,
+            status_after=final_status,
+            runs=runs,
+        )
+    return 0, {
+        "native_refresh": True,
+        "skipped": False,
+        "runs": runs,
+        "status_before": status_before,
+        "status_after": final_status,
+    }
+
+
 def run_integrate_local(
     root: Path,
     state_dir: Path,
@@ -169,14 +439,24 @@ def run_integrate_local(
         }
     clear = clear_pending_wiki_integration_after_success(root, state_dir, reason=reason)
     post_status = pending_wiki_integration_status(root, state_dir, reason=reason)
-    return 0, {
+    native_code, native_refresh = run_native_refresh_after_wiki_integration(
+        root,
+        state_dir,
+        workdir=workdir or DEFAULT_NATIVE_WORKDIR,
+        reason=reason,
+    )
+    result = {
         "local_runner": True,
         "plan_path": str(plan_path),
         "apply": apply_result,
         "validation": validation_compact,
         "clear_success": clear,
         "post_status": post_status,
+        "native_refresh": native_refresh,
     }
+    if native_code != 0:
+        return native_code, result
+    return 0, result
 
 
 def run_auto_integration(
@@ -263,6 +543,15 @@ def run_auto_integration(
     if post_status.get("should_integrate") or post_status.get("should_review"):
         failure = record_pending_wiki_integration_failure(state_dir, "auto-integrate-incomplete", "runner returned successfully but pending wiki integration ledger still requires action")
         return 12, {**result, "failure": failure}
+    native_code, native_refresh = run_native_refresh_after_wiki_integration(
+        root,
+        state_dir,
+        workdir=DEFAULT_NATIVE_WORKDIR,
+        reason=reason,
+    )
+    result["native_refresh"] = native_refresh
+    if native_code != 0:
+        return native_code, {**result, "failure": native_refresh.get("failure", {"reason": "native-refresh-failed"})}
     return 0, result
 
 

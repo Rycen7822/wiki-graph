@@ -3,7 +3,7 @@
 
 This script is intentionally read-only with respect to the human wiki root. It
 fetches/extracts/probes source evidence into a caller-provided workdir, emits a
-raw-note skeleton, and leaves synthesis of the canonical raw note to the agent.
+raw-note metadata/skeleton, and leaves only body prose synthesis to the agent.
 """
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ USER_AGENT = "Hermes llm-wiki raw-fast evidence bundle"
 TEXT_EXTENSIONS = {".txt", ".json", ".md", ".html", ".htm", ".js", ".toml", ".yaml", ".yml", ".tex", ".xml"}
 DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_TEXT_BYTES = 8 * 1024 * 1024
+RAW_BODY_DRAFT_FILE = "raw_body_draft.md"
+ASSEMBLED_RAW_NOTE_REPORT_FILE = "assembled_raw_note_report.json"
 STRICT_SECRET_PATTERNS = {
     "openai_key": re.compile(r"(?<![A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])"),
     "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
@@ -442,28 +444,141 @@ def extract_urls(text: str) -> list[str]:
     return sorted({u.rstrip(".,;:") for u in raw})
 
 
+def extract_url_contexts(text: str, *, radius: int = 180) -> dict[str, list[str]]:
+    contexts: dict[str, list[str]] = {}
+    for match in re.finditer(r"https?://[^\s)\]}>\"']+", text):
+        url = match.group(0).rstrip(".,;:")
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(text)
+        if line_end - line_start > radius * 2:
+            start = max(0, match.start() - radius)
+            end = min(len(text), match.end() + radius)
+        else:
+            start, end = line_start, line_end
+        contexts.setdefault(url, []).append(compact_ws(text[start:end])[:500])
+    return contexts
+
+
+def extract_abstract_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", text, flags=re.I | re.S):
+        spans.append((match.start(1), match.end(1)))
+
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    cursor = 0
+    for line in lines:
+        offsets.append(cursor)
+        cursor += len(line)
+
+    heading_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:abstract|摘要|论文摘要)(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*$", re.I)
+    same_line_re = re.compile(r"^\s*(?:abstract|摘要|论文摘要)\s*[:：]\s*(.+)$", re.I)
+    boundary_re = re.compile(
+        r"^\s*(?:#{1,6}\s+|\\(?:section|subsection)\{|(?:\d+(?:\.\d+)*)\s+(?:introduction|related\s+work|method|methods|background)\b|(?:introduction|related\s+work|method|methods|background)\b|keywords?\b)",
+        re.I,
+    )
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        start: int | None = None
+        if heading_re.match(stripped):
+            start = offsets[idx] + len(line)
+        else:
+            same_line = same_line_re.match(line)
+            if same_line:
+                start = offsets[idx] + same_line.start(1)
+        if start is None:
+            continue
+        end = len(text)
+        for next_idx in range(idx + 1, len(lines)):
+            if boundary_re.match(lines[next_idx].strip()):
+                end = offsets[next_idx]
+                break
+        if end > start:
+            spans.append((start, end))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def extract_abstract_urls(text: str) -> set[str]:
+    urls: set[str] = set()
+    for start, end in extract_abstract_spans(text):
+        urls.update(extract_urls(text[start:end]))
+    return urls
+
+
 GITHUB_EXCLUDED_OWNER_SEGMENTS = {"features", "topics", "collections", "marketplace", "pricing", "about", "login", "search"}
+HF_EXCLUDED_OWNER_SEGMENTS = {"api", "blog", "collections", "datasets", "docs", "models", "papers", "settings", "spaces"}
 RESOURCE_HEALTH_MAX_CANDIDATES = 8
+AUXILIARY_TEX_RESOURCE_CONTEXT_RE = re.compile(
+    r"(?i)(optional\s+math\s+commands|math_commands\.tex|dlbook_notation|"
+    r"(?:latex|tex)\s+(?:macro|command|template|style|class)|"
+    r"(?:macro|notation|template|style|class)\s+(?:file|commands?|package|repo(?:sitory)?)|"
+    r"\\(?:input|usepackage)\{[^}]*math_commands)"
+)
+PAPER_ARTIFACT_CONTEXT_RE = re.compile(r"(?i)(official\s+(?:code|implementation|repository)|code\s+(?:is\s+)?available|implementation\s+(?:is\s+)?available|source\s+code|artifact|checkpoint|dataset|model\s+weights?)")
 
 
 def _normalized_url_host(url: str) -> str:
     return urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
 
 
-def _resource_url_candidate(url: str) -> dict[str, Any] | None:
+def _source_url_ignore_reason(url: str, contexts: list[str]) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host != "github.com" or not contexts:
+        return None
+    joined = "\n".join(contexts)
+    if AUXILIARY_TEX_RESOURCE_CONTEXT_RE.search(joined) and not PAPER_ARTIFACT_CONTEXT_RE.search(joined):
+        return "auxiliary_tex_notation_or_template_repo"
+    return None
+
+
+def _resource_url_candidate(
+    url: str,
+    *,
+    source: str = "source_exposed_exact_url",
+    relation: str | None = None,
+    official: bool | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
     parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
-    base = {"url": url, "source": "source_exposed_exact_url", "status": "not_checked"}
+    base: dict[str, Any] = {"url": url, "source": source, "status": "not_checked"}
+    if relation:
+        base["relation"] = relation
+    if official is not None:
+        base["official"] = bool(official)
+    if evidence:
+        base["evidence"] = evidence
     if host == "github.com" and len(parts) >= 2 and parts[0].lower() not in GITHUB_EXCLUDED_OWNER_SEGMENTS:
         owner, repo = parts[0], re.sub(r"\.git$", "", parts[1])
         if owner and repo:
             return {**base, "type": "github", "repo": f"{owner}/{repo}"}
     if host == "huggingface.co" and parts:
+        first = parts[0].lower()
+        if first == "papers":
+            return None
+        if first == "collections":
+            if len(parts) >= 3:
+                return {**base, "type": "hf_collection", "hf_kind": "collections", "repo": f"{parts[1]}/{parts[2]}"}
+            return None
+        if first == "models":
+            return None
         if len(parts) >= 3 and parts[0] in {"datasets", "spaces"}:
             return {**base, "type": "hf", "hf_kind": parts[0], "repo": f"{parts[1]}/{parts[2]}"}
-        if len(parts) >= 2:
+        if len(parts) >= 2 and first not in HF_EXCLUDED_OWNER_SEGMENTS:
             return {**base, "type": "hf", "hf_kind": "models", "repo": f"{parts[0]}/{parts[1]}"}
+    if relation == "project_page" and host and host not in {"arxiv.org", "export.arxiv.org", "doi.org", "dx.doi.org"}:
+        return {**base, "type": "project_page"}
     if host and host not in {"arxiv.org", "export.arxiv.org", "doi.org", "dx.doi.org"} and re.search(r"project|code|artifact|software|release|demo|model|dataset", url, re.I):
         return {**base, "type": "project_page"}
     return None
@@ -496,18 +611,41 @@ def probe_exact_link_health(url: str, *, timeout: int = 8, max_bytes: int = 1024
     return {"ok": False, "chosen": attempts[-1].get("method") if attempts else None, "url": url, "status": "probe_failed", "attempts": attempts, "error": attempts[-1].get("error") if attempts else "probe_failed"}
 
 
-def classify_source_exposed_resources(urls: list[str], *, health_mode: str = "direct", timeout: int = 8) -> dict[str, Any]:
+def classify_source_exposed_resources(
+    urls: list[str],
+    *,
+    health_mode: str = "direct",
+    timeout: int = 8,
+    extra_candidates: list[dict[str, Any]] | None = None,
+    url_contexts: dict[str, list[str]] | None = None,
+    abstract_urls: set[str] | None = None,
+) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None]] = set()
-    for url in urls:
-        candidate = _resource_url_candidate(url)
+    def add_candidate(candidate: dict[str, Any] | None) -> None:
         if not candidate:
-            continue
+            return
         key = (candidate["type"], candidate.get("repo") or candidate["url"])
         if key in seen:
-            continue
+            return
         seen.add(key)
         candidates.append(candidate)
+
+    for url in urls:
+        contexts = (url_contexts or {}).get(url) or []
+        ignore_reason = _source_url_ignore_reason(url, contexts)
+        if ignore_reason:
+            ignored.append({"url": url, "reason": ignore_reason, "contexts": contexts[:2]})
+            continue
+        evidence = {"contexts": contexts[:2]} if contexts else None
+        candidate = _resource_url_candidate(url, evidence=evidence)
+        if candidate and candidate.get("type") in {"github", "hf"} and url not in (abstract_urls or set()):
+            ignored.append({"url": url, "reason": "non_abstract_source_resource_link", "contexts": contexts[:2]})
+            continue
+        add_candidate(candidate)
+    for candidate in extra_candidates or []:
+        add_candidate(candidate)
     health_enabled = health_mode == "direct"
     for candidate in candidates[:RESOURCE_HEALTH_MAX_CANDIDATES]:
         if not health_enabled:
@@ -518,19 +656,23 @@ def classify_source_exposed_resources(urls: list[str], *, health_mode: str = "di
         candidate["status"] = "verified_present" if health.get("ok") else "probe_failed"
     for candidate in candidates[RESOURCE_HEALTH_MAX_CANDIDATES:]:
         candidate["health"] = {"skipped": True, "reason": "candidate_limit"}
-    review_required = any(item.get("status") == "probe_failed" for item in candidates)
+    # Resource link health is script-owned: verified exact links may enter metadata;
+    # unresolved links remain internal evidence and must not stop/route the agent.
+    review_required = False
     return {
         "ok": True,
         "health_mode": health_mode,
         "review_required": review_required,
         "candidates": candidates,
+        "ignored": ignored,
         "github": [item for item in candidates if item.get("type") == "github"],
         "hf": [item for item in candidates if item.get("type") == "hf"],
+        "hf_collections": [item for item in candidates if item.get("type") == "hf_collection"],
         "project_pages": [item for item in candidates if item.get("type") == "project_page"],
     }
 
 
-def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[str], *, health_mode: str = "direct", timeout: int = 8) -> dict[str, Any]:
+def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[str], *, health_mode: str = "direct", timeout: int = 8, extra_candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     urls = set(extract_urls(text))
     for item in links_payload.get("links") or []:
         if isinstance(item, dict) and item.get("uri"):
@@ -538,9 +680,10 @@ def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[
     probes_set = set(probes)
     effective_health_mode = "none" if "none" in probes_set else health_mode
     sorted_urls = sorted(urls)
-    source_exposed = classify_source_exposed_resources(sorted_urls, health_mode=effective_health_mode, timeout=timeout)
+    abstract_urls = extract_abstract_urls(text)
+    source_exposed = classify_source_exposed_resources(sorted_urls, health_mode=effective_health_mode, timeout=timeout, extra_candidates=extra_candidates, url_contexts=extract_url_contexts(text), abstract_urls=abstract_urls)
     if "none" in probes_set:
-        return {"ok": True, "skipped": True, "urls": sorted_urls, "source_exposed_resources": source_exposed, "probes": []}
+        return {"ok": True, "skipped": True, "urls": sorted_urls, "abstract_urls": sorted(abstract_urls), "source_exposed_resources": source_exposed, "probes": []}
     doi_strings = sorted(set(re.findall(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, flags=re.I)))[:50]
     arxiv_ids = sorted(set(re.findall(r"arXiv[: ]?(\d{4}\.\d{4,5})", text, flags=re.I)))[:50]
     results: list[dict[str, Any]] = []
@@ -550,7 +693,205 @@ def build_resource_probe(text: str, links_payload: dict[str, Any], probes: list[
     if "arxiv" in probes_set:
         for arxiv_id in arxiv_ids:
             results.append({"ok": True, "type": "arxiv", "id": arxiv_id, "status": "detected", "url": f"https://arxiv.org/abs/{arxiv_id}", "error": None, "evidence": {"matched_text": arxiv_id}})
-    return {"ok": True, "urls": sorted_urls, "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "source_exposed_resources": source_exposed, "probes": results}
+    return {"ok": True, "urls": sorted_urls, "abstract_urls": sorted(abstract_urls), "doi_strings": doi_strings, "arxiv_ids": arxiv_ids, "source_exposed_resources": source_exposed, "probes": results}
+
+
+def metadata_resource_links(resource_probe: dict[str, Any] | None) -> dict[str, list[str]]:
+    source_exposed = (resource_probe or {}).get("source_exposed_resources")
+    if not isinstance(source_exposed, dict):
+        return {}
+
+    def urls_for(items: list[dict[str, Any]]) -> list[str]:
+        return sorted({str(item.get("url")) for item in items if item.get("url") and item.get("status") == "verified_present"})
+
+    github_links = urls_for(source_exposed.get("github") or [])
+    model_links = urls_for([item for item in (source_exposed.get("hf") or []) if item.get("hf_kind") == "models"])
+    dataset_links = urls_for([item for item in (source_exposed.get("hf") or []) if item.get("hf_kind") == "datasets"])
+    links: dict[str, list[str]] = {}
+    if github_links:
+        links["github_links"] = github_links
+    if model_links:
+        links["huggingface_model_links"] = model_links
+    if dataset_links:
+        links["huggingface_dataset_links"] = dataset_links
+    return links
+
+
+def _fetch_json(url: str, timeout: int) -> dict[str, Any]:
+    fetched = fetch_text(url, timeout)
+    result = {key: fetched.get(key) for key in ["ok", "url", "status", "content_type", "bytes", "error", "message"] if key in fetched}
+    if not fetched.get("ok"):
+        return {**result, "ok": False}
+    try:
+        data = json.loads(fetched.get("text") or "")
+    except json.JSONDecodeError as exc:
+        return {**result, "ok": False, "error": "JSONDecodeError", "message": str(exc)}
+    return {**result, "ok": True, "data": data}
+
+
+def _api_resource_candidate(
+    url: str | None,
+    *,
+    source: str,
+    relation: str | None = None,
+    official: bool | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not url:
+        return None
+    return _resource_url_candidate(str(url), source=source, relation=relation, official=official, evidence=evidence)
+
+
+def _hf_repo_url(repo_id: str | None, kind: str) -> str | None:
+    if not repo_id or "/" not in repo_id:
+        return None
+    if kind == "datasets":
+        return f"https://huggingface.co/datasets/{repo_id}"
+    if kind == "spaces":
+        return f"https://huggingface.co/spaces/{repo_id}"
+    if kind == "models":
+        return f"https://huggingface.co/{repo_id}"
+    return None
+
+
+def collect_paperswithcode_resources(arxiv_id: str, timeout: int) -> dict[str, Any]:
+    endpoints = [
+        f"https://paperswithcode.co/api/v1/papers/{arxiv_id}?include_resources=true",
+        f"https://paperswithcode.co/api/v1/papers/arxiv/{arxiv_id}?include_resources=true",
+    ]
+    fetches: list[dict[str, Any]] = []
+    data: dict[str, Any] | None = None
+    for endpoint in endpoints:
+        fetched = _fetch_json(endpoint, timeout)
+        fetches.append({key: fetched.get(key) for key in ["ok", "url", "status", "error", "message"] if key in fetched})
+        if fetched.get("ok") and isinstance(fetched.get("data"), dict):
+            data = fetched["data"]
+            break
+    if data is None:
+        return {"ok": False, "platform": "paperswithcode", "fetches": fetches, "candidates": [], "warnings": ["paperswithcode_api_unavailable_or_unparseable"]}
+
+    candidates: list[dict[str, Any]] = []
+    ignored_urls: list[dict[str, str]] = []
+    for idx, item in enumerate(data.get("repositories") or []):
+        if not isinstance(item, dict):
+            continue
+        candidate = _api_resource_candidate(
+            item.get("url"),
+            source="paperswithcode_api.repositories",
+            relation="repository",
+            official=item.get("is_official") if isinstance(item.get("is_official"), bool) else None,
+            evidence={"arxiv_id": arxiv_id, "api_field": f"repositories[{idx}].url", "platform_source": item.get("source")},
+        )
+        if candidate:
+            candidates.append(candidate)
+    for idx, item in enumerate(data.get("project_pages") or []):
+        if not isinstance(item, dict):
+            continue
+        candidate = _api_resource_candidate(
+            item.get("url"),
+            source="paperswithcode_api.project_pages",
+            relation="project_page",
+            official=item.get("is_official") if isinstance(item.get("is_official"), bool) else None,
+            evidence={"arxiv_id": arxiv_id, "api_field": f"project_pages[{idx}].url", "platform_source": item.get("source")},
+        )
+        if candidate:
+            candidates.append(candidate)
+    summary = data.get("hf_artifact_summary")
+    if isinstance(summary, dict) and summary.get("best_url"):
+        ignored_urls.append({"url": str(summary.get("best_url")), "reason": "hf_index_not_concrete_artifact"})
+    return {"ok": True, "platform": "paperswithcode", "fetches": fetches, "candidates": candidates, "ignored_urls": ignored_urls}
+
+
+def collect_huggingface_paper_resources(arxiv_id: str, timeout: int) -> dict[str, Any]:
+    paper = _fetch_json(f"https://huggingface.co/api/papers/{arxiv_id}", timeout)
+    repos = _fetch_json(f"https://huggingface.co/api/arxiv/{arxiv_id}/repos", timeout)
+    fetches = [
+        {"name": "paper", **{key: paper.get(key) for key in ["ok", "url", "status", "error", "message"] if key in paper}},
+        {"name": "arxiv_repos", **{key: repos.get(key) for key in ["ok", "url", "status", "error", "message"] if key in repos}},
+    ]
+    candidates: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    paper_data = paper.get("data") if paper.get("ok") and isinstance(paper.get("data"), dict) else None
+    if paper_data:
+        for field, relation in [("githubRepo", "repository"), ("projectPage", "project_page")]:
+            candidate = _api_resource_candidate(
+                paper_data.get(field),
+                source=f"huggingface_api.papers.{field}",
+                relation=relation,
+                evidence={"arxiv_id": arxiv_id, "api_field": field},
+            )
+            if candidate:
+                candidates.append(candidate)
+        for field, kind in [("linkedModels", "models"), ("linkedDatasets", "datasets"), ("linkedSpaces", "spaces")]:
+            for idx, item in enumerate(paper_data.get(field) or []):
+                if not isinstance(item, dict):
+                    continue
+                repo_id = item.get("id")
+                candidate = _api_resource_candidate(
+                    _hf_repo_url(str(repo_id) if repo_id else None, kind),
+                    source=f"huggingface_api.papers.{field}",
+                    relation=f"linked_{kind.rstrip('s')}",
+                    evidence={"arxiv_id": arxiv_id, "api_field": f"{field}[{idx}].id", "repo_type": item.get("repoType")},
+                )
+                if candidate:
+                    candidates.append(candidate)
+    else:
+        warnings.append("huggingface_paper_api_unavailable_or_unparseable")
+
+    repos_data = repos.get("data") if repos.get("ok") and isinstance(repos.get("data"), dict) else None
+    if repos_data:
+        for kind in ["models", "datasets", "spaces"]:
+            for idx, item in enumerate(repos_data.get(kind) or []):
+                if not isinstance(item, dict):
+                    continue
+                repo_id = item.get("id")
+                candidate = _api_resource_candidate(
+                    _hf_repo_url(str(repo_id) if repo_id else None, kind),
+                    source=f"huggingface_api.arxiv_repos.{kind}",
+                    relation=f"arxiv_tagged_{kind.rstrip('s')}",
+                    evidence={"arxiv_id": arxiv_id, "api_field": f"{kind}[{idx}].id"},
+                )
+                if candidate:
+                    candidates.append(candidate)
+    else:
+        warnings.append("huggingface_arxiv_repos_api_unavailable_or_unparseable")
+    return {"ok": bool(candidates) or bool(paper_data) or bool(repos_data), "platform": "huggingface", "fetches": fetches, "candidates": candidates, "warnings": warnings}
+
+
+def collect_supplied_page_resources(supplied_url: str, arxiv_id: str, timeout: int) -> dict[str, Any]:
+    host = _url_host(supplied_url)
+    platform_results: list[dict[str, Any]] = []
+    platforms_checked: list[str] = []
+    if host == "paperswithcode.co":
+        platforms_checked.append("paperswithcode")
+        platform_results.append(collect_paperswithcode_resources(arxiv_id, timeout))
+        platforms_checked.append("huggingface")
+        platform_results.append(collect_huggingface_paper_resources(arxiv_id, timeout))
+    elif host == "huggingface.co":
+        platforms_checked.append("huggingface")
+        platform_results.append(collect_huggingface_paper_resources(arxiv_id, timeout))
+    else:
+        return {"ok": True, "skipped": True, "reason": "unsupported_supplied_resource_host", "source_url": supplied_url, "arxiv_id": arxiv_id, "platforms_checked": [], "candidates": [], "warnings": []}
+
+    candidates: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    ignored_urls: list[dict[str, str]] = []
+    for result in platform_results:
+        candidates.extend(result.get("candidates") or [])
+        warnings.extend(result.get("warnings") or [])
+        ignored_urls.extend(result.get("ignored_urls") or [])
+    return {
+        "ok": True,
+        "source_url": supplied_url,
+        "arxiv_id": arxiv_id,
+        "platforms_checked": platforms_checked,
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "ignored_urls": ignored_urls,
+        "warnings": warnings,
+        "platform_results": platform_results,
+    }
 
 
 def title_from_text(text: str) -> str:
@@ -936,45 +1277,17 @@ def resource_status_summary(resource_boundary: dict[str, Any] | None) -> str:
     github = resource_boundary.get("github") or []
     projects = resource_boundary.get("project_pages") or []
     hf = resource_boundary.get("hf") or {}
-    github_text = ";".join(f"{item.get('status')}:{item.get('url')}" for item in github) or "none"
-    project_text = ";".join(f"{item.get('status')}:{item.get('url')}" for item in projects) or "none"
-    hf_text = ",".join(f"{key}:{value.get('status')}" for key, value in sorted(hf.items())) or "none"
+    github_verified = sum(1 for item in github if item.get("status") == "verified_present")
+    github_unverified = max(0, len(github) - github_verified)
+    hf_parts = []
+    for key, value in sorted(hf.items()):
+        items = value.get("items") or []
+        verified = sum(1 for item in items if item.get("status") == "verified_present")
+        unverified = max(0, len(items) - verified)
+        hf_parts.append(f"{key}:verified={verified},unverified={unverified}")
+    hf_text = ",".join(hf_parts) or "none"
     review = "yes" if resource_boundary.get("review_required") else "no"
-    return f"source_exposed_resources github={github_text}; hf={hf_text}; project_pages={project_text}; review_required={review}"
-
-
-def render_resource_boundary_markdown(draft: dict[str, Any]) -> str:
-    lines = ["# Resource boundary draft", "", "Advisory sidecar: source-exposed exact-link resource triage. Keep this out of raw-note body/frontmatter.", "", f"- health_mode: {draft.get('health_mode')}", f"- review_required: {draft.get('review_required')}", "", "## GitHub"]
-    if draft.get("github"):
-        for item in draft.get("github") or []:
-            lines.append(f"- {item.get('url')}: status={item.get('status')}, repo={item.get('repo')}")
-    else:
-        lines.append("- none")
-    lines.append("\n## Hugging Face")
-    for kind, bucket in (draft.get("hf") or {}).items():
-        lines.append(f"- {kind}: status={bucket.get('status')}, count={len(bucket.get('items') or [])}")
-    lines.append("\n## Project pages")
-    if draft.get("project_pages"):
-        for item in draft.get("project_pages") or []:
-            lines.append(f"- {item.get('url')}: status={item.get('status')}")
-    else:
-        lines.append("- none")
-    if draft.get("doi"):
-        lines.append("\n## DOI")
-        for item in draft["doi"]:
-            lines.append(f"- {item.get('doi')}: status={item.get('status')}")
-    if draft.get("arxiv"):
-        lines.append("\n## arXiv")
-        for item in draft["arxiv"]:
-            lines.append(f"- {item.get('id')}: status={item.get('status')}")
-    if draft.get("manual_reason"):
-        lines.append("\n## Manual follow-up reason")
-        lines.append(f"- {json.dumps(draft.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
-    if draft.get("warnings"):
-        lines.append("\n## Warnings")
-        for warning in draft["warnings"]:
-            lines.append(f"- {warning}")
-    return "\n".join(lines).rstrip() + "\n"
+    return f"metadata_resource_links github_verified={github_verified},github_unverified={github_unverified}; hf={hf_text}; project_pages_detected={len(projects)}; review_required={review}"
 
 
 def build_paper_digest(workdir: Path, title: str, source_url: str, resource_probe: dict[str, Any] | None = None, files: dict[str, str] | None = None) -> dict[str, Any]:
@@ -995,11 +1308,6 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
     if not abstract:
         abstract_match = re.search(r"(?is)abstract\s+(.{80,1200}?)(?:\n\s*\n|introduction|method)", combined_text)
         abstract = compact_ws(abstract_match.group(1), max_len=1200) if abstract_match else ""
-    resource_boundary = summarize_resource_boundary(resource_probe or {}, metadata={"title": metadata_title, "source_url": source_url})
-    implementation_cards = []
-    for url in sorted(set(extract_urls(tex_text + "\n" + combined_text)))[:30]:
-        if "github.com" in url or "huggingface.co" in url or "code" in url.lower():
-            implementation_cards.append({"url": url, "evidence": "detected in source/text"})
     limitation_cards = [card for card in section_cards if re.search(r"limitation|discussion|caveat|局限", card.get("heading", ""), re.I)][:10]
     warnings: list[str] = []
     if not tex_text:
@@ -1012,33 +1320,46 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
     return {
         "ok": True,
         "source_priority": source_priority,
-        "metadata_card": {"title": metadata_title, "source_url": source_url, "tex_files": [str(p.relative_to(workdir)) for p in tex_files[:20]]},
+        "metadata_card": {"title": metadata_title, "tex_files": [str(p.relative_to(workdir)) for p in tex_files[:20]]},
         "abstract_card": {"text": abstract, "source": "tex_source" if extract_tex_abstract(tex_text) else "docling_pdf" if abstract and docling_path.exists() else "missing"},
         "section_cards": section_cards[:40],
         "equation_cards": equation_cards,
         "table_cards": table_cards,
         "figure_cards": figure_cards,
         "result_cards": extract_result_cards(section_cards if isinstance(section_cards, list) else [], table_cards, figure_cards if isinstance(figure_cards, list) else []),
-        "implementation_cards": implementation_cards,
         "limitation_cards": limitation_cards,
-        "resource_cards": resource_boundary,
         "quality_warnings": warnings,
         "files_used": sorted(set((files or {}).values())),
     }
 
 
+def _agent_digest_safe_value(value: Any) -> Any:
+    """Return a markdown-facing digest value without URLs or resource metadata."""
+    if isinstance(value, str):
+        return re.sub(r"https?://[^\s)\]}>\"']+", "[link omitted]", value)
+    if isinstance(value, list):
+        return [_agent_digest_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _agent_digest_safe_value(item)
+            for key, item in value.items()
+            if "url" not in str(key).lower()
+        }
+    return value
+
+
 def render_paper_digest_markdown(digest: dict[str, Any]) -> str:
-    lines = ["# Paper digest", "", "Advisory evidence cards: use for synthesis, not as a final note.", "", f"- title: {digest.get('metadata_card', {}).get('title')}", f"- source: {digest.get('metadata_card', {}).get('source_url')}", ""]
-    abstract = digest.get("abstract_card", {}).get("text")
+    lines = ["# Paper digest", "", "Scientific evidence cards only: use for synthesis, not as a final note.", "", f"- title: {digest.get('metadata_card', {}).get('title')}", ""]
+    abstract = _agent_digest_safe_value(digest.get("abstract_card", {}).get("text"))
     if abstract:
         lines += ["## Abstract card", abstract, ""]
-    for heading, key in [("Section cards", "section_cards"), ("Equation cards", "equation_cards"), ("Table cards", "table_cards"), ("Figure cards", "figure_cards"), ("Result cards", "result_cards"), ("Implementation cards", "implementation_cards"), ("Limitation cards", "limitation_cards")]:
+    for heading, key in [("Section cards", "section_cards"), ("Equation cards", "equation_cards"), ("Table cards", "table_cards"), ("Figure cards", "figure_cards"), ("Result cards", "result_cards"), ("Limitation cards", "limitation_cards")]:
         lines.append(f"## {heading}")
         items = digest.get(key) or []
         if not items:
             lines.append("- none detected")
         for item in items[:12]:
-            compact = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            compact = json.dumps(_agent_digest_safe_value(item), ensure_ascii=False, sort_keys=True)
             lines.append(f"- {compact[:900]}")
         lines.append("")
     if digest.get("quality_warnings"):
@@ -1180,15 +1501,7 @@ def render_localized_figures_markdown(localized: dict[str, Any]) -> str:
 
 
 def build_note_block_drafts(frontmatter: dict[str, Any], resource_draft: dict[str, Any] | None, localized_figures: dict[str, Any] | None, digest: dict[str, Any] | None) -> str:
-    lines = ["# Note block drafts", "", "Advisory deterministic blocks only. These are not a final canonical note and do not replace LLM synthesis or closeout.", "", "## Frontmatter draft", "", yamlish(frontmatter), "", "## Resource status draft", ""]
-    if resource_draft:
-        for repo in resource_draft.get("github") or []:
-            lines.append(f"- GitHub `{repo.get('repo')}`: status={repo.get('status')}, license={repo.get('license')}, fork={repo.get('fork')}, archived={repo.get('archived')}.")
-        for kind, bucket in (resource_draft.get("hf") or {}).items():
-            lines.append(f"- HF {kind}: status={bucket.get('status')}, query={bucket.get('query')}, count={bucket.get('count')}.")
-    else:
-        lines.append("- resource draft missing; inspect raw probe JSON manually.")
-    lines.append("\n## Temporary figure/table inspection provenance draft")
+    lines = ["# Note block drafts", "", "Advisory deterministic blocks only. These are not a final canonical note and do not replace LLM synthesis or closeout.", "", "## Frontmatter draft", "", yamlish(frontmatter), "", "## Temporary figure/table inspection provenance draft"]
     if localized_figures and localized_figures.get("entries"):
         for entry in localized_figures["entries"]:
             lines.append(f"- {entry.get('label')}: `{entry.get('dest_rel')}` sha256={entry.get('sha256')}; inspect if needed, then write only the prose conclusion in the raw note.")
@@ -1371,7 +1684,7 @@ def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 
     cards: list[dict[str, Any]] = []
     abstract = digest.get("abstract_card") or {}
     if abstract.get("text"):
-        cards.append({"kind": "abstract", "text": compact_ws(str(abstract.get("text")))[:500], "source_bucket": "abstract_card"})
+        cards.append({"kind": "abstract", "text": compact_ws(str(_agent_digest_safe_value(abstract.get("text"))))[:500], "source_bucket": "abstract_card"})
 
     section_cards = list(digest.get("section_cards") or [])
 
@@ -1396,6 +1709,7 @@ def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 
             if len(cards) >= max_cards:
                 return cards
             text = compact_ws(str(card.get("text") or card.get("caption") or card.get("heading") or card.get("section") or card))[:500]
+            text = re.sub(r"https?://[^\s)\]}>\"']+", "[link omitted]", text)
             cards.append({"kind": label, "text": text, "source_bucket": bucket})
     return cards
 
@@ -1406,9 +1720,8 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
     resource_boundary = resource_boundary or {}
     source_read_plan = bundle.get("source_read_plan") if isinstance(bundle.get("source_read_plan"), dict) else None
     source_refs = {
-        "evidence_bundle": "evidence_bundle.json",
-        "paper_digest": files.get("paper_digest") or "paper_digest.json",
-        "resource_boundary": files.get("resource_boundary_draft") or "resource_boundary_draft.json",
+        "scientific_digest": files.get("paper_digest_markdown") or "paper_digest.md",
+        "body_draft": RAW_BODY_DRAFT_FILE,
     }
     if files.get("tex_read_plan"):
         source_refs["tex_read_plan"] = files.get("tex_read_plan")
@@ -1430,35 +1743,34 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         "evidence_cards": _brief_cards_from_digest(digest),
         "source_read_plan": source_read_plan,
         "resource_caveats": {
-            "status": "standardized" if resource_boundary else "missing",
-            "github_count": len(resource_boundary.get("github") or []),
-            "hf_statuses": {key: value.get("status") for key, value in (resource_boundary.get("hf") or {}).items()},
+            "status": "script_managed" if resource_boundary else "missing",
             "review_required": bool(resource_boundary.get("review_required")),
             "manual_reason": resource_boundary.get("manual_reason"),
-            "summary": resource_status_summary(resource_boundary),
-            "policy": "Keep resource/probe/link-health detail out of the raw note body and frontmatter except canonical source provenance.",
+            "policy": "Resource metadata and link-health handling are script-owned and are not agent-facing.",
         },
         "source_refs": source_refs,
         "agent_actions": [
-            "Read this brief first; follow source_read_plan before reopening any advisory sidecars.",
-            "Write or patch the canonical raw note under next_raw_path only after duplicate review.",
-            "Run raw-fast closeout; do not run native refresh while wiki integration is pending.",
+            "Read this brief first; use source_read_plan and the sanitized scientific digest for body synthesis.",
+            f"Write a body-only raw draft at `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata fields.",
+            "Run raw-fast note assembly so script-owned metadata is locked before closeout.",
+            "Run raw-fast closeout after assembly; do not run native refresh while wiki integration is pending.",
         ],
     }
 
 
 def render_agent_brief_markdown(brief: dict[str, Any]) -> str:
     anchors = brief.get("protected_anchors") or {}
-    lines = ["# Agent brief", "", f"- title: {anchors.get('title')}", f"- source_url: {anchors.get('source_url')}", f"- next_raw_path: `{anchors.get('next_raw_path')}`"]
+    safe_title = _agent_digest_safe_value(str(anchors.get("title") or ""))
+    lines = ["# Agent brief", "", f"- title: {safe_title}", f"- next_raw_path: `{anchors.get('next_raw_path')}`"]
     dup = brief.get("duplicate_summary") or {}
     lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
     resource = brief.get("resource_caveats") or {}
-    lines.append(f"- resource status: {resource.get('status')} — {resource.get('policy')}")
+    lines.append(f"- resource metadata: {resource.get('status')} — {resource.get('policy')}")
     lines.append("\n## Evidence cards")
     for card in brief.get("evidence_cards") or []:
         lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
     if not brief.get("evidence_cards"):
-        lines.append("- no compact evidence cards; follow source_read_plan, then inspect `paper_digest.json` only if source spans are insufficient.")
+        lines.append("- no compact evidence cards; follow source_read_plan, then inspect the sanitized scientific digest only if source spans are insufficient.")
     lines.append("\n## Next actions")
     for action in brief.get("agent_actions") or []:
         lines.append(f"- {action}")
@@ -1575,10 +1887,7 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
     resource = raw_resource if isinstance(raw_resource, dict) else {}
     resource_review_required = bool(resource.get("review_required"))
     manual_paths: list[str] = []
-    source_refs = brief.get("source_refs") or {}
-    source_refs["note_candidate"] = "note_candidate.md"
-    source_refs["evidence_report"] = "evidence_report.md"
-    source_refs["agent_brief"] = "agent_brief.md"
+    source_refs = dict(brief.get("source_refs") or {})
     source_read_plan = brief.get("source_read_plan") if isinstance(brief.get("source_read_plan"), dict) else None
     return {
         "ok": True,
@@ -1588,7 +1897,6 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "queue_status": brief.get("queue_status") or {},
         "evidence_cards": brief.get("evidence_cards") or [],
         "source_read_plan": source_read_plan,
-        "resource_status_summary": resource.get("summary") or resource_status_summary(resource),
         "resource_review_required": resource_review_required,
         "manual_reference_policy": manual_reference_policy(visible=resource_review_required),
         "automation_next_action": handoff_automation_next_action(source_read_plan, manual_required=resource_review_required),
@@ -1598,25 +1906,27 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "closeout_args": closeout_args,
         "closeout_args_path": None,
         "agent_actions": [
-            "Read this handoff first; follow source_read_plan before reopening advisory sidecars.",
-            "Do not run broad GitHub/HF/project discovery when resource_review_required is false.",
-            "Write the canonical raw note under protected_anchors.next_raw_path, then run closeout with generated closeout_args when available.",
+            "Read this handoff first; use Default source reads and the sanitized scientific digest for body synthesis.",
+            f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
+            "Run raw-fast note assembly to create protected_anchors.next_raw_path from script-owned metadata, then run closeout with generated closeout_args when available.",
         ],
         "note_candidate": {"path": "note_candidate.md", "advisory": bool(note_candidate.get("advisory", True))},
+        "body_draft": {"path": RAW_BODY_DRAFT_FILE, "contract": "body_only_no_frontmatter"},
+        "assemble": {"command_preview_path": None, "report_path": None},
     }
 
 
 def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
     anchors = handoff.get("protected_anchors") or {}
+    safe_title = _agent_digest_safe_value(str(anchors.get("title") or ""))
     lines = [
         "# Raw-fast agent handoff",
         "",
         f"- status: {handoff.get('status')}",
-        f"- title: {anchors.get('title')}",
-        f"- source_url: {anchors.get('source_url')}",
+        f"- title: {safe_title}",
         f"- next_raw_path: `{anchors.get('next_raw_path')}`",
         f"- resource_review_required: {handoff.get('resource_review_required')}",
-        f"- resource_status_summary: {handoff.get('resource_status_summary')}",
+        "- resource metadata: script-managed; not agent-facing",
     ]
     dup = handoff.get("duplicate_summary") or {}
     raw_policy = handoff.get("manual_reference_policy")
@@ -1625,6 +1935,16 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
     if not policy.get("manual_references_visible"):
         lines.append("- Manual references are hidden unless this handoff reports manual_required=true or the prepare script fails.")
     lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
+    raw_body_draft = handoff.get("body_draft")
+    body_draft = raw_body_draft if isinstance(raw_body_draft, dict) else {}
+    if body_draft:
+        lines.append(f"- body draft: `{body_draft.get('path')}` ({body_draft.get('contract')})")
+    raw_assemble = handoff.get("assemble")
+    assemble = raw_assemble if isinstance(raw_assemble, dict) else {}
+    if assemble.get("command_preview_path"):
+        lines.append(f"- assemble command: `{assemble.get('command_preview_path')}`")
+    if assemble.get("report_path"):
+        lines.append(f"- assemble report: `{assemble.get('report_path')}`")
     if handoff.get("manual_reason"):
         lines.append("\n## Manual follow-up")
         lines.append(f"- reason: {json.dumps(handoff.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
@@ -1634,9 +1954,9 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
     if source_plan:
         lines.append("\n## Default source reads")
         if source_plan.get("source_kind") == "tex_source":
-            lines.append("Default next action: read the TeX spans below. Do not read advisory sidecars before these spans unless this handoff reports manual_required.")
+            lines.append("Default next action: read the TeX spans below, then use `paper_digest.md` only as a sanitized scientific digest if needed.")
         else:
-            lines.append("Default next action: read the Docling PDF spans below. Do not use legacy PDF text extraction or advisory sidecars before these spans unless this handoff reports manual_required.")
+            lines.append("Default next action: read the Docling PDF spans below, then use `paper_digest.md` only as a sanitized scientific digest if needed.")
         for item in source_plan.get("first_reads") or []:
             lines.append(f"- `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
     lines.append("\n## Source refs")
@@ -1647,7 +1967,7 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
     for card in handoff.get("evidence_cards") or []:
         lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
     if not handoff.get("evidence_cards"):
-        lines.append("- no compact evidence cards; inspect cited sidecars only for uncertain scientific claims.")
+        lines.append("- no compact evidence cards; inspect the sanitized scientific digest only for uncertain scientific claims.")
     lines.append("\n## Next actions")
     for action in handoff.get("agent_actions") or []:
         lines.append(f"- {action}")
@@ -1737,8 +2057,8 @@ def scan_secrets(workdir: Path) -> dict[str, Any]:
     return {"strict_secret_hits": hits, "placeholder_hits": placeholder_hits}
 
 
-def build_frontmatter(title: str, source: str, kind: str) -> dict[str, Any]:
-    return {
+def build_frontmatter(title: str, source: str, kind: str, *, resource_links: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    frontmatter: dict[str, Any] = {
         "title": title,
         "created": dt.datetime.now().strftime("%Y-%m-%d"),
         "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1748,11 +2068,22 @@ def build_frontmatter(title: str, source: str, kind: str) -> dict[str, Any]:
         "capture_route": f"raw-fast evidence bundle ({kind})",
         "captured": dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%z)"),
     }
+    for key in ["github_links", "huggingface_model_links", "huggingface_dataset_links"]:
+        values = (resource_links or {}).get(key) or []
+        if values:
+            frontmatter[key] = values
+    return frontmatter
 
 
 def yamlish(frontmatter: dict[str, Any]) -> str:
     lines = ["---"]
     for key, value in frontmatter.items():
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            for item in value:
+                sval = str(item).replace('"', '\\"')
+                lines.append(f'  - "{sval}"')
+            continue
         sval = str(value).replace('"', '\\"')
         lines.append(f'{key}: "{sval}"')
     lines.append("---")
@@ -1788,9 +2119,7 @@ def build_note_skeleton(frontmatter: dict[str, Any]) -> str:
 """
 
 
-def _write_pdf_resource_boundary_sidecars(
-    workdir: Path,
-    files: dict[str, str],
+def _build_pdf_resource_boundary_payload(
     resource_probe: dict[str, Any],
     *,
     title: str,
@@ -1798,22 +2127,12 @@ def _write_pdf_resource_boundary_sidecars(
     pdfinfo: dict[str, Any],
     secret_scan: dict[str, Any],
 ) -> dict[str, Any]:
-    draft = summarize_resource_boundary(
+    return summarize_resource_boundary(
         resource_probe,
         metadata={"title": title, "source_url": url},
         pdf_info=pdfinfo,
         secret_scan=secret_scan,
     )
-    write_json(workdir / "resource_boundary_draft.json", draft)
-    write_text(workdir / "resource_boundary_draft.md", render_resource_boundary_markdown(draft))
-    files["resource_boundary_draft"] = "resource_boundary_draft.json"
-    files["resource_boundary_draft_markdown"] = "resource_boundary_draft.md"
-    return {
-        "ok": True,
-        "status": "written",
-        "github_count": len(draft.get("github") or []),
-        "hf_statuses": {key: value.get("status") for key, value in (draft.get("hf") or {}).items()},
-    }
 
 
 def _write_pdf_localized_figure_sidecars(
@@ -1892,18 +2211,15 @@ def _write_pdf_enrichment_sidecars(
     digest_payload: dict[str, Any] | None = None
 
     if resource_draft or paper_digest:
-        timings.record(
-            "resource_boundary_draft",
-            _write_pdf_resource_boundary_sidecars,
-            workdir,
-            files,
+        resource_draft_payload = timings.record(
+            "resource_boundary_payload",
+            _build_pdf_resource_boundary_payload,
             resource_probe,
             title=title,
             url=url,
             pdfinfo=pdfinfo,
             secret_scan=secret_scan,
         )
-        resource_draft_payload = json.loads((workdir / "resource_boundary_draft.json").read_text(encoding="utf-8"))
 
     if localize_figures:
         localized_payload = timings.record(
@@ -1961,10 +2277,15 @@ def process_pdf(
     image_slug: str | None = None,
     state_dir: Path | None = None,
     resource_health: str = "direct",
+    extra_resource_candidates: list[dict[str, Any]] | None = None,
+    supplied_page_resources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     warnings: list[str] = []
     files: dict[str, str] = {}
+    if supplied_page_resources:
+        write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
+        files["supplied_page_resources"] = "supplied_page_resources.json"
     pdf_path = workdir / "paper.pdf"
     fetch = timings.record("fetch_pdf", fetch_url_to_file, url, pdf_path, timeout)
     files["pdf"] = "paper.pdf"
@@ -2011,7 +2332,7 @@ def process_pdf(
 
     tex_files_for_resources, tex_text_for_resources = read_tex_bundle(workdir)
     resource_text = text + ("\n" + tex_text_for_resources if tex_text_for_resources else "")
-    resource_probe = timings.record("resource_probe", build_resource_probe, resource_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12))
+    resource_probe = timings.record("resource_probe", build_resource_probe, resource_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=extra_resource_candidates)
     write_json(workdir / "resource_probe.json", resource_probe)
     files["resource_probe"] = "resource_probe.json"
 
@@ -2019,7 +2340,7 @@ def process_pdf(
     write_json(workdir / "secret_scan.json", secret_scan)
     files["secret_scan"] = "secret_scan.json"
 
-    fm = timings.record("candidate_frontmatter", build_frontmatter, title, url, kind)
+    fm = timings.record("candidate_frontmatter", build_frontmatter, title, url, kind, resource_links=metadata_resource_links(resource_probe))
     write_json(workdir / "candidate_frontmatter.json", fm)
     skeleton = timings.record("note_skeleton", build_note_skeleton, fm)
     write_text(workdir / "note_skeleton.md", skeleton)
@@ -2119,8 +2440,11 @@ def process_arxiv(
     tex_figures = figure_table_inventory(tex_text)
     tex_selection = select_main_tex_source(workdir)
     write_json(workdir / "source_inventory.json", {"eprint": eprint, "source_extract": source_extract, "tex_files": tex_files[:200], "figure_table_items": tex_figures, "tex_selection": tex_selection})
+    supplied_page_resources = timings.record("supplied_page_resources", collect_supplied_page_resources, supplied_url, arxiv_id, min(timeout, 12))
+    supplied_resource_candidates = supplied_page_resources.get("candidates") if isinstance(supplied_page_resources.get("candidates"), list) else []
+    write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
     if tex_selection.get("ok"):
-        files: dict[str, str] = {"api": "api.xml", "abs_html": "abs.html", "source_inventory": "source_inventory.json"}
+        files: dict[str, str] = {"api": "api.xml", "abs_html": "abs.html", "source_inventory": "source_inventory.json", "supplied_page_resources": "supplied_page_resources.json"}
         main_tex = str(tex_selection["main_tex"])
         source_read_plan = build_source_read_plan(workdir, source_kind="tex_source", main_rel=main_tex, fallback_used=False)
         write_json(workdir / "tex_read_plan.json", source_read_plan)
@@ -2133,13 +2457,13 @@ def process_arxiv(
         main_tex_text = read_text(workdir / main_tex, limit=200_000)
         title = arxiv_api_title(workdir) or tex_command_arg(main_tex_text, "title") or tex_command_arg(tex_text, "title") or title_from_text(_plain_tex_prose(main_tex_text))
         links = {"ok": True, "links": []}
-        resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12))
+        resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=supplied_resource_candidates)
         write_json(workdir / "resource_probe.json", resource_probe)
         files["resource_probe"] = "resource_probe.json"
         secret_scan = timings.record("secret_scan", scan_secrets, workdir)
         write_json(workdir / "secret_scan.json", secret_scan)
         files["secret_scan"] = "secret_scan.json"
-        fm = timings.record("candidate_frontmatter", build_frontmatter, title, abs_url, "arxiv")
+        fm = timings.record("candidate_frontmatter", build_frontmatter, title, abs_url, "arxiv", resource_links=metadata_resource_links(resource_probe))
         write_json(workdir / "candidate_frontmatter.json", fm)
         skeleton = timings.record("note_skeleton", build_note_skeleton, fm)
         write_text(workdir / "note_skeleton.md", skeleton)
@@ -2193,7 +2517,25 @@ def process_arxiv(
         attach_timings(payload, timings)
         write_json(workdir / "evidence_bundle.json", payload)
         return payload
-    payload = process_pdf(pdf_url, "arxiv", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
+    payload = process_pdf(
+        pdf_url,
+        "arxiv",
+        root,
+        workdir,
+        pdf_backend,
+        strict_pdf_backend,
+        probes,
+        timeout,
+        timings,
+        paper_digest=paper_digest,
+        resource_draft=resource_draft,
+        localize_figures=localize_figures,
+        image_slug=image_slug,
+        state_dir=state_dir,
+        resource_health=resource_health,
+        extra_resource_candidates=supplied_resource_candidates,
+        supplied_page_resources=supplied_page_resources,
+    )
     payload["supplied_url"] = supplied_url
     payload["arxiv"] = {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection}
     payload.setdefault("files", {})["api"] = "api.xml"
@@ -2216,7 +2558,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if Docling PDF fallback fails instead of continuing with degraded PDF evidence")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--paper-digest", action="store_true", help="Write paper_digest.json/md and deterministic note block drafts as temp sidecars")
-    parser.add_argument("--resource-draft", action="store_true", help="Write resource_boundary_draft.json/md from completed probes")
+    parser.add_argument("--resource-draft", action="store_true", help="Build an internal resource-link summary for metadata/evidence reports; no resource_boundary_draft files are written")
     parser.add_argument("--localize-figures", action="store_true", help="Render/copy safe source figures into the evidence workdir for temporary inspection; do not embed them in structured raw notes")
     parser.add_argument("--resource-health", choices=["direct", "none"], default="direct", help="Exact-link health mode for source-exposed GitHub/HF/project URLs. --probe none disables network health.")
     parser.add_argument("--image-slug", default=None, help="Required with --localize-figures; slug under the workdir-local localized_figures_assets/ directory")
