@@ -58,10 +58,10 @@ def _write_sidecar_source_fixture(workdir: Path) -> None:
 \title{Fixture Sidecar Paper}
 \begin{document}
 \begin{abstract}
-This paper introduces Sidecar Method with exact evidence and an official code link.
+This paper introduces Sidecar Method with exact evidence and official code at \url{https://github.com/example/sidecar-paper}.
 \end{abstract}
 \section{Method}
-We optimize $\mathcal{L}=x+y$ and release code at \url{https://github.com/example/sidecar-paper}.
+We optimize $\mathcal{L}=x+y$.
 \begin{equation}
 \mathcal{L}=x+y
 \label{eq:loss}
@@ -200,11 +200,219 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
     assert supplied_url not in frontmatter.values()
 
 
+def test_raw_fast_evidence_bundle_resource_classifier_separates_hf_paper_index_collection_from_artifacts() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    assert raw_fast_evidence_bundle._resource_url_candidate("https://huggingface.co/papers/2606.32039") is None
+    assert raw_fast_evidence_bundle._resource_url_candidate("https://huggingface.co/models?other=arxiv:2606.32039") is None
+
+    model = raw_fast_evidence_bundle._resource_url_candidate("https://huggingface.co/BinLin203/GEAR-VQ")
+    dataset = raw_fast_evidence_bundle._resource_url_candidate("https://huggingface.co/datasets/BinLin203/GEAR-Data")
+    collection = raw_fast_evidence_bundle._resource_url_candidate("https://huggingface.co/collections/BinLin203/gear-models")
+
+    assert model is not None
+    assert model["type"] == "hf"
+    assert model["hf_kind"] == "models"
+    assert model["repo"] == "BinLin203/GEAR-VQ"
+    assert dataset is not None
+    assert dataset["type"] == "hf"
+    assert dataset["hf_kind"] == "datasets"
+    assert dataset["repo"] == "BinLin203/GEAR-Data"
+    assert collection is not None
+    assert collection["type"] == "hf_collection"
+    assert collection["hf_kind"] == "collections"
+    assert collection["repo"] == "BinLin203/gear-models"
+
+
+def test_raw_fast_evidence_bundle_pwc_supplied_resources_feed_metadata_without_hf_paper_confusion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "pwc-supplied-resource-metadata"
+    supplied_url = "https://paperswithcode.co/paper/2606.32039"
+
+    pwc_payload = {
+        "arxiv_id": "2606.32039",
+        "url_abs": "https://arxiv.org/abs/2606.32039",
+        "url_pdf": "https://arxiv.org/pdf/2606.32039.pdf",
+        "repositories": [
+            {"url": "https://github.com/Tencent-Hunyuan/GEAR", "is_official": True, "source": "hf_api"},
+        ],
+        "project_pages": [
+            {"url": "https://linb203.github.io/gear", "is_official": True, "source": "hf_api"},
+        ],
+        "hf_artifact_summary": {
+            "best_kind": "model",
+            "best_count": 2,
+            "best_url": "https://huggingface.co/models?other=arxiv:2606.32039",
+        },
+        "urls_extracted": True,
+    }
+    hf_paper_payload = {
+        "id": "2606.32039",
+        "githubRepo": "https://github.com/Tencent-Hunyuan/GEAR",
+        "projectPage": "https://linb203.github.io/gear",
+        "linkedModels": [
+            {"id": "BinLin203/Warmup-LFQ", "repoType": "model"},
+            {"id": "BinLin203/GEAR-VQ", "repoType": "model"},
+        ],
+        "linkedDatasets": [
+            {"id": "BinLin203/GEAR-Data", "repoType": "dataset"},
+        ],
+        "linkedSpaces": [
+            {"id": "BinLin203/GEAR-Demo", "repoType": "space"},
+        ],
+    }
+    hf_repos_payload = {
+        "models": [
+            {"id": "BinLin203/Warmup-LFQ"},
+            {"id": "BinLin203/GEAR-VQ"},
+        ],
+        "datasets": [
+            {"id": "BinLin203/GEAR-Data"},
+        ],
+        "spaces": [
+            {"id": "BinLin203/GEAR-Demo"},
+        ],
+    }
+
+    def fake_fetch_text(url: str, timeout: int) -> dict:
+        if "export.arxiv.org" in url:
+            return {"ok": True, "status": 200, "text": "<feed><entry><title>GEAR Fixture Paper</title></entry></feed>"}
+        if url == "https://arxiv.org/abs/2606.32039":
+            return {"ok": True, "status": 200, "text": "<html><title>GEAR Fixture Paper</title></html>"}
+        if "paperswithcode.co/api/v1/papers/2606.32039" in url:
+            return {"ok": True, "status": 200, "text": json.dumps(pwc_payload)}
+        if url == "https://huggingface.co/api/papers/2606.32039":
+            return {"ok": True, "status": 200, "text": json.dumps(hf_paper_payload)}
+        if url == "https://huggingface.co/api/arxiv/2606.32039/repos":
+            return {"ok": True, "status": 200, "text": json.dumps(hf_repos_payload)}
+        raise AssertionError(f"unexpected fetch_text URL: {url}")
+
+    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake eprint tarball")
+        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
+
+    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
+        _write_tex_first_source_fixture(workdir)
+        return {"ok": True, "extracted_count": 2, "errors": []}
+
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
+    monkeypatch.setattr(
+        raw_fast_evidence_bundle,
+        "probe_exact_link_health",
+        lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+    )
+
+    payload = raw_fast_evidence_bundle.process_arxiv(
+        supplied_url,
+        root,
+        workdir,
+        "docling",
+        False,
+        ["arxiv", "doi"],
+        5,
+        raw_fast_evidence_bundle.TimingRecorder(),
+        paper_digest=True,
+        resource_draft=True,
+        resource_health="direct",
+    )
+
+    assert payload["ok"] is True
+    frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
+    assert frontmatter["source"] == "https://arxiv.org/abs/2606.32039"
+    assert frontmatter["github_links"] == ["https://github.com/Tencent-Hunyuan/GEAR"]
+    assert frontmatter["huggingface_model_links"] == [
+        "https://huggingface.co/BinLin203/GEAR-VQ",
+        "https://huggingface.co/BinLin203/Warmup-LFQ",
+    ]
+    assert frontmatter["huggingface_dataset_links"] == ["https://huggingface.co/datasets/BinLin203/GEAR-Data"]
+    metadata_text = json.dumps(frontmatter, sort_keys=True)
+    assert "https://huggingface.co/papers/2606.32039" not in metadata_text
+    assert "https://huggingface.co/models?other=arxiv:2606.32039" not in metadata_text
+    assert "https://huggingface.co/spaces/BinLin203/GEAR-Demo" not in metadata_text
+    supplied_resources = json.loads((workdir / "supplied_page_resources.json").read_text(encoding="utf-8"))
+    assert supplied_resources["ok"] is True
+    assert set(supplied_resources["platforms_checked"]) == {"paperswithcode", "huggingface"}
+
+
+
+def test_raw_fast_evidence_bundle_metadata_resource_links_require_verified_health() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    links = raw_fast_evidence_bundle.metadata_resource_links(
+        {
+            "source_exposed_resources": {
+                "github": [
+                    {"url": "https://github.com/example/reachable", "status": "verified_present"},
+                    {"url": "https://github.com/example/unresolved", "status": "probe_failed"},
+                ],
+                "hf": [
+                    {"url": "https://huggingface.co/example/model-ok", "hf_kind": "models", "status": "verified_present"},
+                    {"url": "https://huggingface.co/example/model-bad", "hf_kind": "models", "status": "probe_failed"},
+                    {"url": "https://huggingface.co/datasets/example/data-ok", "hf_kind": "datasets", "status": "verified_present"},
+                    {"url": "https://huggingface.co/spaces/example/demo", "hf_kind": "spaces", "status": "verified_present"},
+                ],
+            }
+        }
+    )
+
+    assert links == {
+        "github_links": ["https://github.com/example/reachable"],
+        "huggingface_model_links": ["https://huggingface.co/example/model-ok"],
+        "huggingface_dataset_links": ["https://huggingface.co/datasets/example/data-ok"],
+    }
+
+
+def test_raw_fast_evidence_bundle_only_abstract_source_links_enter_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    monkeypatch.setattr(
+        raw_fast_evidence_bundle,
+        "probe_exact_link_health",
+        lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+    )
+
+    probe = raw_fast_evidence_bundle.build_resource_probe(
+        r"""
+        \begin{abstract}
+        Official implementation: https://github.com/example/paper-code and model weights: https://huggingface.co/example/paper-model.
+        \end{abstract}
+        % Optional math commands from https://github.com/goodfeli/dlbook_notation.
+        \\input{math_commands.tex}
+        Related work uses https://github.com/example/reference-code and https://huggingface.co/example/reference-model.
+        """,
+        {"links": []},
+        [],
+        health_mode="direct",
+    )
+
+    links = raw_fast_evidence_bundle.metadata_resource_links(probe)
+    assert links == {
+        "github_links": ["https://github.com/example/paper-code"],
+        "huggingface_model_links": ["https://huggingface.co/example/paper-model"],
+    }
+    source_exposed = probe["source_exposed_resources"]
+    assert [item["url"] for item in source_exposed["github"]] == ["https://github.com/example/paper-code"]
+    assert [item["url"] for item in source_exposed["hf"]] == ["https://huggingface.co/example/paper-model"]
+    ignored_reasons = {item["url"]: item["reason"] for item in source_exposed["ignored"]}
+    assert ignored_reasons["https://github.com/goodfeli/dlbook_notation"] == "auxiliary_tex_notation_or_template_repo"
+    assert ignored_reasons["https://github.com/example/reference-code"] == "non_abstract_source_resource_link"
+    assert ignored_reasons["https://huggingface.co/example/reference-model"] == "non_abstract_source_resource_link"
+    assert probe["abstract_urls"] == [
+        "https://github.com/example/paper-code",
+        "https://huggingface.co/example/paper-model",
+    ]
+
+
 def test_raw_fast_evidence_bundle_process_pdf_has_named_sidecar_seams() -> None:
     from ops import raw_fast_evidence_bundle
 
     expected_helpers = {
-        "_write_pdf_resource_boundary_sidecars",
+        "_build_pdf_resource_boundary_payload",
         "_write_pdf_localized_figure_sidecars",
         "_write_pdf_digest_sidecars",
         "_write_pdf_note_block_drafts",
@@ -436,8 +644,6 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     for key in [
         "paper_digest",
         "paper_digest_markdown",
-        "resource_boundary_draft",
-        "resource_boundary_draft_markdown",
         "note_block_drafts",
         "localized_figures",
         "localized_figures_markdown",
@@ -458,17 +664,36 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
 
     digest = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
     assert digest["ok"] is True
-    resource_draft = json.loads((workdir / "resource_boundary_draft.json").read_text(encoding="utf-8"))
-    assert resource_draft["github"][0]["url"] == "https://github.com/example/sidecar-paper"
-    assert resource_draft["github"][0]["status"] == "not_checked"
-    assert resource_draft["github"][0]["source"] == "source_exposed_exact_url"
+    assert "implementation_cards" not in digest
+    assert "resource_cards" not in digest
+    digest_md = (workdir / "paper_digest.md").read_text(encoding="utf-8")
+    assert "## Abstract card" in digest_md
+    assert "## Equation cards" in digest_md
+    assert "## Figure cards" in digest_md
+    assert "## Result cards" in digest_md
+    assert "## Limitation cards" in digest_md
+    assert "Implementation cards" not in digest_md
+    assert "https://" not in digest_md
+    assert "source:" not in digest_md
     evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
     assert evidence_report["resource_boundary"]["github_count"] >= 1
     assert evidence_report["resource_boundary"]["review_required"] is False
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
     assert handoff["resource_review_required"] is False
     assert handoff["manual_reference_paths"] == []
-    assert "https://github.com/example/sidecar-paper" in handoff["resource_status_summary"]
+    assert "resource_status_summary" not in handoff
+    assert handoff["source_refs"].get("scientific_digest") == "paper_digest.md"
+    assert "resource_boundary" not in handoff["source_refs"]
+    assert "note_candidate" not in handoff["source_refs"]
+    assert "evidence_report" not in handoff["source_refs"]
+    assert "agent_brief" not in handoff["source_refs"]
+    handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
+    assert "resource_status_summary" not in handoff_md
+    assert "github_unverified" not in handoff_md
+    assert "https://" not in handoff_md
+    assert "note_candidate" not in handoff_md
+    assert "evidence_report" not in handoff_md
+    assert "agent_brief" not in handoff_md
     localized = json.loads((workdir / "localized_figures.json").read_text(encoding="utf-8"))
     assert localized["ok"] is True
     localized_entry = localized["entries"][0]
@@ -479,6 +704,8 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     assert not (root / "raw" / "images").exists()
     assert not (root / "paper_digest.json").exists()
     assert not (root / "resource_boundary_draft.json").exists()
+    assert not (workdir / "resource_boundary_draft.json").exists()
+    assert not (workdir / "resource_boundary_draft.md").exists()
     assert not (root / "note_block_drafts.md").exists()
     assert wiki_root_machine_pollution(root) == []
 def test_raw_fast_evidence_bundle_localize_figures_does_not_overwrite_existing_asset(tmp_path: Path) -> None:
@@ -593,16 +820,16 @@ def test_raw_fast_evidence_bundle_resource_boundary_defaults_to_not_checked_with
     }
 
     draft = raw_fast_evidence_bundle.summarize_resource_boundary(resource_probe, metadata={"title": "Fixture Sidecar Paper"})
-    markdown = raw_fast_evidence_bundle.render_resource_boundary_markdown(draft)
+    summary = raw_fast_evidence_bundle.resource_status_summary(draft)
 
     assert draft["github"] == []
     assert draft["project_pages"] == []
     assert {kind: bucket["status"] for kind, bucket in draft["hf"].items()} == {"models": "not_checked", "datasets": "not_checked", "spaces": "not_checked"}
     assert draft["doi"][0]["doi"] == "10.1234/example.paper"
     assert draft["arxiv"][0]["id"] == "2604.08999"
-    assert "verified_absent" not in markdown
-    assert "candidates_unverified" not in markdown
-    assert "not_checked" in markdown
+    assert "verified_absent" not in summary
+    assert "candidates_unverified" not in summary
+    assert "review_required=no" in summary
 def test_raw_fast_evidence_bundle_localize_figures_refuses_unsafe_sources(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -786,9 +1013,23 @@ def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_
     brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["protected_anchors"]["next_raw_path"] == preflight["next_raw_path"]
     assert brief["duplicate_summary"]["raw"] >= 1
-    assert brief["source_refs"]["paper_digest"] == "paper_digest.json"
+    assert brief["source_refs"]["scientific_digest"] == "paper_digest.md"
+    assert brief["source_refs"]["body_draft"] == "raw_body_draft.md"
+    assert "paper_digest" not in brief["source_refs"]
+    assert "resource_boundary" not in brief["source_refs"]
+    assert "note_candidate" not in brief["source_refs"]
+    assert any("body-only raw draft" in action for action in brief["agent_actions"])
     evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
     assert evidence_report["resource_boundary"]["status"] == "standardized"
+    handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["body_draft"]["path"] == "raw_body_draft.md"
+    assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"
+    assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
+    assert "note_candidate" not in handoff["source_refs"]
+    assert "evidence_report" not in handoff["source_refs"]
+    assert "agent_brief" not in handoff["source_refs"]
+    assert "resource_status_summary" not in handoff
+    assert any("raw_body_draft.md" in action and "metadata" in action for action in handoff["agent_actions"])
     candidate_md = (workdir / "note_candidate.md").read_text(encoding="utf-8")
     body = candidate_md.split("---", 2)[-1]
     assert "https://" not in body

@@ -535,6 +535,74 @@ def compact_wiki_status(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_auto_native_status(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: status.get(key)
+        for key in [
+            "pending_count",
+            "should_refresh",
+            "next_refresh_kind",
+            "blocked_by_pending_wiki_integration",
+            "next_required_action",
+        ]
+        if key in status
+    }
+
+
+def _compact_auto_native_run(run: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: run.get(key)
+        for key in [
+            "refresh_kind",
+            "build_executed",
+            "cutover_executed",
+            "restart_executed",
+            "query_smoke_executed",
+            "pending_clear_executed",
+            "pending_cleared",
+            "active_already_fresh",
+            "fill_missing_vectors",
+            "vector_cache_required",
+            "next_refresh_kind_after_success",
+        ]
+        if key in run
+    }
+    active = run.get("active")
+    if isinstance(active, dict) and active.get("workspace_id"):
+        compact["active_workspace_id"] = active.get("workspace_id")
+    build = run.get("build")
+    if isinstance(build, dict):
+        if build.get("workspace_id"):
+            compact["build_workspace_id"] = build.get("workspace_id")
+        if "ok" in build:
+            compact["build_ok"] = build.get("ok")
+    return compact
+
+
+def _compact_auto_native_refresh(auto: dict[str, Any]) -> dict[str, Any] | None:
+    native = auto.get("native_refresh")
+    local_result = auto.get("local_result")
+    if not isinstance(native, dict) and isinstance(local_result, dict):
+        native = local_result.get("native_refresh")
+    if not isinstance(native, dict):
+        return None
+
+    compact = {
+        key: native.get(key)
+        for key in ["native_refresh", "skipped", "skip_reason", "failure"]
+        if key in native
+    }
+    runs = native.get("runs")
+    if isinstance(runs, list):
+        compact["run_count"] = len(runs)
+        compact["runs"] = [_compact_auto_native_run(run) for run in runs if isinstance(run, dict)]
+    if isinstance(native.get("status_before"), dict):
+        compact["status_before"] = _compact_auto_native_status(native["status_before"])
+    if isinstance(native.get("status_after"), dict):
+        compact["status_after"] = _compact_auto_native_status(native["status_after"])
+    return compact
+
+
 def compact_auto_integrate(auto: dict[str, Any]) -> dict[str, Any]:
     compact = {
         key: auto.get(key)
@@ -557,6 +625,9 @@ def compact_auto_integrate(auto: dict[str, Any]) -> dict[str, Any]:
         compact["post_status"] = compact_wiki_status(auto["post_status"])
     if auto.get("failure"):
         compact["failure"] = auto.get("failure")
+    native_refresh = _compact_auto_native_refresh(auto)
+    if native_refresh is not None:
+        compact["native_refresh"] = native_refresh
     return compact
 
 

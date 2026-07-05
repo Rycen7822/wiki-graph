@@ -201,6 +201,18 @@ def pending_entries(state_dir: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in pending if isinstance(item, dict)]
 
 
+def status_has_wiki_integration_pending(current_status: dict[str, Any]) -> bool:
+    """Return true when pending native work came from successful wiki integration."""
+
+    pending = current_status.get("pending") or []
+    if not isinstance(pending, list):
+        return False
+    return any(
+        isinstance(item, dict) and str(item.get("reason") or "").startswith("wiki-integration:")
+        for item in pending
+    )
+
+
 def mark_pending(state_dir: Path, root: Path, *, reason: str) -> dict[str, Any]:
     entries = pending_entries(state_dir)
     entry = {
@@ -972,7 +984,7 @@ def refresh_cutover(
         )
     if restart_service is None:
         raise ValueError("native refresh cutover requires an explicit restart_service hook")
-    if not force and refresh_kind == REFRESH_KIND_INCREMENTAL:
+    if not force and refresh_kind == REFRESH_KIND_INCREMENTAL and not status_has_wiki_integration_pending(current_status):
         freshness = active_already_fresh_report(state_dir=state_dir, workspace_root=workspace_root)
         if freshness.get("fresh") is True:
             execution = _execute_active_already_fresh_cutover(

@@ -240,7 +240,8 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert payload["manual_reference_policy"]["manual_references_visible"] is False
     assert payload["ready_message"].startswith("Raw-fast evidence prepared")
     assert payload["resource_review_required"] is False
-    for rel in ["agent_handoff.json", "agent_handoff.md", "closeout_args.json", "closeout_command.preview.sh"]:
+    assert payload["assemble_command_preview_path"] == str((workdir / "assemble_command.preview.sh").resolve())
+    for rel in ["agent_handoff.json", "agent_handoff.md", "closeout_args.json", "closeout_command.preview.sh", "assemble_command.preview.sh"]:
         assert (workdir / rel).exists()
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
     assert handoff["resource_review_required"] is False
@@ -248,8 +249,21 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert handoff["manual_reference_policy"]["manual_references_visible"] is False
     assert handoff["automation_next_action"]["action"] == "follow_source_read_plan"
     assert handoff["manual_reference_paths"] == []
+    assert handoff["body_draft"]["path"] == "raw_body_draft.md"
+    assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"
+    assert "resource_status_summary" not in handoff
+    assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
+    assert "note_candidate" not in handoff["source_refs"]
+    assert "evidence_report" not in handoff["source_refs"]
+    assert "agent_brief" not in handoff["source_refs"]
+    assert handoff["assemble"]["command_preview_path"] == str((workdir / "assemble_command.preview.sh").resolve())
+    assert handoff["assemble"]["report_path"] == str((workdir / "assembled_raw_note_report.json").resolve())
     assert handoff["closeout_args"]["ok"] is True
     assert handoff["closeout_args_path"] == str((workdir / "closeout_args.json").resolve())
+    preview = (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
+    assert "ops.raw_fast_note_assemble" in preview
+    assert "--body-draft" in preview
+    assert "raw_body_draft.md" in preview
     closeout_args = json.loads((workdir / "closeout_args.json").read_text(encoding="utf-8"))
     assert closeout_args["ok"] is True
     assert "--resource-status-summary" in closeout_args["argv_tail"]
