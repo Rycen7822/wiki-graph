@@ -19,7 +19,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, detect_kind, manual_reference_policy, render_agent_handoff_markdown, slugify
+from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, canonical_openreview_pdf_url, detect_kind, manual_reference_policy, openreview_id_from_url, render_agent_handoff_markdown, slugify
 from ops.raw_fast_closeout import derive_closeout_args_from_bundle
 
 PROD_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
@@ -50,7 +50,8 @@ def _env_path(name: str) -> Path | None:
 
 def default_slug(url: str, kind: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    stem = Path(parsed.path).stem or kind or "source"
+    openreview_id = openreview_id_from_url(url)
+    stem = openreview_id or Path(parsed.path).stem or kind or "source"
     date_prefix = dt.datetime.now().strftime("%y%m%d")
     return f"{date_prefix}_{slugify(stem).lower()}"
 
@@ -66,6 +67,10 @@ def normalize_source_url(url: str) -> dict[str, Any]:
         normalized = f"https://raw.githubusercontent.com/{'/'.join(quoted)}"
         reason = "github_blob_pdf" if marker == "blob" else "github_raw_pdf"
         return {"url": normalized, "original_url": url, "normalized": normalized != url, "reason": reason}
+    openreview_id = openreview_id_from_url(url)
+    if openreview_id:
+        normalized = canonical_openreview_pdf_url(openreview_id)
+        return {"url": normalized, "original_url": url, "normalized": normalized != url, "reason": "openreview_canonical_pdf", "openreview_id": openreview_id}
     return {"url": url, "original_url": url, "normalized": False, "reason": None}
 
 
@@ -384,7 +389,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare tmp raw-fast evidence, resource triage, agent handoff, and closeout args without writing the wiki")
     parser.add_argument("--url", required=True)
     parser.add_argument("--profile", choices=["prod", "env"], default="prod")
-    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
+    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview"], default="auto")
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--state-dir", type=Path, default=None)
     parser.add_argument("--workdir", type=Path, default=None)

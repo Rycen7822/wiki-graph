@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +196,100 @@ def fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes: int = DEFAU
         return {"ok": False, "url": url, "dest": str(dest), "error": type(exc).__name__, "message": str(exc)}
 
 
+def read_key_value_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _redact_known_values(message: str, values: dict[str, str]) -> str:
+    redacted = str(message or "")
+    for value in values.values():
+        if value:
+            redacted = redacted.replace(str(value), "[REDACTED]")
+    return re.sub(r"\s+", " ", redacted).strip()[:500]
+
+
+def _openreview_content_value(note: Any, key: str) -> Any:
+    content = getattr(note, "content", {}) or {}
+    value = content.get(key) if isinstance(content, dict) else None
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
+def _openreview_note_metadata(note: Any, note_id: str) -> dict[str, Any]:
+    title = _openreview_content_value(note, "title")
+    content_pdf = _openreview_content_value(note, "pdf")
+    return {
+        "id": note_id,
+        "forum_url": canonical_openreview_forum_url(note_id),
+        "pdf_url": canonical_openreview_pdf_url(note_id),
+        "api_baseurl": OPENREVIEW_API2_BASEURL,
+        "metadata_ok": bool(note),
+        "auth_used": True,
+        "title": str(title) if title else None,
+        "content_pdf": str(content_pdf) if content_pdf else None,
+    }
+
+
+def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+    del timeout  # openreview-py does not expose a per-call timeout on get_note/get_pdf.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    env_path = Path(os.environ.get("OPENREVIEW_ENV_PATH", str(DEFAULT_OPENREVIEW_ENV_PATH))).expanduser()
+    credentials: dict[str, str] = {}
+    try:
+        if not env_path.exists():
+            return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "OpenReviewCredentialsMissing", "env_path": str(env_path), "openreview": {"id": note_id, "auth_used": False}}
+        credentials = read_key_value_env(env_path)
+        username = credentials.get("OPENREVIEW_USERNAME")
+        password = credentials.get("OPENREVIEW_PASSWORD")
+        if not username or not password:
+            return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "OpenReviewCredentialsIncomplete", "env_path": str(env_path), "openreview": {"id": note_id, "auth_used": False}}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import openreview  # type: ignore
+        client = openreview.api.OpenReviewClient(baseurl=OPENREVIEW_API2_BASEURL, username=username, password=password)
+        note = client.get_note(note_id)
+        pdf_bytes = client.get_pdf(note_id)
+        if not isinstance(pdf_bytes, (bytes, bytearray)):
+            return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "OpenReviewPDFTypeError", "message": f"get_pdf returned {type(pdf_bytes).__name__}", "openreview": _openreview_note_metadata(note, note_id)}
+        if len(pdf_bytes) > max_bytes:
+            return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "DownloadTooLarge", "bytes": len(pdf_bytes), "max_bytes": max_bytes, "openreview": _openreview_note_metadata(note, note_id)}
+        dest.write_bytes(bytes(pdf_bytes))
+        return {
+            "ok": True,
+            "url": canonical_openreview_pdf_url(note_id),
+            "status": 200,
+            "content_type": "application/pdf",
+            "bytes": dest.stat().st_size,
+            "sha256": sha256_file(dest),
+            "dest": str(dest),
+            "openreview": _openreview_note_metadata(note, note_id),
+        }
+    except Exception as exc:
+        return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": type(exc).__name__, "message": _redact_known_values(str(exc), credentials), "openreview": {"id": note_id, "auth_used": bool(credentials)}}
+
+
+def fetch_pdf_source_to_file(url: str, dest: Path, timeout: int, max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+    note_id = openreview_id_from_url(url)
+    if note_id:
+        return fetch_openreview_pdf_to_file(note_id, dest, timeout, max_bytes=max_bytes)
+    if max_bytes == DEFAULT_MAX_DOWNLOAD_BYTES:
+        return fetch_url_to_file(url, dest, timeout)
+    return fetch_url_to_file(url, dest, timeout, max_bytes=max_bytes)
+
+
 def fetch_text(url: str, timeout: int, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     try:
@@ -232,6 +327,10 @@ def fetch_text(url: str, timeout: int, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) 
 
 ARXIV_ID_IN_PATH_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
 ARXIV_DIRECT_HOSTS = {"arxiv.org", "export.arxiv.org"}
+OPENREVIEW_HOST = "openreview.net"
+OPENREVIEW_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+OPENREVIEW_API2_BASEURL = "https://api2.openreview.net"
+DEFAULT_OPENREVIEW_ENV_PATH = Path.home() / ".hermes" / "secrets" / "openreview.env"
 
 
 def _url_host(url: str) -> str:
@@ -281,11 +380,40 @@ def arxiv_id_from_url(url: str) -> str | None:
     return None
 
 
+def _clean_openreview_id(value: str | None) -> str | None:
+    note_id = urllib.parse.unquote(value or "").strip()
+    return note_id if OPENREVIEW_ID_RE.fullmatch(note_id) else None
+
+
+def openreview_id_from_url(url: str) -> str | None:
+    if _url_host(url) != OPENREVIEW_HOST:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    parts = _path_parts(url)
+    if not parts:
+        return None
+    route = parts[0].lower()
+    if route not in {"forum", "pdf", "attachment"}:
+        return None
+    query_ids = urllib.parse.parse_qs(parsed.query).get("id") or []
+    return _clean_openreview_id(query_ids[0] if query_ids else None)
+
+
+def canonical_openreview_pdf_url(note_id: str) -> str:
+    return "https://openreview.net/pdf?id=" + urllib.parse.quote(note_id, safe="")
+
+
+def canonical_openreview_forum_url(note_id: str) -> str:
+    return "https://openreview.net/forum?id=" + urllib.parse.quote(note_id, safe="")
+
+
 def detect_kind(url: str, requested: str) -> str:
     if requested != "auto":
         return requested
     if arxiv_id_from_url(url):
         return "arxiv"
+    if openreview_id_from_url(url):
+        return "openreview"
     return "direct-pdf"
 
 
@@ -2283,14 +2411,25 @@ def process_pdf(
     timings = timings or TimingRecorder()
     warnings: list[str] = []
     files: dict[str, str] = {}
+    supplied_url = url
+    openreview_id = openreview_id_from_url(url)
+    canonical_source_url = canonical_openreview_pdf_url(openreview_id) if openreview_id else url
     if supplied_page_resources:
         write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
         files["supplied_page_resources"] = "supplied_page_resources.json"
     pdf_path = workdir / "paper.pdf"
-    fetch = timings.record("fetch_pdf", fetch_url_to_file, url, pdf_path, timeout)
+    fetch = timings.record("fetch_pdf", fetch_pdf_source_to_file, canonical_source_url, pdf_path, timeout)
     files["pdf"] = "paper.pdf"
+    openreview_metadata = fetch.get("openreview") if isinstance(fetch.get("openreview"), dict) else None
+    if openreview_metadata:
+        write_json(workdir / "openreview_metadata.json", openreview_metadata)
+        files["openreview_metadata"] = "openreview_metadata.json"
     if not fetch.get("ok"):
-        payload = {"ok": False, "kind": kind, "workdir": str(workdir), "fetch": fetch, "warnings": warnings}
+        payload = {"ok": False, "kind": kind, "source_url": canonical_source_url, "workdir": str(workdir), "fetch": fetch, "warnings": warnings}
+        if supplied_url != canonical_source_url:
+            payload["supplied_url"] = supplied_url
+        if openreview_metadata:
+            payload["openreview"] = openreview_metadata
         attach_timings(payload, timings)
         write_json(workdir / "evidence_bundle.json", payload)
         return payload
@@ -2321,7 +2460,8 @@ def process_pdf(
         ctext = read_text(workdir / "docling.md")
         if ctext.strip():
             text += "\n" + ctext
-    title = pdf_title_from_text_or_url(text, url)
+    metadata_title = (openreview_metadata or {}).get("title") if isinstance(openreview_metadata, dict) else None
+    title = str(metadata_title) if metadata_title and not placeholder_title(str(metadata_title)) else pdf_title_from_text_or_url(text, canonical_source_url)
     inventory = timings.record("inventory", lambda: {"ok": True, "sections": section_inventory(text), "figures": figure_table_inventory(text)})
     sections = inventory["sections"]
     figures = inventory["figures"]
@@ -2340,7 +2480,7 @@ def process_pdf(
     write_json(workdir / "secret_scan.json", secret_scan)
     files["secret_scan"] = "secret_scan.json"
 
-    fm = timings.record("candidate_frontmatter", build_frontmatter, title, url, kind, resource_links=metadata_resource_links(resource_probe))
+    fm = timings.record("candidate_frontmatter", build_frontmatter, title, canonical_source_url, kind, resource_links=metadata_resource_links(resource_probe))
     write_json(workdir / "candidate_frontmatter.json", fm)
     skeleton = timings.record("note_skeleton", build_note_skeleton, fm)
     write_text(workdir / "note_skeleton.md", skeleton)
@@ -2359,7 +2499,7 @@ def process_pdf(
         files=files,
         timings=timings,
         title=title,
-        url=url,
+        url=canonical_source_url,
         pdfinfo=pdfinfo,
         resource_probe=resource_probe,
         secret_scan=secret_scan,
@@ -2369,12 +2509,12 @@ def process_pdf(
         localize_figures=localize_figures,
         image_slug=image_slug,
     )
-    preflight = timings.record("raw_fast_preflight", build_raw_fast_preflight, root, title, url, kind, workdir=workdir, state_dir=state_dir)
+    preflight = timings.record("raw_fast_preflight", build_raw_fast_preflight, root, title, canonical_source_url, kind, workdir=workdir, state_dir=state_dir)
 
     payload = {
         "ok": True,
         "kind": kind,
-        "source_url": url,
+        "source_url": canonical_source_url,
         "workdir": str(workdir),
         "pdf_backend_requested": pdf_backend,
         "pdf_backend_effective": "docling" if docling_result.get("ok") else "docling_failed",
@@ -2388,6 +2528,10 @@ def process_pdf(
         "preflight": preflight,
         "warnings": warnings,
     }
+    if supplied_url != canonical_source_url:
+        payload["supplied_url"] = supplied_url
+    if openreview_metadata:
+        payload["openreview"] = openreview_metadata
     payload["agent_automation"] = timings.record(
         "agent_automation_sidecars",
         write_agent_automation_sidecars,
@@ -2399,6 +2543,57 @@ def process_pdf(
         digest=enrichment.get("paper_digest"),
         resource_boundary=enrichment.get("resource_draft"),
     )
+    attach_timings(payload, timings)
+    write_json(workdir / "evidence_bundle.json", payload)
+    return payload
+
+
+def process_openreview(
+    url: str,
+    root: Path,
+    workdir: Path,
+    pdf_backend: str,
+    strict_pdf_backend: bool,
+    probes: list[str],
+    timeout: int,
+    timings: TimingRecorder | None = None,
+    paper_digest: bool = False,
+    resource_draft: bool = False,
+    localize_figures: bool = False,
+    image_slug: str | None = None,
+    state_dir: Path | None = None,
+    resource_health: str = "direct",
+) -> dict[str, Any]:
+    timings = timings or TimingRecorder()
+    note_id = openreview_id_from_url(url)
+    if not note_id:
+        payload = {"ok": False, "kind": "openreview", "source_url": url, "workdir": str(workdir), "error": "OpenReviewIdMissing", "message": "OpenReview forum/pdf/attachment URL must include a note id query parameter."}
+        attach_timings(payload, timings)
+        write_json(workdir / "evidence_bundle.json", payload)
+        return payload
+    canonical_pdf = canonical_openreview_pdf_url(note_id)
+    payload = process_pdf(
+        canonical_pdf,
+        "openreview",
+        root,
+        workdir,
+        pdf_backend,
+        strict_pdf_backend,
+        probes,
+        timeout,
+        timings,
+        paper_digest=paper_digest,
+        resource_draft=resource_draft,
+        localize_figures=localize_figures,
+        image_slug=image_slug,
+        state_dir=state_dir,
+        resource_health=resource_health,
+    )
+    payload["supplied_url"] = url
+    raw_openreview = payload.get("openreview")
+    openreview: dict[str, Any] = dict(raw_openreview) if isinstance(raw_openreview, dict) else {}
+    openreview.update({"id": note_id, "forum_url": canonical_openreview_forum_url(note_id), "pdf_url": canonical_pdf})
+    payload["openreview"] = openreview
     attach_timings(payload, timings)
     write_json(workdir / "evidence_bundle.json", payload)
     return payload
@@ -2549,7 +2744,7 @@ def process_arxiv(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an llm-wiki raw-fast evidence bundle without writing the wiki")
     parser.add_argument("--url", required=True)
-    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv"], default="auto")
+    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview"], default="auto")
     parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=None, help="Optional native state dir to read pending queue counts for preflight; never mutated by this command")
@@ -2582,6 +2777,8 @@ def main() -> int:
     kind = detect_kind(args.url, args.kind)
     if kind == "arxiv":
         payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
+    elif kind == "openreview":
+        payload = process_openreview(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
     else:
         payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
     attach_timings(payload, timings)
