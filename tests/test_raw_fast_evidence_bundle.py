@@ -114,9 +114,215 @@ The fixture limitation is synthetic and intentionally short.
     )
 
 
+def _write_tex_agent_ir_source_fixture(workdir: Path) -> None:
+    _write_tiny_png(workdir / "source" / "figures" / "cost_curve.png")
+    write(
+        workdir / "source" / "main.tex",
+        r"""
+\title{TeX Agent IR Fixture}
+\newcommand{\system}{AgentIR}
+\begin{document}
+\begin{abstract}
+This paper tests semantic TeX sidecars for source-grounded raw-fast reading.
+\end{abstract}
+\input{sections/method}
+\appendix
+\input{sections/appendix}
+\end{document}
+""".strip(),
+    )
+    write(
+        workdir / "source" / "sections" / "method.tex",
+        r"""
+\section{Method}
+\system{} minimizes a compact loss while preserving source anchors.
+\begin{equation}
+\mathcal{L}=x+y
+\label{eq:agent-ir-loss}
+\end{equation}
+\begin{figure}
+\includegraphics[width=0.8\linewidth]{figures/cost_curve}
+\caption{Cost curve plot shows the main result trend.}
+\label{fig:cost-curve}
+\end{figure}
+\begin{table}
+\caption{Main result table for the semantic sidecar fixture.}
+\label{tab:agent-ir-main}
+\begin{tabular}{lr}
+Method & Score \\
+AgentIR & 42
+\end{tabular}
+\end{table}
+""".strip(),
+    )
+    write(
+        workdir / "source" / "sections" / "appendix.tex",
+        r"""
+\section{Appendix Details}
+Supplementary detail should stay discoverable but not become the default body-only core.
+""".strip(),
+    )
+
+
+def _fake_latexpand_success(monkeypatch: pytest.MonkeyPatch, raw_fast_evidence_bundle, workdir: Path) -> None:
+    original_which = raw_fast_evidence_bundle.shutil.which
+    original_run_command = raw_fast_evidence_bundle.run_command
+
+    def fake_which(name: str) -> str | None:
+        if name == "latexpand":
+            return "/usr/bin/latexpand"
+        return original_which(name)
+
+    def fake_run_command(command: list[str], timeout: int = 60) -> dict:
+        if Path(command[0]).name == "latexpand":
+            assert command[-1].endswith("main.tex")
+            flattened = "\n".join(
+                (workdir / rel).read_text(encoding="utf-8")
+                for rel in ["source/main.tex", "source/sections/method.tex", "source/sections/appendix.tex"]
+            )
+            return {"ok": True, "returncode": 0, "stdout": flattened, "stderr_tail": ""}
+        return original_run_command(command, timeout=timeout)
+
+    monkeypatch.setattr(raw_fast_evidence_bundle.shutil, "which", fake_which)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "run_command", fake_run_command)
+
+
+def _write_sectioned_main_with_long_appendix_fixture(workdir: Path) -> None:
+    write(
+        workdir / "source" / "sec" / "vla_main.tex",
+        r"""
+\section{Introduction}
+Main paper introduction states the core problem and deployment tension.
+\section{Method}
+Main paper method defines the action-horizon correction objective.
+\begin{equation}
+J(\theta)=\mathbb{E}[r(a_{1:H})]
+\label{eq:main-objective}
+\end{equation}
+\section{Experiments}
+Main paper experiments report MetaWorld and LIBERO task results.
+\section{Conclusion}
+Main paper conclusion names the practical boundary.
+""".strip(),
+    )
+    appendix_sections = "\n".join(
+        f"\\section{{Appendix Ablation {idx}}}\nSupplementary implementation and ablation detail {idx}. " * 8
+        for idx in range(1, 18)
+    )
+    write(workdir / "source" / "sec" / "vla_appendix.tex", appendix_sections)
+
+
 def _write_fake_docling_outputs(workdir: Path, markdown: str = "# Docling Fallback Paper\n\nAbstract\nDocling text is the PDF fallback.\n\n## Method\nFallback method text.") -> None:
     write(workdir / "docling.md", markdown)
     write(workdir / "docling.json", json.dumps({"ok": True, "markdown_chars": len(markdown)}) + "\n")
+
+
+def test_raw_fast_evidence_bundle_tex_read_plan_prefers_main_sections_over_long_appendix(tmp_path: Path) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    _write_sectioned_main_with_long_appendix_fixture(tmp_path)
+
+    selection = raw_fast_evidence_bundle.select_main_tex_source(tmp_path)
+    assert selection["ok"] is True
+    assert selection["main_tex"] == "source/sec/vla_main.tex"
+
+    plan = raw_fast_evidence_bundle.build_source_read_plan(
+        tmp_path,
+        source_kind="tex_source",
+        main_rel=selection["main_tex"],
+        fallback_used=False,
+    )
+    first_reads = plan["first_reads"]
+    assert first_reads
+    assert {item["path"] for item in first_reads} == {"source/sec/vla_main.tex"}
+    assert first_reads[0]["limit"] == 180
+    assert any(item["limit"] == 220 for item in first_reads[1:])
+    assert "not source-reading caps" in plan["reading_strategy"]
+
+
+def test_raw_fast_evidence_bundle_writes_tex_agent_ir_sidecars_with_visual_anchors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    workdir = tmp_path / "tex-agent-ir-sidecars"
+    _write_tex_agent_ir_source_fixture(workdir)
+    _fake_latexpand_success(monkeypatch, raw_fast_evidence_bundle, workdir)
+    files: dict[str, str] = {}
+
+    summary = raw_fast_evidence_bundle.write_tex_agent_ir_sidecars(
+        workdir,
+        files,
+        main_tex="source/main.tex",
+    )
+
+    assert summary["ok"] is True
+    assert summary["status"] in {"ok", "partial"}
+    for key in ["tex_agent_ir", "tex_agent_map", "tex_agent_core", "tex_agent_objects", "tex_agent_full", "tex_agent_audit", "tex_agent_audit_markdown"]:
+        assert key in files
+        assert (workdir / files[key]).exists()
+
+    ir = json.loads((workdir / files["tex_agent_ir"]).read_text(encoding="utf-8"))
+    assert ir["main_tex"] == "source/main.tex"
+    source_units = {unit["path"]: unit for unit in ir["source_units"]}
+    assert source_units["main.tex"]["role"] == "body"
+    assert source_units["sections/method.tex"]["role"] == "body"
+    assert source_units["sections/appendix.tex"]["role"] == "appendix"
+    assert any(section["heading"] == "Method" and section["source_tex"] == "sections/method.tex" for section in ir["sections"])
+    assert ir["macros"]["semantic"]["system"] == "AgentIR"
+
+    figures = ir["objects"]["figures"]
+    assert figures
+    figure = figures[0]
+    assert figure["label"] == "fig:cost-curve"
+    assert figure["image_path"] == "source/figures/cost_curve.png"
+    assert (workdir / figure["image_path"]).exists()
+    assert figure["source_tex"] == "sections/method.tex"
+    assert figure["localized_path"] is None
+    assert figure["visual_inspection"] == "required"
+
+    audit = json.loads((workdir / files["tex_agent_audit"]).read_text(encoding="utf-8"))
+    assert audit["flatten"]["tool"] == "latexpand"
+    assert audit["flatten"]["status"] == "ok"
+    assert audit["coverage"]["figures"] == 1
+    objects_md = (workdir / files["tex_agent_objects"]).read_text(encoding="utf-8")
+    assert "image_path: `source/figures/cost_curve.png`" in objects_md
+    assert "source_tex: `sections/method.tex`" in objects_md
+    assert "visual_inspection: required" in objects_md
+    core_md = (workdir / files["tex_agent_core"]).read_text(encoding="utf-8")
+    assert "AgentIR minimizes a compact loss" in core_md
+    assert "Appendix Details" not in core_md
+
+
+def test_raw_fast_evidence_bundle_handoff_reads_contract_and_digest_before_source_spans() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    handoff = {
+        "status": "ready",
+        "protected_anchors": {"title": "Digest First Fixture", "next_raw_path": "raw/clip/2607/26070799_Digest-First-Fixture.md"},
+        "resource_review_required": False,
+        "manual_reference_policy": raw_fast_evidence_bundle.manual_reference_policy(visible=False),
+        "duplicate_summary": {},
+        "body_draft": {"path": raw_fast_evidence_bundle.RAW_BODY_DRAFT_FILE, "contract": "body_only_no_frontmatter"},
+        "quality_gate": dict(raw_fast_evidence_bundle.RAW_FAST_QUALITY_GATE),
+        "writing_contract_refs": [dict(ref) for ref in raw_fast_evidence_bundle.WRITING_CONTRACT_REFS],
+        "source_read_plan": {
+            "source_kind": "tex_source",
+            "reading_strategy": "read writing contract and paper_digest.md first; first_reads are starting anchors, not source-reading caps; continue reading original source as needed for quality",
+            "first_reads": [{"path": "source/sec/vla_main.tex", "offset": 1, "limit": 180, "reason": "source overview"}],
+        },
+        "source_refs": {"scientific_digest": "paper_digest.md", "body_draft": raw_fast_evidence_bundle.RAW_BODY_DRAFT_FILE},
+        "evidence_cards": [{"kind": "abstract", "text": "Compact evidence card."}],
+        "agent_actions": [],
+    }
+
+    markdown = raw_fast_evidence_bundle.render_agent_handoff_markdown(handoff)
+
+    assert "read `paper_digest.md` as an evidence index" in markdown
+    assert "continue reading original source as needed for quality" in markdown
+    assert "not source-reading caps" in markdown
+    assert "only if needed" not in markdown
+    assert "note_candidate" not in markdown
+    assert "agent_brief" not in markdown
+    assert "evidence_report" not in markdown
 
 
 def test_raw_fast_evidence_bundle_title_from_text_skips_docling_image_placeholder() -> None:
@@ -150,6 +356,28 @@ def test_raw_fast_evidence_bundle_recognizes_cross_site_arxiv_routes(url: str, e
 
     assert raw_fast_evidence_bundle.arxiv_id_from_url(url) == expected_id
     assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "arxiv"
+
+
+def test_raw_fast_evidence_bundle_pdf_download_limit_is_large_and_configurable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    assert raw_fast_evidence_bundle.DEFAULT_MAX_DOWNLOAD_BYTES == 2 * 1024 * 1024 * 1024
+    assert raw_fast_evidence_bundle.parse_byte_limit("512MiB") == 512 * 1024 * 1024
+    assert raw_fast_evidence_bundle.parse_byte_limit("1.5GiB") == int(1.5 * 1024**3)
+    assert raw_fast_evidence_bundle.parse_byte_limit("none") is None
+    monkeypatch.setenv("LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES", "3GiB")
+    assert raw_fast_evidence_bundle.configured_max_download_bytes() == 3 * 1024**3
+    monkeypatch.setenv("LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES", "0")
+    assert raw_fast_evidence_bundle.configured_max_download_bytes() is None
+
+    source = tmp_path / "large-ok.pdf"
+    source.write_bytes(b"%PDF-" + b"x" * 16)
+    too_small = raw_fast_evidence_bundle.fetch_url_to_file(source.as_uri(), tmp_path / "too-small.pdf", timeout=1, max_bytes=8)
+    assert too_small["ok"] is False
+    assert too_small["error"] == "FileTooLarge"
+    unlimited = raw_fast_evidence_bundle.fetch_url_to_file(source.as_uri(), tmp_path / "unlimited.pdf", timeout=1, max_bytes=None)
+    assert unlimited["ok"] is True
+    assert unlimited["bytes"] == source.stat().st_size
 
 
 @pytest.mark.parametrize(
@@ -236,6 +464,7 @@ def test_raw_fast_evidence_bundle_openreview_uses_authenticated_pdf_and_canonica
     frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
     assert frontmatter["source"] == canonical_pdf
     assert frontmatter["title"] == "OpenReview Fixture Paper"
+    assert frontmatter["domain"] == "machine-learning"
     assert frontmatter["capture_route"] == "raw-fast evidence bundle (openreview)"
     assert "source_pdf" not in frontmatter
     assert "openreview_id" not in frontmatter
@@ -286,6 +515,7 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
     assert payload["arxiv"]["supplied_url"] == supplied_url
     frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
     assert frontmatter["source"] == "https://arxiv.org/abs/2606.02572"
+    assert frontmatter["domain"] == "machine-learning"
     assert supplied_url not in frontmatter.values()
 
 
@@ -528,8 +758,8 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
         return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
 
     def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
-        _write_tex_first_source_fixture(workdir)
-        return {"ok": True, "extracted_count": 2, "errors": []}
+        _write_tex_agent_ir_source_fixture(workdir)
+        return {"ok": True, "extracted_count": 4, "errors": []}
 
     def forbidden_process_pdf(*args, **kwargs):
         raise AssertionError("arXiv TeX-success route must not call process_pdf or parse PDF text")
@@ -538,6 +768,7 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
     monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
     monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
     monkeypatch.setattr(raw_fast_evidence_bundle, "process_pdf", forbidden_process_pdf)
+    _fake_latexpand_success(monkeypatch, raw_fast_evidence_bundle, workdir)
 
     payload = raw_fast_evidence_bundle.process_arxiv(
         "https://arxiv.org/abs/2600.00001",
@@ -565,17 +796,36 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
     assert read_plan["fallback_used"] is False
     assert read_plan["main_tex"] == "source/main.tex"
     assert read_plan["first_reads"]
+    for key in ["tex_agent_ir", "tex_agent_map", "tex_agent_core", "tex_agent_objects", "tex_agent_full", "tex_agent_audit", "tex_agent_audit_markdown"]:
+        assert key in payload["files"]
+        assert (workdir / payload["files"][key]).exists()
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
     assert handoff["source_read_plan"]["source_kind"] == "tex_source"
     assert handoff["manual_reference_policy"]["mode"] == "only_on_manual_required"
     assert handoff["manual_reference_policy"]["manual_references_visible"] is False
-    assert handoff["automation_next_action"]["action"] == "follow_source_read_plan"
+    assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_follow_source_read_plan"
+    assert handoff["automation_next_action"]["digest_read_before_source"] == "paper_digest.md"
+    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
+    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
     assert handoff["manual_reference_paths"] == []
+    assert handoff["source_refs"]["tex_agent_map"] == "paper_map.md"
+    assert handoff["source_refs"]["tex_agent_core"] == "paper_core.md"
+    assert handoff["source_refs"]["tex_agent_objects"] == "paper_objects.md"
+    assert handoff["source_refs"]["tex_agent_full"] == "paper_full.agent.md"
+    assert handoff["source_refs"]["tex_agent_audit"] == "tex_agent_ir_audit.md"
     brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["evidence_cards"][0]["kind"] == "abstract"
     assert brief["evidence_cards"][0]["source_bucket"] == "abstract_card"
     handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
-    assert "Default next action: read the TeX spans" in handoff_md
+    assert "## Writing contract refs" in handoff_md
+    assert "structured-paper-note-contract.md" in handoff_md
+    assert "read `paper_digest.md` as an evidence index" in handoff_md
+    assert "paper_map.md" in handoff_md
+    assert "paper_core.md" in handoff_md
+    assert "paper_objects.md" in handoff_md
+    assert "visual_inspection" in handoff_md
+    assert "vision rather than relying on caption text alone" in handoff_md
+    assert "continue reading original source as needed for quality" in handoff_md
     assert "Manual references are hidden unless this handoff reports manual_required=true" in handoff_md
     assert LEGACY_RAW_TEXT_FILE not in handoff_md
     assert LEGACY_LAYOUT_TEXT_FILE not in handoff_md
@@ -955,6 +1205,8 @@ def test_raw_fast_evidence_bundle_candidate_frontmatter_stays_compact() -> None:
         "arxiv",
     )
 
+    assert fm["domain"] == "machine-learning"
+    assert fm["domain"] != "paper"
     assert set(fm) <= {
         "title",
         "source",
@@ -973,6 +1225,18 @@ def test_raw_fast_evidence_bundle_candidate_frontmatter_stays_compact() -> None:
     skeleton = raw_fast_evidence_bundle.build_note_skeleton(fm)
     assert "## 资源与复现状态" not in skeleton
     assert "## Evidence trail" not in skeleton
+
+
+def test_raw_fast_evidence_bundle_arxiv_category_domains_are_semantic() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    assert raw_fast_evidence_bundle.domain_from_arxiv_categories(["cs.CV", "cs.LG"]) == "computer-vision"
+    assert raw_fast_evidence_bundle.domain_from_arxiv_categories(["cs.LG", "stat.ML"]) == "machine-learning"
+    assert raw_fast_evidence_bundle.domain_from_arxiv_categories(["cs.RO"]) == "robotics"
+    assert raw_fast_evidence_bundle.domain_from_arxiv_categories([]) == "machine-learning"
+    assert raw_fast_evidence_bundle.domain_from_arxiv_categories(["cs.LG"]) != "paper"
+
+
 @pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_refuses_workdir_inside_wiki_root(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
@@ -1104,6 +1368,8 @@ def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_
     assert brief["duplicate_summary"]["raw"] >= 1
     assert brief["source_refs"]["scientific_digest"] == "paper_digest.md"
     assert brief["source_refs"]["body_draft"] == "raw_body_draft.md"
+    assert brief["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
+    assert brief["quality_gate"]["must_read_before"] == "source_read_plan"
     assert "paper_digest" not in brief["source_refs"]
     assert "resource_boundary" not in brief["source_refs"]
     assert "note_candidate" not in brief["source_refs"]
@@ -1114,6 +1380,8 @@ def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_
     assert handoff["body_draft"]["path"] == "raw_body_draft.md"
     assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"
     assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
+    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
+    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
     assert "note_candidate" not in handoff["source_refs"]
     assert "evidence_report" not in handoff["source_refs"]
     assert "agent_brief" not in handoff["source_refs"]

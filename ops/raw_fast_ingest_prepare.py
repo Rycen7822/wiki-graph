@@ -19,7 +19,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, canonical_openreview_pdf_url, detect_kind, manual_reference_policy, openreview_id_from_url, render_agent_handoff_markdown, slugify
+from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, RAW_FAST_QUALITY_GATE, WRITING_CONTRACT_REFS, canonical_openreview_pdf_url, detect_kind, manual_reference_policy, openreview_id_from_url, render_agent_handoff_markdown, slugify
 from ops.raw_fast_closeout import derive_closeout_args_from_bundle
 
 PROD_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
@@ -38,9 +38,10 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def manual_stop_message(payload: dict[str, Any]) -> str:
+    hint = payload.get("diagnostic_hint") or "inspect manual_reason and returned report paths"
     if payload.get("manual_reference_paths"):
-        return "raw_fast_ingest_prepare stopped: read only manual_reference_paths from the JSON output, then follow manual_reason."
-    return "raw_fast_ingest_prepare stopped without manual_reference_paths: report the automation failure and do not guess fallback references."
+        return f"raw_fast_ingest_prepare stopped: {hint}; read only manual_reference_paths from the JSON output, then follow manual_reason."
+    return f"raw_fast_ingest_prepare stopped: {hint}; report the automation failure and do not guess fallback references."
 
 
 def _env_path(name: str) -> Path | None:
@@ -133,6 +134,8 @@ def build_prepare_command(args: argparse.Namespace, paths: dict[str, Any]) -> li
         command.extend(["--state-dir", str(paths["state_dir"])])
     if args.strict_pdf_backend:
         command.append("--strict-pdf-backend")
+    if args.max_download_bytes is not None:
+        command.extend(["--max-download-bytes", str(args.max_download_bytes)])
     probes = args.probe if args.probe is not None else None
     if probes:
         for probe in probes:
@@ -143,17 +146,39 @@ def build_prepare_command(args: argparse.Namespace, paths: dict[str, Any]) -> li
     return command
 
 
+def writing_contract_paths() -> list[str]:
+    return [str(ref["path"]) for ref in WRITING_CONTRACT_REFS if ref.get("path")]
+
+
 def agent_next_reads(workdir: Path, *, ok: bool = True) -> list[str]:
     if not ok:
         return []
-    return [str((workdir / "agent_handoff.md").resolve())]
+    return [str((workdir / "agent_handoff.md").resolve()), *writing_contract_paths()]
+
+
+def prepare_diagnostic_hint(reason: dict[str, Any] | None = None) -> str:
+    reason = reason or {}
+    error = str(reason.get("error") or "").lower()
+    message = str(reason.get("message") or "").lower()
+    combined = f"{error} {message}"
+    if "downloadtoolarge" in combined or "filetoolarge" in combined or "too large" in combined:
+        return "PDF/source appears larger than the configured cap; for a trusted large PDF rerun with --max-download-bytes 4GiB or --max-download-bytes none, and keep bytes/status in temp evidence only."
+    if "403" in combined or "forbidden" in combined or "cloudflare" in combined or "verification" in combined:
+        return "Access is blocked or requires a route-specific fallback; read manual_reference_paths and keep route/probe details out of the raw note."
+    if "openreview" in combined:
+        return "OpenReview route failed inside the script-owned API2 path; read manual_reference_paths before any browser/curl fallback and do not print credentials."
+    if "docling" in combined or "pdf" in combined:
+        return "PDF extraction/fetch failed; inspect manual_reason plus report_path/verifier_path if present, then follow manual_reference_paths instead of guessing a fallback."
+    return "Read manual_reason, diagnostic/report paths, and only the returned manual_reference_paths; do not guess fallback references."
 
 
 def prepare_automation_next_action(workdir: Path, *, ok: bool, reason: str | None = None) -> dict[str, Any]:
     if ok:
         return {
-            "action": "read_agent_handoff",
+            "action": "read_agent_handoff_then_writing_contract",
             "read_path": str((workdir / "agent_handoff.md").resolve()),
+            "writing_contract_refs": [dict(ref) for ref in WRITING_CONTRACT_REFS],
+            "quality_gate": dict(RAW_FAST_QUALITY_GATE),
             "manual_reference_policy": "only_on_manual_required",
         }
     return {
@@ -253,7 +278,7 @@ def update_agent_handoff(workdir: Path, closeout: dict[str, Any], assemble: dict
             "status": "ready",
             "manual_reference_paths": [],
             "manual_reference_policy": manual_reference_policy(visible=False),
-            "automation_next_action": {"action": "read_agent_handoff", "manual_reference_policy": "only_on_manual_required"},
+            "automation_next_action": prepare_automation_next_action(workdir, ok=True),
             "resource_review_required": False,
             "agent_actions": [],
         }
@@ -308,6 +333,7 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
             "source_url_normalization": paths.get("source_url_normalization"),
             "manual_required": True,
             "manual_reason": {"stage": "preflight", "error": "workdir_inside_wiki_root"},
+            "diagnostic_hint": "Choose a --workdir/--tmp-root outside the human wiki root; source downloads and evidence must stay in /home/xu/tmp.",
             "manual_reference_policy": manual_reference_policy(visible=True),
             "automation_next_action": prepare_automation_next_action(workdir, ok=False, reason="script_failed"),
             "manual_reference_paths": MANUAL_REFERENCE_PATHS,
@@ -328,6 +354,8 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
             "source_url_normalization": paths.get("source_url_normalization"),
             "command": command,
             "agent_next_reads": agent_next_reads(workdir),
+            "writing_contract_refs": [dict(ref) for ref in WRITING_CONTRACT_REFS],
+            "quality_gate": dict(RAW_FAST_QUALITY_GATE),
             "manual_reference_policy": manual_reference_policy(visible=False),
             "automation_next_action": prepare_automation_next_action(workdir, ok=True),
             "ready_message": "Raw-fast evidence command prepared; execute without manual resource setup.",
@@ -348,6 +376,8 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
         "command": command,
         "command_returncode": result["returncode"],
         "agent_next_reads": agent_next_reads(workdir, ok=ok),
+        "writing_contract_refs": [dict(ref) for ref in WRITING_CONTRACT_REFS] if ok else [],
+        "quality_gate": dict(RAW_FAST_QUALITY_GATE) if ok else None,
         "manual_reference_policy": manual_reference_policy(visible=not ok),
         "automation_next_action": prepare_automation_next_action(workdir, ok=ok),
     }
@@ -356,9 +386,11 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
     else:
         output["stdout_tail"] = result.get("stdout_tail")
     if not ok:
+        reason = _manual_reason_from_result(result)
         output["stderr_tail"] = result.get("stderr_tail")
         output["manual_required"] = True
-        output["manual_reason"] = _manual_reason_from_result(result)
+        output["manual_reason"] = reason
+        output["diagnostic_hint"] = prepare_diagnostic_hint(reason)
         output["manual_reference_paths"] = MANUAL_REFERENCE_PATHS
         output["agent_next_reads"] = []
         return output
@@ -369,7 +401,7 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
     resource_review_required = bool(handoff.get("resource_review_required")) or handoff.get("status") == "manual_required"
     output.update(
         {
-            "ready_message": "Raw-fast evidence prepared; read agent_handoff.md first and do not run manual resource discovery unless the handoff says manual_required.",
+            "ready_message": "Raw-fast evidence prepared; read agent_handoff.md first, then the returned writing_contract_refs before source reads; do not run manual resource discovery unless the handoff says manual_required.",
             "resource_review_required": resource_review_required,
             "closeout_args_path": closeout["closeout_args_path"],
             "closeout_command_preview_path": closeout["closeout_command_preview_path"],
@@ -379,6 +411,7 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
     if resource_review_required:
         output["manual_required"] = True
         output["manual_reason"] = handoff.get("manual_reason")
+        output["diagnostic_hint"] = prepare_diagnostic_hint(handoff.get("manual_reason") if isinstance(handoff.get("manual_reason"), dict) else {"error": "handoff_manual_required"})
         output["manual_reference_policy"] = manual_reference_policy(visible=True)
         output["automation_next_action"] = prepare_automation_next_action(workdir, ok=False, reason="handoff_manual_required")
         output["manual_reference_paths"] = handoff.get("manual_reference_paths") or MANUAL_REFERENCE_PATHS
@@ -400,6 +433,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdf-backend", choices=["docling", "auto"], default="docling")
     parser.add_argument("--strict-pdf-backend", action="store_true")
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--max-download-bytes", default=None, help="Pass through to ops.raw_fast_evidence_bundle; accepts bytes or KiB/MiB/GiB suffixes, 0/none/unlimited disables")
     parser.add_argument("--localize-figures", action="store_true")
     parser.add_argument("--image-slug", default=None)
     parser.add_argument("--print-command", action="store_true", help="Print the derived evidence-bundle command without executing it")
