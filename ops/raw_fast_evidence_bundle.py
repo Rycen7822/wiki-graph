@@ -1560,17 +1560,34 @@ def _run_latexpand_flatten(workdir: Path, main_tex: str, timeout: int = 30) -> d
     tool = shutil.which("latexpand")
     if not tool:
         return {"tool": "latexpand", "status": "missing", "ok": False}
-    result = run_command([tool, str(workdir / main_tex)], timeout=timeout)
-    stdout = result.get("stdout") or ""
-    status = "ok" if result.get("ok") and stdout.strip() else "empty" if result.get("ok") else "failed"
+    main_path = (workdir / main_tex).resolve()
+    try:
+        proc = subprocess.run(
+            [tool, main_path.name],
+            cwd=str(main_path.parent),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        returncode = proc.returncode
+        ok = returncode == 0
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        returncode = None
+        ok = False
+    status = "ok" if ok and stdout.strip() else "empty" if ok else "failed"
     return {
         "tool": "latexpand",
         "tool_path": tool,
+        "cwd": str(main_path.parent),
         "status": status,
         "ok": status == "ok",
         "stdout_chars": len(stdout),
-        "stderr_tail": compact_ws(result.get("stderr") or "", max_len=500),
-        "returncode": result.get("returncode"),
+        "stderr_tail": compact_ws(stderr, max_len=500),
+        "returncode": returncode,
         "text": stdout if status == "ok" else "",
     }
 

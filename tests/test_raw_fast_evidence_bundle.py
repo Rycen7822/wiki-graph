@@ -166,25 +166,28 @@ Supplementary detail should stay discoverable but not become the default body-on
 
 def _fake_latexpand_success(monkeypatch: pytest.MonkeyPatch, raw_fast_evidence_bundle, workdir: Path) -> None:
     original_which = raw_fast_evidence_bundle.shutil.which
-    original_run_command = raw_fast_evidence_bundle.run_command
+    original_subprocess_run = raw_fast_evidence_bundle.subprocess.run
 
     def fake_which(name: str) -> str | None:
         if name == "latexpand":
             return "/usr/bin/latexpand"
         return original_which(name)
 
-    def fake_run_command(command: list[str], timeout: int = 60) -> dict:
+    def fake_subprocess_run(command, *, cwd=None, capture_output=False, text=False, timeout=None):
         if Path(command[0]).name == "latexpand":
-            assert command[-1].endswith("main.tex")
+            assert command[-1] == "main.tex"
+            assert cwd == str((workdir / "source").resolve())
+            assert capture_output is True
+            assert text is True
             flattened = "\n".join(
                 (workdir / rel).read_text(encoding="utf-8")
                 for rel in ["source/main.tex", "source/sections/method.tex", "source/sections/appendix.tex"]
             )
-            return {"ok": True, "returncode": 0, "stdout": flattened, "stderr_tail": ""}
-        return original_run_command(command, timeout=timeout)
+            return raw_fast_evidence_bundle.subprocess.CompletedProcess(command, 0, flattened, "")
+        return original_subprocess_run(command, cwd=cwd, capture_output=capture_output, text=text, timeout=timeout)
 
     monkeypatch.setattr(raw_fast_evidence_bundle.shutil, "which", fake_which)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "run_command", fake_run_command)
+    monkeypatch.setattr(raw_fast_evidence_bundle.subprocess, "run", fake_subprocess_run)
 
 
 def _write_sectioned_main_with_long_appendix_fixture(workdir: Path) -> None:
