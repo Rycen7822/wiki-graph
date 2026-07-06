@@ -49,8 +49,11 @@ def test_raw_fast_ingest_prepare_url_only_prod_profile_prints_command(tmp_path: 
     assert payload["root"] == str(raw_fast_ingest_prepare.PROD_WIKI_ROOT)
     assert payload["state_dir"] == str(raw_fast_ingest_prepare.PROD_STATE_DIR)
     assert payload["workdir"].startswith(str((tmp_path / "raw-fast-tmp").resolve()))
-    assert payload["agent_next_reads"] == [str((Path(payload["workdir"]) / "agent_handoff.md").resolve())]
-    assert payload["automation_next_action"]["action"] == "read_agent_handoff"
+    expected_handoff = str((Path(payload["workdir"]) / "agent_handoff.md").resolve())
+    assert payload["agent_next_reads"][0] == expected_handoff
+    assert any(path.endswith("structured-paper-note-contract.md") for path in payload["agent_next_reads"])
+    assert payload["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
+    assert payload["automation_next_action"]["action"] == "read_agent_handoff_then_writing_contract"
     assert payload["automation_next_action"]["read_path"] == payload["agent_next_reads"][0]
     assert payload["manual_reference_policy"]["mode"] == "only_on_manual_required"
     assert payload["manual_reference_policy"]["manual_references_visible"] is False
@@ -156,6 +159,30 @@ def test_raw_fast_ingest_prepare_print_command_normalizes_openreview_routes(tmp_
     assert command[command.index("--kind") + 1] == "openreview"
 
 
+def test_raw_fast_ingest_prepare_print_command_passes_max_download_bytes(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_ingest_prepare",
+            "--url",
+            "https://openreview.net/forum?id=mLhZzo7BIb",
+            "--tmp-root",
+            str(tmp_path / "raw-fast-tmp"),
+            "--max-download-bytes",
+            "none",
+            "--print-command",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    command = payload["command"]
+
+    assert command[command.index("--max-download-bytes") + 1] == "none"
+
+
 def test_raw_fast_ingest_prepare_failure_payload_exposes_manual_reference_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     args = raw_fast_ingest_prepare.parse_args(
         [
@@ -192,6 +219,8 @@ def test_raw_fast_ingest_prepare_failure_payload_exposes_manual_reference_paths(
     assert output["automation_next_action"]["action"] == "read_manual_reference_paths"
     assert output["automation_next_action"]["reason"] == "script_failed"
     assert any(path.endswith("structured-paper-ingest-router.md") for path in output["manual_reference_paths"])
+    assert "diagnostic_hint" in output
+    assert "manual_reference_paths" in output["diagnostic_hint"] or "Access is blocked" in output["diagnostic_hint"]
     assert output["agent_next_reads"] == []
 
 
@@ -225,6 +254,7 @@ def test_raw_fast_ingest_prepare_main_failure_raises_manual_reference_reminder(t
     assert code == 1
     assert payload["manual_required"] is True
     assert payload["manual_reference_paths"]
+    assert payload["diagnostic_hint"]
     assert "read only manual_reference_paths" in captured.err
 
 
@@ -270,8 +300,10 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     for key in ["raw_fast_preflight", "agent_brief", "evidence_report", "note_candidate"]:
         assert key in evidence["files"]
         assert (workdir / evidence["files"][key]).exists()
-    assert payload["agent_next_reads"] == [str((workdir / "agent_handoff.md").resolve())]
-    assert payload["automation_next_action"]["action"] == "read_agent_handoff"
+    assert payload["agent_next_reads"][0] == str((workdir / "agent_handoff.md").resolve())
+    assert any(path.endswith("structured-paper-note-contract.md") for path in payload["agent_next_reads"])
+    assert payload["writing_contract_refs"][0]["read_before"] == "source_read_plan"
+    assert payload["automation_next_action"]["action"] == "read_agent_handoff_then_writing_contract"
     assert payload["automation_next_action"]["read_path"] == payload["agent_next_reads"][0]
     assert payload["manual_reference_policy"]["manual_references_visible"] is False
     assert payload["ready_message"].startswith("Raw-fast evidence prepared")
@@ -283,7 +315,9 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert handoff["resource_review_required"] is False
     assert handoff["manual_reference_policy"]["mode"] == "only_on_manual_required"
     assert handoff["manual_reference_policy"]["manual_references_visible"] is False
-    assert handoff["automation_next_action"]["action"] == "follow_source_read_plan"
+    assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_follow_source_read_plan"
+    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
+    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
     assert handoff["manual_reference_paths"] == []
     assert handoff["body_draft"]["path"] == "raw_body_draft.md"
     assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"

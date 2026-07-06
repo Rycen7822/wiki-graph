@@ -29,10 +29,35 @@ from ops.wiki_native_cli import DEFAULT_WIKI_ROOT
 
 USER_AGENT = "Hermes llm-wiki raw-fast evidence bundle"
 TEXT_EXTENSIONS = {".txt", ".json", ".md", ".html", ".htm", ".js", ".toml", ".yaml", ".yml", ".tex", ".xml"}
-DEFAULT_MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+DEFAULT_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MAX_DOWNLOAD_BYTES_ENV_VARS = ("LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES", "RAW_FAST_MAX_DOWNLOAD_BYTES")
 DEFAULT_MAX_TEXT_BYTES = 8 * 1024 * 1024
 RAW_BODY_DRAFT_FILE = "raw_body_draft.md"
 ASSEMBLED_RAW_NOTE_REPORT_FILE = "assembled_raw_note_report.json"
+LLM_WIKI_SKILL_ROOT = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki"
+STRUCTURED_PAPER_NOTE_CONTRACT_PATH = str(LLM_WIKI_SKILL_ROOT / "references" / "structured-paper-note-contract.md")
+WRITING_CONTRACT_REFS = [
+    {
+        "path": STRUCTURED_PAPER_NOTE_CONTRACT_PATH,
+        "read_before": "source_read_plan",
+        "reason": "Raw-note quality gate: read `Raw-note quality bar before closeout`, section jobs, minimum completeness floor, formula/table/figure integration, and anti-shallow closeout checks.",
+    }
+]
+RAW_FAST_QUALITY_GATE = {
+    "contract": STRUCTURED_PAPER_NOTE_CONTRACT_PATH,
+    "must_read_before": "source_read_plan",
+    "summary": "Read `Raw-note quality bar before closeout` in the structured-paper note contract before opening source spans or drafting raw_body_draft.md; quality is semantic, not verifier keyword stuffing.",
+}
+DEFAULT_RAW_FAST_DOMAIN = "machine-learning"
+ARXIV_CATEGORY_DOMAINS = [
+    (("cs.CV", "eess.IV"), "computer-vision"),
+    (("cs.CL",), "llm"),
+    (("cs.RO",), "robotics"),
+    (("cs.CR",), "alignment"),
+    (("cs.LG", "stat.ML", "cs.AI"), "machine-learning"),
+    (("math.OC",), "optimization"),
+    (("stat.",), "statistics"),
+]
 STRICT_SECRET_PATTERNS = {
     "openai_key": re.compile(r"(?<![A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])"),
     "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
@@ -44,6 +69,54 @@ STRICT_SECRET_PATTERNS = {
 
 def print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def parse_byte_limit(raw: str | int | None) -> int | None:
+    """Parse a byte limit; 0/none/unlimited disables the cap."""
+    if raw is None:
+        return DEFAULT_MAX_DOWNLOAD_BYTES
+    text = str(raw).strip().lower().replace("_", "")
+    if text in {"", "default"}:
+        return DEFAULT_MAX_DOWNLOAD_BYTES
+    if text in {"0", "none", "no", "off", "unlimited", "inf", "infinite"}:
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]?i?b?|b)?", text)
+    if not match:
+        raise ValueError(f"invalid byte limit: {raw!r}")
+    value = float(match.group(1))
+    suffix = match.group(2) or "b"
+    multipliers = {
+        "b": 1,
+        "": 1,
+        "k": 1024,
+        "kb": 1024,
+        "kib": 1024,
+        "m": 1024**2,
+        "mb": 1024**2,
+        "mib": 1024**2,
+        "g": 1024**3,
+        "gb": 1024**3,
+        "gib": 1024**3,
+        "t": 1024**4,
+        "tb": 1024**4,
+        "tib": 1024**4,
+    }
+    if suffix not in multipliers:
+        raise ValueError(f"invalid byte limit suffix: {raw!r}")
+    parsed = int(value * multipliers[suffix])
+    if parsed <= 0:
+        raise ValueError(f"byte limit must be positive or disabled with 0/none: {raw!r}")
+    return parsed
+
+
+def configured_max_download_bytes(cli_value: str | int | None = None) -> int | None:
+    if cli_value is not None:
+        return parse_byte_limit(cli_value)
+    for env_name in MAX_DOWNLOAD_BYTES_ENV_VARS:
+        raw = os.environ.get(env_name)
+        if raw is not None:
+            return parse_byte_limit(raw)
+    return DEFAULT_MAX_DOWNLOAD_BYTES
 
 
 class TimingRecorder:
@@ -149,13 +222,13 @@ def run_command(command: list[str], timeout: int = 60) -> dict[str, Any]:
         }
 
 
-def fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+def fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme == "file":
         source = Path(urllib.request.url2pathname(parsed.path))
         size = source.stat().st_size
-        if size > max_bytes:
+        if max_bytes is not None and size > max_bytes:
             return {"ok": False, "url": url, "dest": str(dest), "error": "FileTooLarge", "bytes": size, "max_bytes": max_bytes}
         shutil.copyfile(source, dest)
         return {
@@ -177,7 +250,7 @@ def fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes: int = DEFAU
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > max_bytes:
+                if max_bytes is not None and total > max_bytes:
                     out.close()
                     dest.unlink(missing_ok=True)
                     return {"ok": False, "url": url, "dest": str(dest), "error": "DownloadTooLarge", "bytes": total, "max_bytes": max_bytes}
@@ -243,7 +316,7 @@ def _openreview_note_metadata(note: Any, note_id: str) -> dict[str, Any]:
     }
 
 
-def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
     del timeout  # openreview-py does not expose a per-call timeout on get_note/get_pdf.
     dest.parent.mkdir(parents=True, exist_ok=True)
     env_path = Path(os.environ.get("OPENREVIEW_ENV_PATH", str(DEFAULT_OPENREVIEW_ENV_PATH))).expanduser()
@@ -264,7 +337,7 @@ def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_byt
         pdf_bytes = client.get_pdf(note_id)
         if not isinstance(pdf_bytes, (bytes, bytearray)):
             return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "OpenReviewPDFTypeError", "message": f"get_pdf returned {type(pdf_bytes).__name__}", "openreview": _openreview_note_metadata(note, note_id)}
-        if len(pdf_bytes) > max_bytes:
+        if max_bytes is not None and len(pdf_bytes) > max_bytes:
             return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": "DownloadTooLarge", "bytes": len(pdf_bytes), "max_bytes": max_bytes, "openreview": _openreview_note_metadata(note, note_id)}
         dest.write_bytes(bytes(pdf_bytes))
         return {
@@ -281,7 +354,7 @@ def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_byt
         return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": type(exc).__name__, "message": _redact_known_values(str(exc), credentials), "openreview": {"id": note_id, "auth_used": bool(credentials)}}
 
 
-def fetch_pdf_source_to_file(url: str, dest: Path, timeout: int, max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+def fetch_pdf_source_to_file(url: str, dest: Path, timeout: int, max_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
     note_id = openreview_id_from_url(url)
     if note_id:
         return fetch_openreview_pdf_to_file(note_id, dest, timeout, max_bytes=max_bytes)
@@ -1110,9 +1183,18 @@ def score_tex_file(workdir: Path, path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return {"ok": False, "path": str(path), "score": 0, "reason": f"read_failed:{type(exc).__name__}"}
+    rel_path = str(path.relative_to(workdir))
+    lowered_rel = rel_path.lower()
     lowered_name = path.name.lower()
-    support_name = any(token in lowered_name for token in ["defs", "macro", "preamble", "supplement", "appendix"])
+    support_name = any(token in lowered_rel for token in ["defs", "macro", "preamble", "supplement", "appendix"])
+    main_name = (
+        lowered_name in {"main.tex", "paper.tex", "article.tex", "ms.tex", "manuscript.tex"}
+        or lowered_name.endswith("_main.tex")
+        or lowered_name.startswith("main_")
+        or "/main" in lowered_rel
+    )
     section_count = len(re.findall(r"\\(?:section|subsection|subsubsection)\*?\{", text))
+    include_count = len(re.findall(r"\\(?:input|include)\s*\{", text))
     prose_chars = len(_plain_tex_prose(text))
     markers = {
         "begin_document": "\\begin{document}" in text,
@@ -1120,7 +1202,7 @@ def score_tex_file(workdir: Path, path: Path) -> dict[str, Any]:
         "maketitle": "\\maketitle" in text,
         "title": bool(tex_command_arg(text, "title")),
     }
-    score = prose_chars // 80 + section_count * 20
+    score = prose_chars // 80 + section_count * 20 + include_count * 15
     if markers["begin_document"]:
         score += 100
     if markers["abstract"]:
@@ -1129,16 +1211,18 @@ def score_tex_file(workdir: Path, path: Path) -> dict[str, Any]:
         score += 20
     if markers["title"]:
         score += 20
-    if support_name:
-        score -= 80
-    usable = score >= 120 and prose_chars >= 120 and (markers["begin_document"] or markers["abstract"] or section_count >= 2)
+    source_body = prose_chars >= 120 and (markers["begin_document"] or markers["abstract"] or section_count >= 2)
+    wrapper_main = main_name and include_count > 0 and (markers["begin_document"] or markers["title"])
+    usable = (source_body and (score >= 120 or main_name)) or wrapper_main
     return {
         "ok": usable,
-        "path": str(path.relative_to(workdir)),
+        "path": rel_path,
         "score": score,
         "prose_chars": prose_chars,
         "section_count": section_count,
+        "include_count": include_count,
         "markers": markers,
+        "role_signals": {"main_name": main_name, "support_name": support_name, "wrapper_main": wrapper_main},
         "reason": "usable" if usable else "insufficient_main_tex_signals",
     }
 
@@ -1148,8 +1232,28 @@ def select_main_tex_source(workdir: Path) -> dict[str, Any]:
     usable = [item for item in scored if item.get("ok")]
     if not usable:
         return {"ok": False, "candidates": scored, "reason": "no_usable_tex"}
-    best = sorted(usable, key=lambda item: (int(item.get("score") or 0), int(item.get("prose_chars") or 0)), reverse=True)[0]
-    return {"ok": True, "main_tex": best["path"], "candidates": scored}
+
+    def role(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        raw_markers = item.get("markers")
+        raw_role = item.get("role_signals")
+        markers: dict[str, Any] = raw_markers if isinstance(raw_markers, dict) else {}
+        role_signals: dict[str, Any] = raw_role if isinstance(raw_role, dict) else {}
+        return markers, role_signals
+
+    def looks_main_like(item: dict[str, Any]) -> bool:
+        markers, role_signals = role(item)
+        return bool(role_signals.get("main_name") or markers.get("begin_document") or markers.get("abstract") or markers.get("title"))
+
+    def is_support_like(item: dict[str, Any]) -> bool:
+        _markers, role_signals = role(item)
+        return bool(role_signals.get("support_name"))
+
+    preferred = [item for item in usable if looks_main_like(item) and not is_support_like(item)]
+    fallback = [item for item in usable if not is_support_like(item)]
+    pool = preferred or fallback or usable
+    best = sorted(pool, key=lambda item: (int(item.get("score") or 0), int(item.get("prose_chars") or 0)), reverse=True)[0]
+    selection_pool = "preferred_main" if preferred else "non_support" if fallback else "all_usable"
+    return {"ok": True, "main_tex": best["path"], "candidates": scored, "selection_pool": selection_pool}
 
 
 def _line_number_for_patterns(lines: list[str], patterns: list[str]) -> int | None:
@@ -1189,7 +1293,15 @@ def build_source_read_plan(workdir: Path, *, source_kind: str, main_rel: str, fa
         first_reads.append({"path": main_rel, "offset": offset, "limit": 220 if len(first_reads) else 180, "reason": reason})
     if not first_reads:
         first_reads.append({"path": main_rel, "offset": 1, "limit": 220, "reason": "source overview"})
-    return {"ok": True, "source_kind": source_kind, "main_tex": main_rel if source_kind == "tex_source" else None, "main_path": main_rel, "fallback_used": fallback_used, "first_reads": first_reads[:4]}
+    return {
+        "ok": True,
+        "source_kind": source_kind,
+        "main_tex": main_rel if source_kind == "tex_source" else None,
+        "main_path": main_rel,
+        "fallback_used": fallback_used,
+        "reading_strategy": "read writing contract and paper_digest.md first; first_reads are starting anchors, not source-reading caps; continue reading original source as needed for quality",
+        "first_reads": first_reads[:4],
+    }
 
 
 def extract_tex_abstract(tex: str) -> str:
@@ -1327,6 +1439,340 @@ def extract_result_cards(section_cards: list[dict[str, Any]], table_cards: list[
     return cards[:20]
 
 
+def _tex_source_rel(source_root: Path, path: Path) -> str:
+    resolved = path.resolve()
+    if resolved.is_relative_to(source_root):
+        return resolved.relative_to(source_root).as_posix()
+    return path.name
+
+
+def _resolve_tex_include(source_root: Path, tex_file: Path, include: str) -> tuple[Path | None, str | None]:
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", include):
+        return None, "remote_url"
+    raw = Path(include.strip())
+    if raw.is_absolute() or any(part == ".." for part in raw.parts):
+        return None, "path_traversal"
+    if raw.suffix and raw.suffix.lower() != ".tex":
+        return None, "unsupported_extension"
+    bases = [tex_file.parent / raw, source_root / raw]
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for base in bases:
+        expanded = [base] if base.suffix else [base.with_suffix(".tex")]
+        for candidate in expanded:
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(source_root):
+            return None, "path_traversal"
+        return resolved, None
+    return None, "missing_source"
+
+
+def _tex_include_events(text: str) -> list[tuple[str, str | None]]:
+    events: list[tuple[str, str | None]] = []
+    pattern = re.compile(r"\\appendix\b|\\(?P<cmd>input|include)\s*\{(?P<path>[^{}]+)\}", re.S)
+    for match in pattern.finditer(text or ""):
+        if match.group(0).startswith("\\appendix"):
+            events.append(("appendix", None))
+        else:
+            events.append(("include", match.group("path")))
+    return events
+
+
+def build_tex_source_units(workdir: Path, main_tex: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_root = (workdir / "source").resolve()
+    main_path = (workdir / main_tex).resolve()
+    units: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    visited: set[str] = set()
+    stack: set[str] = set()
+
+    def visit(path: Path, *, parent: str | None, role: str) -> None:
+        rel = _tex_source_rel(source_root, path)
+        if rel in stack:
+            diagnostics.append({"type": "cycle", "path": rel, "parent": parent})
+            return
+        if rel in visited:
+            return
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            diagnostics.append({"type": "read_failed", "path": rel, "parent": parent, "error": type(exc).__name__})
+            return
+        visited.add(rel)
+        stack.add(rel)
+        units.append(
+            {
+                "path": rel,
+                "role": role,
+                "parent": parent,
+                "include_order": len(units),
+                "section_titles": [strip_tex_markup(title, max_len=180) for title in re.findall(r"\\(?:section|subsection|subsubsection)\*?\{([^{}]+)\}", text)[:20]],
+                "labels": [compact_ws(label, max_len=120) for label in re.findall(r"\\label\{([^{}]+)\}", text)[:80]],
+            }
+        )
+        child_role = role
+        for event, include in _tex_include_events(text):
+            if event == "appendix":
+                child_role = "appendix"
+                continue
+            if not include:
+                continue
+            resolved, reason = _resolve_tex_include(source_root, path, include)
+            if resolved is None:
+                diagnostics.append({"type": "include_unresolved", "path": rel, "include": include, "reason": reason})
+                continue
+            visit(resolved, parent=rel, role=child_role)
+        stack.remove(rel)
+
+    visit(main_path, parent=None, role="body")
+    return units, diagnostics
+
+
+def _extract_simple_tex_macros(tex: str) -> dict[str, str]:
+    macros: dict[str, str] = {}
+    patterns = [
+        re.compile(r"\\(?:re)?newcommand\s*\{\\(?P<name>[A-Za-z]+)\}(?:\[[0-9]+\])?\s*\{(?P<value>[^{}\\]+)\}"),
+        re.compile(r"\\def\\(?P<name>[A-Za-z]+)\s*\{(?P<value>[^{}\\]+)\}"),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(tex or ""):
+            value = compact_ws(match.group("value"), max_len=120)
+            if value:
+                macros.setdefault(match.group("name"), value)
+    return macros
+
+
+def _expand_simple_tex_macros(tex: str, macros: dict[str, str]) -> str:
+    expanded = tex or ""
+    for name, value in macros.items():
+        expanded = re.sub(rf"\\{re.escape(name)}(?:\{{\}})?(?![A-Za-z])", value, expanded)
+    return expanded
+
+
+def _run_latexpand_flatten(workdir: Path, main_tex: str, timeout: int = 30) -> dict[str, Any]:
+    tool = shutil.which("latexpand")
+    if not tool:
+        return {"tool": "latexpand", "status": "missing", "ok": False}
+    result = run_command([tool, str(workdir / main_tex)], timeout=timeout)
+    stdout = result.get("stdout") or ""
+    status = "ok" if result.get("ok") and stdout.strip() else "empty" if result.get("ok") else "failed"
+    return {
+        "tool": "latexpand",
+        "tool_path": tool,
+        "status": status,
+        "ok": status == "ok",
+        "stdout_chars": len(stdout),
+        "stderr_tail": compact_ws(result.get("stderr") or "", max_len=500),
+        "returncode": result.get("returncode"),
+        "text": stdout if status == "ok" else "",
+    }
+
+
+def _visual_inspection_priority(figure: dict[str, Any]) -> str:
+    text = " ".join(str(figure.get(key) or "") for key in ["caption", "label", "image_path", "include"])
+    if re.search(r"plot|curve|heatmap|trend|result|score|benchmark|ablation|accuracy|performance", text, re.I):
+        return "required"
+    if re.search(r"method|pipeline|architecture|diagram|framework|example|qualitative", text, re.I):
+        return "recommended"
+    return "optional"
+
+
+def _localized_figure_map(localized_figures: dict[str, Any] | None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for entry in (localized_figures or {}).get("entries") or []:
+        dest = entry.get("dest_rel")
+        if not dest:
+            continue
+        for key in [entry.get("label"), entry.get("source_rel")]:
+            if key:
+                mapping[str(key)] = str(dest)
+    return mapping
+
+
+def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    source_root = (workdir / "source").resolve()
+    source_units, diagnostics = build_tex_source_units(workdir, main_tex)
+    unit_texts: dict[str, str] = {}
+    for unit in source_units:
+        path = source_root / unit["path"]
+        try:
+            unit_texts[unit["path"]] = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            unit_texts[unit["path"]] = ""
+    combined_tex = "\n".join(unit_texts.get(unit["path"], "") for unit in source_units)
+    macros = _extract_simple_tex_macros(combined_tex)
+    expanded_texts = {path: _expand_simple_tex_macros(text, macros) for path, text in unit_texts.items()}
+    expanded_full = "\n".join(expanded_texts.get(unit["path"], "") for unit in source_units)
+
+    sections: list[dict[str, Any]] = []
+    equations: list[dict[str, Any]] = []
+    tables: list[dict[str, Any]] = []
+    for unit in source_units:
+        text = expanded_texts.get(unit["path"], "")
+        for card in extract_tex_section_cards(text):
+            sections.append({**card, "source_tex": unit["path"], "role": unit["role"]})
+        for card in extract_tex_equation_cards(text):
+            equations.append({**card, "source_tex": unit["path"], "role": unit["role"]})
+        for card in extract_tex_table_cards(text):
+            tables.append({**card, "source_tex": unit["path"], "role": unit["role"], "parse_status": "partial"})
+
+    role_by_path = {unit["path"]: unit["role"] for unit in source_units}
+    localized = _localized_figure_map(localized_figures)
+    figures: list[dict[str, Any]] = []
+    for card in extract_tex_figure_cards(workdir):
+        source_tex = str(card.get("tex_rel") or "")
+        if source_tex not in role_by_path:
+            continue
+        source_image_path = str(card.get("source_path") or "")
+        image_path = f"source/{source_image_path}" if source_image_path else card.get("include")
+        localized_path = (
+            localized.get(str(card.get("label")))
+            or (localized.get(source_image_path) if source_image_path else None)
+            or (localized.get(str(image_path)) if image_path else None)
+        )
+        figure = {
+            "label": card.get("label"),
+            "caption": card.get("caption"),
+            "image_path": image_path,
+            "source_tex": source_tex,
+            "localized_path": localized_path,
+            "role": role_by_path.get(source_tex, "body"),
+            "visual_inspection": "optional",
+            "localizable": bool(card.get("localizable")),
+            "reason": card.get("reason"),
+        }
+        figure["visual_inspection"] = _visual_inspection_priority(figure)
+        figures.append(figure)
+
+    flatten = _run_latexpand_flatten(workdir, main_tex)
+    main_source_rel = _tex_source_rel(source_root, workdir / main_tex)
+    abstract = extract_tex_abstract(expanded_texts.get(main_source_rel, "")) or extract_tex_abstract(expanded_full)
+    title = tex_command_arg(expanded_full, "title")
+    ir = {
+        "ok": True,
+        "main_tex": main_tex,
+        "title": title,
+        "abstract": abstract,
+        "source_units": source_units,
+        "macros": {"semantic": macros},
+        "sections": sections[:80],
+        "objects": {"equations": equations[:80], "tables": tables[:60], "figures": figures[:80]},
+        "full_text": flatten.get("text") or expanded_full,
+    }
+    coverage = {
+        "source_units": len(source_units),
+        "sections": len(ir["sections"]),
+        "equations": len(ir["objects"]["equations"]),
+        "tables": len(ir["objects"]["tables"]),
+        "figures": len(ir["objects"]["figures"]),
+    }
+    status = "ok" if coverage["sections"] and flatten.get("status") == "ok" and not diagnostics else "partial" if coverage["sections"] else "failed"
+    audit = {
+        "ok": status in {"ok", "partial"},
+        "status": status,
+        "flatten": {key: value for key, value in flatten.items() if key != "text"},
+        "coverage": coverage,
+        "diagnostics": diagnostics,
+    }
+    return ir, audit
+
+
+def render_tex_agent_map_markdown(ir: dict[str, Any], audit: dict[str, Any]) -> str:
+    lines = ["# TeX agent map", "", f"- main_tex: `{ir.get('main_tex')}`", f"- audit_status: {audit.get('status')}", "", "## Source units"]
+    for unit in ir.get("source_units") or []:
+        parent = unit.get("parent") or "root"
+        sections = ", ".join(unit.get("section_titles") or []) or "none"
+        lines.append(f"- `{unit.get('path')}` role={unit.get('role')} parent=`{parent}` sections={sections}")
+    if audit.get("diagnostics"):
+        lines.append("\n## Diagnostics")
+        for item in audit.get("diagnostics") or []:
+            lines.append(f"- {json.dumps(item, ensure_ascii=False, sort_keys=True)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_tex_agent_core_markdown(ir: dict[str, Any]) -> str:
+    lines = ["# TeX agent core", "", f"- title: {ir.get('title') or 'Untitled'}", ""]
+    if ir.get("abstract"):
+        lines += ["## Abstract", str(ir.get("abstract")), ""]
+    lines.append("## Body sections")
+    for section in ir.get("sections") or []:
+        if section.get("role") != "body":
+            continue
+        lines += ["", f"### {section.get('heading')}", f"source_tex: `{section.get('source_tex')}`", "", str(section.get("excerpt") or "")]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_tex_agent_objects_markdown(ir: dict[str, Any]) -> str:
+    objects = ir.get("objects") or {}
+    lines = ["# TeX agent objects", "", "## Equations"]
+    for eq in objects.get("equations") or []:
+        lines.append(f"- {eq.get('label') or 'unlabeled'} source_tex: `{eq.get('source_tex')}` formula: `{eq.get('formula')}`")
+    if not objects.get("equations"):
+        lines.append("- none detected")
+    lines.append("\n## Tables")
+    for table in objects.get("tables") or []:
+        lines.append(f"- {table.get('label') or 'unlabeled'} source_tex: `{table.get('source_tex')}` parse_status: {table.get('parse_status')} caption: {table.get('caption')}")
+    if not objects.get("tables"):
+        lines.append("- none detected")
+    lines.append("\n## Figures")
+    for figure in objects.get("figures") or []:
+        lines.append(f"- {figure.get('label') or 'unlabeled'}")
+        lines.append(f"  - caption: {figure.get('caption')}")
+        lines.append(f"  - image_path: `{figure.get('image_path')}`")
+        lines.append(f"  - source_tex: `{figure.get('source_tex')}`")
+        localized = figure.get("localized_path") if figure.get("localized_path") is not None else "null"
+        lines.append(f"  - localized_path: {localized}")
+        lines.append(f"  - visual_inspection: {figure.get('visual_inspection')}")
+    if not objects.get("figures"):
+        lines.append("- none detected")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_tex_agent_full_markdown(ir: dict[str, Any]) -> str:
+    return "# TeX agent full view\n\n```tex\n" + str(ir.get("full_text") or "")[:200_000] + "\n```\n"
+
+
+def render_tex_agent_audit_markdown(audit: dict[str, Any]) -> str:
+    lines = ["# TeX agent IR audit", "", f"- status: {audit.get('status')}", f"- flatten: {json.dumps(audit.get('flatten') or {}, ensure_ascii=False, sort_keys=True)}", f"- coverage: {json.dumps(audit.get('coverage') or {}, ensure_ascii=False, sort_keys=True)}"]
+    if audit.get("diagnostics"):
+        lines.append("\n## Diagnostics")
+        for item in audit.get("diagnostics") or []:
+            lines.append(f"- {json.dumps(item, ensure_ascii=False, sort_keys=True)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_tex_agent_ir_sidecars(workdir: Path, files: dict[str, str], *, main_tex: str, localized_figures: dict[str, Any] | None = None) -> dict[str, Any]:
+    ir, audit = build_tex_agent_ir(workdir, main_tex, localized_figures=localized_figures)
+    ir_json = {key: value for key, value in ir.items() if key != "full_text"}
+    ir_json["full_text_path"] = "paper_full.agent.md"
+    write_json(workdir / "tex_agent_ir.json", ir_json)
+    write_text(workdir / "paper_map.md", render_tex_agent_map_markdown(ir, audit))
+    write_text(workdir / "paper_core.md", render_tex_agent_core_markdown(ir))
+    write_text(workdir / "paper_objects.md", render_tex_agent_objects_markdown(ir))
+    write_text(workdir / "paper_full.agent.md", render_tex_agent_full_markdown(ir))
+    write_json(workdir / "tex_agent_ir_audit.json", audit)
+    write_text(workdir / "tex_agent_ir_audit.md", render_tex_agent_audit_markdown(audit))
+    files.update(
+        {
+            "tex_agent_ir": "tex_agent_ir.json",
+            "tex_agent_map": "paper_map.md",
+            "tex_agent_core": "paper_core.md",
+            "tex_agent_objects": "paper_objects.md",
+            "tex_agent_full": "paper_full.agent.md",
+            "tex_agent_audit": "tex_agent_ir_audit.json",
+            "tex_agent_audit_markdown": "tex_agent_ir_audit.md",
+        }
+    )
+    return {"ok": audit.get("ok", False), "status": audit.get("status"), "coverage": audit.get("coverage"), "files": {key: files[key] for key in files if key.startswith("tex_agent_")}}
+
+
 def placeholder_title(text: str | None) -> bool:
     value = compact_ws(text or "", max_len=220).lower()
     if not value or value in {"untitled paper", "paper"}:
@@ -1346,6 +1792,22 @@ def arxiv_api_title(workdir: Path) -> str | None:
         return None
     title = compact_ws(re.sub(r"<[^>]+>", " ", match.group(1)), max_len=300)
     return title or None
+
+
+def arxiv_api_categories(workdir: Path) -> list[str]:
+    api_path = workdir / "api.xml"
+    if not api_path.exists():
+        return []
+    text = api_path.read_text(encoding="utf-8", errors="replace")
+    return [compact_ws(match, max_len=80) for match in re.findall(r"<category\b[^>]*\bterm=['\"]([^'\"]+)['\"]", text, re.I)]
+
+
+def domain_from_arxiv_categories(categories: list[str]) -> str:
+    for category in categories:
+        for prefixes, domain in ARXIV_CATEGORY_DOMAINS:
+            if any(category == prefix or category.startswith(prefix) for prefix in prefixes):
+                return domain
+    return DEFAULT_RAW_FAST_DOMAIN
 
 
 def summarize_resource_boundary(resource_probe: dict[str, Any], metadata: dict[str, Any] | None = None, source_inventory: dict[str, Any] | None = None, pdf_info: dict[str, Any] | None = None, secret_scan: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1857,6 +2319,28 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         source_refs["source_read_plan"] = files.get("source_read_plan")
     if files.get("docling_markdown") and (source_read_plan or {}).get("source_kind") == "docling_pdf":
         source_refs["docling_markdown"] = files.get("docling_markdown")
+    if files.get("tex_agent_map"):
+        source_refs["tex_agent_map"] = files.get("tex_agent_map")
+    if files.get("tex_agent_core"):
+        source_refs["tex_agent_core"] = files.get("tex_agent_core")
+    if files.get("tex_agent_objects"):
+        source_refs["tex_agent_objects"] = files.get("tex_agent_objects")
+    if files.get("tex_agent_full"):
+        source_refs["tex_agent_full"] = files.get("tex_agent_full")
+    if files.get("tex_agent_audit_markdown"):
+        source_refs["tex_agent_audit"] = files.get("tex_agent_audit_markdown")
+    agent_actions = [
+        "Read the writing contract refs before source spans; they are the quality gate for raw_body_draft.md.",
+        "Read paper_digest.md before opening source spans; use it as an evidence index, then keep reading original source wherever quality needs more detail.",
+        f"Write a body-only raw draft at `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata fields.",
+        "Run raw-fast note assembly so script-owned metadata is locked before closeout.",
+        "Run raw-fast closeout after assembly; do not run native refresh while wiki integration is pending.",
+    ]
+    if source_refs.get("tex_agent_map"):
+        agent_actions.insert(
+            2,
+            "Then read paper_map.md, paper_core.md, and paper_objects.md as semantic starting surfaces, not source-reading caps; for figure objects marked visual_inspection required/recommended, use the preserved image_path/localized_path with vision rather than relying on caption text alone.",
+        )
     return {
         "ok": True,
         "protected_anchors": {
@@ -1870,6 +2354,8 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         "queue_status": (preflight or {}).get("queue_status") or {"checked": False},
         "evidence_cards": _brief_cards_from_digest(digest),
         "source_read_plan": source_read_plan,
+        "writing_contract_refs": [dict(ref) for ref in WRITING_CONTRACT_REFS],
+        "quality_gate": dict(RAW_FAST_QUALITY_GATE),
         "resource_caveats": {
             "status": "script_managed" if resource_boundary else "missing",
             "review_required": bool(resource_boundary.get("review_required")),
@@ -1877,12 +2363,7 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
             "policy": "Resource metadata and link-health handling are script-owned and are not agent-facing.",
         },
         "source_refs": source_refs,
-        "agent_actions": [
-            "Read this brief first; use source_read_plan and the sanitized scientific digest for body synthesis.",
-            f"Write a body-only raw draft at `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata fields.",
-            "Run raw-fast note assembly so script-owned metadata is locked before closeout.",
-            "Run raw-fast closeout after assembly; do not run native refresh while wiki integration is pending.",
-        ],
+        "agent_actions": agent_actions,
     }
 
 
@@ -1894,6 +2375,9 @@ def render_agent_brief_markdown(brief: dict[str, Any]) -> str:
     lines.append(f"- duplicate summary: raw={dup.get('raw', 0)}, compiled={dup.get('compiled', 0)}, meta={dup.get('meta', 0)}, log={dup.get('log', 0)}")
     resource = brief.get("resource_caveats") or {}
     lines.append(f"- resource metadata: {resource.get('status')} — {resource.get('policy')}")
+    lines.append("\n## Writing contract refs")
+    for ref in brief.get("writing_contract_refs") or []:
+        lines.append(f"- read before `{ref.get('read_before')}`: `{ref.get('path')}` — {ref.get('reason')}")
     lines.append("\n## Evidence cards")
     for card in brief.get("evidence_cards") or []:
         lines.append(f"- **{card.get('kind')}**: {card.get('text')}")
@@ -2005,9 +2489,16 @@ def manual_reference_policy(*, visible: bool = False) -> dict[str, Any]:
 def handoff_automation_next_action(source_read_plan: dict[str, Any] | None, *, manual_required: bool) -> dict[str, Any]:
     if manual_required:
         return {"action": "read_manual_reference_paths", "reason": "manual_required", "manual_reference_policy": "only_on_manual_required"}
+    required_first_reads = [ref["path"] for ref in WRITING_CONTRACT_REFS]
     if source_read_plan:
-        return {"action": "follow_source_read_plan", "manual_reference_policy": "only_on_manual_required"}
-    return {"action": "read_agent_handoff", "manual_reference_policy": "only_on_manual_required"}
+        return {
+            "action": "read_writing_contract_then_follow_source_read_plan",
+            "manual_reference_policy": "only_on_manual_required",
+            "required_first_reads": required_first_reads,
+            "digest_read_before_source": "paper_digest.md",
+            "then": "follow_source_read_plan",
+        }
+    return {"action": "read_agent_handoff", "manual_reference_policy": "only_on_manual_required", "required_first_reads": required_first_reads}
 
 
 def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], evidence_report: dict[str, Any], note_candidate: dict[str, Any], closeout_args: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2017,6 +2508,17 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
     manual_paths: list[str] = []
     source_refs = dict(brief.get("source_refs") or {})
     source_read_plan = brief.get("source_read_plan") if isinstance(brief.get("source_read_plan"), dict) else None
+    agent_actions = [
+        "Before drafting, read every writing_contract_refs path and paper_digest.md; this is the default quality gate and evidence index.",
+        "Use Default source reads as starting anchors, not caps; keep reading original source spans wherever formulas, table/figure conclusions, limitations, or uncertain claims need more detail.",
+        f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
+        "Run raw-fast note assembly to create protected_anchors.next_raw_path from script-owned metadata, then run closeout with generated closeout_args when available.",
+    ]
+    if source_refs.get("tex_agent_map"):
+        agent_actions.insert(
+            2,
+            "Read paper_map.md, paper_core.md, and paper_objects.md as semantic starting surfaces, not source-reading caps; for figure objects marked visual_inspection required/recommended, use preserved image_path/localized_path with vision rather than relying on caption text alone.",
+        )
     return {
         "ok": True,
         "status": "ready" if not resource_review_required else "manual_required",
@@ -2025,6 +2527,8 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "queue_status": brief.get("queue_status") or {},
         "evidence_cards": brief.get("evidence_cards") or [],
         "source_read_plan": source_read_plan,
+        "writing_contract_refs": [dict(ref) for ref in WRITING_CONTRACT_REFS],
+        "quality_gate": dict(RAW_FAST_QUALITY_GATE),
         "resource_review_required": resource_review_required,
         "manual_reference_policy": manual_reference_policy(visible=resource_review_required),
         "automation_next_action": handoff_automation_next_action(source_read_plan, manual_required=resource_review_required),
@@ -2033,11 +2537,7 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "source_refs": source_refs,
         "closeout_args": closeout_args,
         "closeout_args_path": None,
-        "agent_actions": [
-            "Read this handoff first; use Default source reads and the sanitized scientific digest for body synthesis.",
-            f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
-            "Run raw-fast note assembly to create protected_anchors.next_raw_path from script-owned metadata, then run closeout with generated closeout_args when available.",
-        ],
+        "agent_actions": agent_actions,
         "note_candidate": {"path": "note_candidate.md", "advisory": bool(note_candidate.get("advisory", True))},
         "body_draft": {"path": RAW_BODY_DRAFT_FILE, "contract": "body_only_no_frontmatter"},
         "assemble": {"command_preview_path": None, "report_path": None},
@@ -2078,13 +2578,21 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
         lines.append(f"- reason: {json.dumps(handoff.get('manual_reason'), ensure_ascii=False, sort_keys=True)}")
         for path in handoff.get("manual_reference_paths") or []:
             lines.append(f"- read if needed: `{path}`")
+    lines.append("\n## Writing contract refs")
+    quality_gate = handoff.get("quality_gate") if isinstance(handoff.get("quality_gate"), dict) else RAW_FAST_QUALITY_GATE
+    lines.append(f"- quality gate: {quality_gate.get('summary')}")
+    for raw_ref in handoff.get("writing_contract_refs") or WRITING_CONTRACT_REFS:
+        ref = raw_ref if isinstance(raw_ref, dict) else {}
+        lines.append(f"- read before `{ref.get('read_before')}`: `{ref.get('path')}` — {ref.get('reason')}")
     source_plan = handoff.get("source_read_plan") if isinstance(handoff.get("source_read_plan"), dict) else None
     if source_plan:
         lines.append("\n## Default source reads")
         if source_plan.get("source_kind") == "tex_source":
-            lines.append("Default next action: read the TeX spans below, then use `paper_digest.md` only as a sanitized scientific digest if needed.")
+            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then start from the TeX spans below and continue reading original source as needed for quality.")
         else:
-            lines.append("Default next action: read the Docling PDF spans below, then use `paper_digest.md` only as a sanitized scientific digest if needed.")
+            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then start from the Docling PDF spans below and continue reading original source as needed for quality.")
+        if source_plan.get("reading_strategy"):
+            lines.append(f"- reading_strategy: {source_plan.get('reading_strategy')}")
         for item in source_plan.get("first_reads") or []:
             lines.append(f"- `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
     lines.append("\n## Source refs")
@@ -2185,13 +2693,13 @@ def scan_secrets(workdir: Path) -> dict[str, Any]:
     return {"strict_secret_hits": hits, "placeholder_hits": placeholder_hits}
 
 
-def build_frontmatter(title: str, source: str, kind: str, *, resource_links: dict[str, list[str]] | None = None) -> dict[str, Any]:
+def build_frontmatter(title: str, source: str, kind: str, *, domain: str | None = None, resource_links: dict[str, list[str]] | None = None) -> dict[str, Any]:
     frontmatter: dict[str, Any] = {
         "title": title,
         "created": dt.datetime.now().strftime("%Y-%m-%d"),
         "updated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "type": "raw-note",
-        "domain": "paper",
+        "domain": domain or DEFAULT_RAW_FAST_DOMAIN,
         "source": source,
         "capture_route": f"raw-fast evidence bundle ({kind})",
         "captured": dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%z)"),
@@ -2407,6 +2915,7 @@ def process_pdf(
     resource_health: str = "direct",
     extra_resource_candidates: list[dict[str, Any]] | None = None,
     supplied_page_resources: dict[str, Any] | None = None,
+    max_download_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES,
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     warnings: list[str] = []
@@ -2418,7 +2927,7 @@ def process_pdf(
         write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
         files["supplied_page_resources"] = "supplied_page_resources.json"
     pdf_path = workdir / "paper.pdf"
-    fetch = timings.record("fetch_pdf", fetch_pdf_source_to_file, canonical_source_url, pdf_path, timeout)
+    fetch = timings.record("fetch_pdf", fetch_pdf_source_to_file, canonical_source_url, pdf_path, timeout, max_bytes=max_download_bytes)
     files["pdf"] = "paper.pdf"
     openreview_metadata = fetch.get("openreview") if isinstance(fetch.get("openreview"), dict) else None
     if openreview_metadata:
@@ -2563,6 +3072,7 @@ def process_openreview(
     image_slug: str | None = None,
     state_dir: Path | None = None,
     resource_health: str = "direct",
+    max_download_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES,
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     note_id = openreview_id_from_url(url)
@@ -2588,6 +3098,7 @@ def process_openreview(
         image_slug=image_slug,
         state_dir=state_dir,
         resource_health=resource_health,
+        max_download_bytes=max_download_bytes,
     )
     payload["supplied_url"] = url
     raw_openreview = payload.get("openreview")
@@ -2614,12 +3125,30 @@ def process_arxiv(
     image_slug: str | None = None,
     state_dir: Path | None = None,
     resource_health: str = "direct",
+    max_download_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES,
 ) -> dict[str, Any]:
     timings = timings or TimingRecorder()
     supplied_url = url
     arxiv_id = arxiv_id_from_url(url)
     if not arxiv_id:
-        return process_pdf(url, "direct-pdf", root, workdir, pdf_backend, strict_pdf_backend, probes, timeout, timings, paper_digest=paper_digest, resource_draft=resource_draft, localize_figures=localize_figures, image_slug=image_slug, state_dir=state_dir, resource_health=resource_health)
+        return process_pdf(
+            url,
+            "direct-pdf",
+            root,
+            workdir,
+            pdf_backend,
+            strict_pdf_backend,
+            probes,
+            timeout,
+            timings,
+            paper_digest=paper_digest,
+            resource_draft=resource_draft,
+            localize_figures=localize_figures,
+            image_slug=image_slug,
+            state_dir=state_dir,
+            resource_health=resource_health,
+            max_download_bytes=max_download_bytes,
+        )
     api_url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"id_list": arxiv_id})
     abs_url = f"https://arxiv.org/abs/{arxiv_id}"
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
@@ -2628,7 +3157,10 @@ def process_arxiv(
     abs_page = timings.record("arxiv_abs_page", fetch_text, abs_url, timeout)
     write_text(workdir / "api.xml", api.get("text") or "")
     write_text(workdir / "abs.html", abs_page.get("text") or "")
-    eprint = timings.record("arxiv_eprint_fetch", fetch_url_to_file, eprint_url, workdir / "eprint.tar", timeout)
+    if max_download_bytes == DEFAULT_MAX_DOWNLOAD_BYTES:
+        eprint = timings.record("arxiv_eprint_fetch", fetch_url_to_file, eprint_url, workdir / "eprint.tar", timeout)
+    else:
+        eprint = timings.record("arxiv_eprint_fetch", fetch_url_to_file, eprint_url, workdir / "eprint.tar", timeout, max_bytes=max_download_bytes)
     source_extract = timings.record("arxiv_source_extract", lambda: safe_extract_tar(workdir / "eprint.tar", workdir / "source") if eprint.get("ok") else {"ok": False, "errors": ["eprint fetch failed"], "extracted_count": 0})
     tex_files = [str(p.relative_to(workdir / "source")) for p in (workdir / "source").rglob("*.tex")] if (workdir / "source").exists() else []
     _, tex_text = read_tex_bundle(workdir)
@@ -2644,6 +3176,7 @@ def process_arxiv(
         source_read_plan = build_source_read_plan(workdir, source_kind="tex_source", main_rel=main_tex, fallback_used=False)
         write_json(workdir / "tex_read_plan.json", source_read_plan)
         files["tex_read_plan"] = "tex_read_plan.json"
+        tex_agent_ir = timings.record("tex_agent_ir_sidecars", write_tex_agent_ir_sidecars, workdir, files, main_tex=main_tex)
         sections = extract_tex_section_cards(tex_text)
         write_json(workdir / "section_inventory.json", {"sections": sections})
         write_json(workdir / "figure_table_inventory.json", {"items": tex_figures})
@@ -2651,6 +3184,7 @@ def process_arxiv(
         files["figure_table_inventory"] = "figure_table_inventory.json"
         main_tex_text = read_text(workdir / main_tex, limit=200_000)
         title = arxiv_api_title(workdir) or tex_command_arg(main_tex_text, "title") or tex_command_arg(tex_text, "title") or title_from_text(_plain_tex_prose(main_tex_text))
+        arxiv_categories = arxiv_api_categories(workdir)
         links = {"ok": True, "links": []}
         resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=supplied_resource_candidates)
         write_json(workdir / "resource_probe.json", resource_probe)
@@ -2658,7 +3192,7 @@ def process_arxiv(
         secret_scan = timings.record("secret_scan", scan_secrets, workdir)
         write_json(workdir / "secret_scan.json", secret_scan)
         files["secret_scan"] = "secret_scan.json"
-        fm = timings.record("candidate_frontmatter", build_frontmatter, title, abs_url, "arxiv", resource_links=metadata_resource_links(resource_probe))
+        fm = timings.record("candidate_frontmatter", build_frontmatter, title, abs_url, "arxiv", domain=domain_from_arxiv_categories(arxiv_categories), resource_links=metadata_resource_links(resource_probe))
         write_json(workdir / "candidate_frontmatter.json", fm)
         skeleton = timings.record("note_skeleton", build_note_skeleton, fm)
         write_text(workdir / "note_skeleton.md", skeleton)
@@ -2691,6 +3225,7 @@ def process_arxiv(
             "pdf_backend_effective": "tex_source",
             "fetch": eprint,
             "source_read_plan": source_read_plan,
+            "tex_agent_ir": tex_agent_ir,
             "title_guess": title,
             "files": files,
             "next_raw_path": preflight["next_raw_path"],
@@ -2730,6 +3265,7 @@ def process_arxiv(
         resource_health=resource_health,
         extra_resource_candidates=supplied_resource_candidates,
         supplied_page_resources=supplied_page_resources,
+        max_download_bytes=max_download_bytes,
     )
     payload["supplied_url"] = supplied_url
     payload["arxiv"] = {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection}
@@ -2752,6 +3288,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pdf-backend", choices=["docling", "auto"], default="docling")
     parser.add_argument("--strict-pdf-backend", action="store_true", help="Fail if Docling PDF fallback fails instead of continuing with degraded PDF evidence")
     parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument(
+        "--max-download-bytes",
+        default=None,
+        help=(
+            "Maximum downloaded PDF/source bytes. Accepts raw bytes or KiB/MiB/GiB suffixes; "
+            "default is 2GiB or the first set env var in LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES, RAW_FAST_MAX_DOWNLOAD_BYTES; "
+            "use 0/none/unlimited to disable."
+        ),
+    )
     parser.add_argument("--paper-digest", action="store_true", help="Write paper_digest.json/md and deterministic note block drafts as temp sidecars")
     parser.add_argument("--resource-draft", action="store_true", help="Build an internal resource-link summary for metadata/evidence reports; no resource_boundary_draft files are written")
     parser.add_argument("--localize-figures", action="store_true", help="Render/copy safe source figures into the evidence workdir for temporary inspection; do not embed them in structured raw notes")
@@ -2763,6 +3308,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     timings = TimingRecorder()
     args = parse_args()
+    try:
+        max_download_bytes = configured_max_download_bytes(args.max_download_bytes)
+    except ValueError as exc:
+        print_json({"ok": False, "stage": "preflight", "error": "invalid_max_download_bytes", "message": str(exc), "timings": timings.snapshot()})
+        return 1
     root = args.root.resolve()
     workdir = args.workdir.resolve()
     state_dir = args.state_dir.resolve() if args.state_dir else None
@@ -2776,11 +3326,11 @@ def main() -> int:
     probes = args.probe if args.probe is not None else ["arxiv", "doi"]
     kind = detect_kind(args.url, args.kind)
     if kind == "arxiv":
-        payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
+        payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     elif kind == "openreview":
-        payload = process_openreview(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
+        payload = process_openreview(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     else:
-        payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health)
+        payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     attach_timings(payload, timings)
     write_json(workdir / "evidence_bundle.json", payload)
     print_json(payload)

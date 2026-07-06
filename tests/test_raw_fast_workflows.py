@@ -208,3 +208,76 @@ def test_raw_fast_verifier_explains_visual_evidence_blocker_without_broad_search
     assert "structured_evidence_sections_insufficient" in diagnostics
     assert diagnostics["figure_table_evidence_integrated"]["fix_hint"].startswith("Integrate figure/table")
     assert diagnostics["figure_table_evidence_integrated"]["owner_path"].endswith("raw_fast_note_verify.py")
+
+
+def test_raw_fast_verifier_rejects_chart_inventory_as_visual_evidence(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    raw_rel = "raw/clip/2601/26010111_Chart-Inventory-Paper.md"
+    inventory_style = (
+        "图表证据先给出整体读法：headline Figure 把同一 prompt 下的四类输出并列展示，"
+        "主图用原模型 probe score 作为 x-axis、最终模型 probe score 作为 y-axis，"
+        "右侧堆叠图表按 KL penalty 与 detector penalty 展示 policy type 分布。"
+    )
+    note = _structured_raw_fast_note("Chart Inventory Paper", "https://example.test/chart-inventory.pdf").replace(
+        "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
+        inventory_style,
+    )
+    write(root / raw_rel, note)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RAW_FAST_VERIFIER),
+            "--wiki",
+            str(root),
+            "--raw-file",
+            raw_rel,
+            "--structured-paper",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert "structured_evidence_sections_insufficient" in payload["raw_fast_blockers"]
+    assert "figure_table_inventory_style" in payload["structured_evidence_sections_insufficient"]
+    diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
+    assert diagnostics["figure_table_inventory_style"]["fix_hint"].startswith("Replace chart layout descriptions")
+
+
+def test_raw_fast_verifier_rejects_broad_visual_conclusion_without_key_data(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    raw_rel = "raw/clip/2601/26010112_Broad-Visual-Conclusion-Paper.md"
+    broad_style = (
+        "Figure 1 支撑核心定位：图表证据显示该系统位于复杂但可解释的区域，"
+        "结论是该 substrate 的卖点不是简化单元，而是暴露复杂交互。"
+    )
+    note = _structured_raw_fast_note("Broad Visual Conclusion Paper", "https://example.test/broad-visual.pdf").replace(
+        "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
+        broad_style,
+    )
+    write(root / raw_rel, note)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RAW_FAST_VERIFIER),
+            "--wiki",
+            str(root),
+            "--raw-file",
+            raw_rel,
+            "--structured-paper",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode != 0
+    assert "structured_evidence_sections_insufficient" in payload["raw_fast_blockers"]
+    assert "figure_table_broad_conclusion_without_key_data" in payload["structured_evidence_sections_insufficient"]
+    diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
+    assert diagnostics["figure_table_broad_conclusion_without_key_data"]["fix_hint"].startswith(
+        "Add the figure/table's concrete anchors"
+    )
