@@ -152,6 +152,95 @@ def test_raw_fast_evidence_bundle_recognizes_cross_site_arxiv_routes(url: str, e
     assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "arxiv"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://openreview.net/forum?id=mLhZzo7BIb",
+        "https://openreview.net/pdf?id=mLhZzo7BIb",
+        "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf",
+    ],
+)
+def test_raw_fast_evidence_bundle_recognizes_openreview_routes(url: str) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    assert raw_fast_evidence_bundle.openreview_id_from_url(url) == "mLhZzo7BIb"
+    assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "openreview"
+    assert raw_fast_evidence_bundle.canonical_openreview_pdf_url("mLhZzo7BIb") == "https://openreview.net/pdf?id=mLhZzo7BIb"
+
+
+def test_raw_fast_evidence_bundle_openreview_uses_authenticated_pdf_and_canonical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    root = sample_wiki(tmp_path)
+    workdir = tmp_path / "openreview"
+    supplied_url = "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf"
+    canonical_pdf = "https://openreview.net/pdf?id=mLhZzo7BIb"
+
+    def fail_anonymous_fetch(url: str, dest: Path, timeout: int, max_bytes: int = raw_fast_evidence_bundle.DEFAULT_MAX_DOWNLOAD_BYTES) -> dict:
+        return {"ok": False, "url": url, "dest": str(dest), "error": "HTTPError", "message": "403 Forbidden"}
+
+    def fake_openreview_fetch(note_id: str, dest: Path, timeout: int, max_bytes: int = raw_fast_evidence_bundle.DEFAULT_MAX_DOWNLOAD_BYTES) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"%PDF-1.4\n% fixture openreview pdf\n")
+        return {
+            "ok": True,
+            "url": canonical_pdf,
+            "status": 200,
+            "content_type": "application/pdf",
+            "bytes": dest.stat().st_size,
+            "sha256": raw_fast_evidence_bundle.sha256_file(dest),
+            "dest": str(dest),
+            "openreview": {
+                "id": note_id,
+                "forum_url": "https://openreview.net/forum?id=mLhZzo7BIb",
+                "pdf_url": canonical_pdf,
+                "metadata_ok": True,
+                "auth_used": True,
+                "title": "OpenReview Fixture Paper",
+            },
+        }
+
+    def fake_docling(pdf_path: Path, workdir_arg: Path, strict: bool, timeout: int) -> dict:
+        _write_fake_docling_outputs(
+            workdir_arg,
+            "# OpenReview Fixture Paper\n\nAbstract\nThis fixture confirms authenticated OpenReview PDF retrieval.\n\n## Method\nThe method is a test fixture.",
+        )
+        return {"ok": True, "returncode": 0, "markdown_chars": (workdir_arg / "docling.md").stat().st_size}
+
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fail_anonymous_fetch)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_openreview_pdf_to_file", fake_openreview_fetch)
+    monkeypatch.setattr(raw_fast_evidence_bundle, "run_pdfinfo", lambda pdf, out: {"ok": True, "stdout": "Pages: 1"})
+    monkeypatch.setattr(raw_fast_evidence_bundle, "extract_pdf_links", lambda pdf, out: {"ok": True, "links": []})
+    monkeypatch.setattr(raw_fast_evidence_bundle, "run_docling", fake_docling)
+
+    payload = raw_fast_evidence_bundle.process_openreview(
+        supplied_url,
+        root,
+        workdir,
+        "docling",
+        False,
+        ["none"],
+        30,
+        paper_digest=True,
+        resource_draft=True,
+        resource_health="none",
+    )
+
+    assert payload["ok"] is True
+    assert payload["kind"] == "openreview"
+    assert payload["source_url"] == canonical_pdf
+    assert payload["supplied_url"] == supplied_url
+    assert payload["fetch"]["openreview"]["auth_used"] is True
+    assert payload["openreview"]["id"] == "mLhZzo7BIb"
+    assert payload["files"]["openreview_metadata"] == "openreview_metadata.json"
+    frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
+    assert frontmatter["source"] == canonical_pdf
+    assert frontmatter["title"] == "OpenReview Fixture Paper"
+    assert frontmatter["capture_route"] == "raw-fast evidence bundle (openreview)"
+    assert "source_pdf" not in frontmatter
+    assert "openreview_id" not in frontmatter
+
+
 def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ops import raw_fast_evidence_bundle
 

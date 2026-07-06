@@ -120,6 +120,42 @@ def test_raw_fast_ingest_prepare_print_command_routes_cross_site_arxiv_urls(tmp_
     assert command[command.index("--kind") + 1] == "arxiv"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://openreview.net/forum?id=mLhZzo7BIb",
+        "https://openreview.net/pdf?id=mLhZzo7BIb",
+        "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf",
+    ],
+)
+def test_raw_fast_ingest_prepare_print_command_normalizes_openreview_routes(tmp_path: Path, url: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_ingest_prepare",
+            "--url",
+            url,
+            "--tmp-root",
+            str(tmp_path / "raw-fast-tmp"),
+            "--print-command",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    command = payload["command"]
+    canonical_pdf = "https://openreview.net/pdf?id=mLhZzo7BIb"
+
+    assert payload["source_url"] == canonical_pdf
+    assert payload["supplied_url"] == url
+    assert payload["source_url_normalization"]["normalized"] == (url != canonical_pdf)
+    assert payload["source_url_normalization"]["reason"] == "openreview_canonical_pdf"
+    assert command[command.index("--url") + 1] == canonical_pdf
+    assert command[command.index("--kind") + 1] == "openreview"
+
+
 def test_raw_fast_ingest_prepare_failure_payload_exposes_manual_reference_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     args = raw_fast_ingest_prepare.parse_args(
         [
