@@ -1150,6 +1150,48 @@ def tex_command_arg(text: str, command: str) -> str | None:
     return strip_tex_markup(match.group(1), max_len=500) if match else None
 
 
+def tex_command_arg_candidates(text: str, command: str) -> list[tuple[int, str]]:
+    """Return balanced-brace command arguments with their command offsets."""
+
+    pattern = re.compile(rf"\\{re.escape(command)}\*?(?:\[[^\]]*\])?\{{", re.S)
+    candidates: list[tuple[int, str]] = []
+    for match in pattern.finditer(text or ""):
+        depth = 1
+        idx = match.end()
+        while idx < len(text):
+            char = text[idx]
+            if char == "\\":
+                idx += 2
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append((match.start(), text[match.end() : idx]))
+                    break
+            idx += 1
+    return candidates
+
+
+def _tex_command_inside_definition(text: str, offset: int) -> bool:
+    line_start = text.rfind("\n", 0, offset) + 1
+    prefix = text[line_start:offset]
+    return bool(re.search(r"\\(?:re)?newcommand|\\providecommand|\\DeclareRobustCommand|\\def\b", prefix))
+
+
+def tex_title_from_text(text: str) -> str | None:
+    for offset, raw_arg in tex_command_arg_candidates(text or "", "title"):
+        if _tex_command_inside_definition(text or "", offset):
+            continue
+        title = strip_tex_markup(raw_arg, max_len=300)
+        if placeholder_title(title):
+            continue
+        if 5 <= len(title) <= 300:
+            return title
+    return None
+
+
 def collect_tex_files(workdir: Path) -> list[Path]:
     source = workdir / "source"
     roots = [source] if source.exists() else [workdir]
@@ -1293,13 +1335,17 @@ def build_source_read_plan(workdir: Path, *, source_kind: str, main_rel: str, fa
         first_reads.append({"path": main_rel, "offset": offset, "limit": 220 if len(first_reads) else 180, "reason": reason})
     if not first_reads:
         first_reads.append({"path": main_rel, "offset": 1, "limit": 220, "reason": "source overview"})
+    if source_kind == "tex_source":
+        reading_strategy = "read writing contract and paper_digest.md first; when TeX semantic sidecars are available, read parsed Markdown sidecars before source spans; source_read_plan first_reads are fallback locators only, not a read queue"
+    else:
+        reading_strategy = "read writing contract and paper_digest.md first; source_read_plan first_reads are starting spans for claims that need more detail"
     return {
         "ok": True,
         "source_kind": source_kind,
         "main_tex": main_rel if source_kind == "tex_source" else None,
         "main_path": main_rel,
         "fallback_used": fallback_used,
-        "reading_strategy": "read writing contract and paper_digest.md first; first_reads are starting anchors, not source-reading caps; continue reading original source as needed for quality",
+        "reading_strategy": reading_strategy,
         "first_reads": first_reads[:4],
     }
 
@@ -1702,7 +1748,15 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
 
 
 def render_tex_agent_map_markdown(ir: dict[str, Any], audit: dict[str, Any]) -> str:
-    lines = ["# TeX agent map", "", f"- main_tex: `{ir.get('main_tex')}`", f"- audit_status: {audit.get('status')}", "", "## Source units"]
+    lines = [
+        "# TeX agent map",
+        "",
+        f"- main_tex: `{ir.get('main_tex')}`",
+        f"- audit_status: {audit.get('status')}",
+        "- fallback_policy: Source paths below are locator metadata. Default reading surface: paper_core.md and paper_objects.md. TeX fallback: named parsed-Markdown gap -> exact span.",
+        "",
+        "## Source units",
+    ]
     for unit in ir.get("source_units") or []:
         parent = unit.get("parent") or "root"
         sections = ", ".join(unit.get("section_titles") or []) or "none"
@@ -1715,27 +1769,39 @@ def render_tex_agent_map_markdown(ir: dict[str, Any], audit: dict[str, Any]) -> 
 
 
 def render_tex_agent_core_markdown(ir: dict[str, Any]) -> str:
-    lines = ["# TeX agent core", "", f"- title: {ir.get('title') or 'Untitled'}", ""]
+    lines = [
+        "# TeX agent core",
+        "",
+        f"- title: {ir.get('title') or 'Untitled'}",
+        "- fallback_policy: Parsed Markdown is the default reading surface. `fallback_locator` maps named concrete gaps in this parsed section to exact source spans.",
+        "",
+    ]
     if ir.get("abstract"):
         lines += ["## Abstract", str(ir.get("abstract")), ""]
     lines.append("## Body sections")
     for section in ir.get("sections") or []:
         if section.get("role") != "body":
             continue
-        lines += ["", f"### {section.get('heading')}", f"source_tex: `{section.get('source_tex')}`", "", str(section.get("excerpt") or "")]
+        lines += ["", f"### {section.get('heading')}", f"fallback_locator: source_tex=`{section.get('source_tex')}`", "", str(section.get("excerpt") or "")]
     return "\n".join(lines).rstrip() + "\n"
 
 
 def render_tex_agent_objects_markdown(ir: dict[str, Any]) -> str:
     objects = ir.get("objects") or {}
-    lines = ["# TeX agent objects", "", "## Equations"]
+    lines = [
+        "# TeX agent objects",
+        "",
+        "- fallback_policy: Parsed Markdown objects are the default reading surface. `fallback_locator` maps named formula/table/figure context gaps to exact source spans.",
+        "",
+        "## Equations",
+    ]
     for eq in objects.get("equations") or []:
-        lines.append(f"- {eq.get('label') or 'unlabeled'} source_tex: `{eq.get('source_tex')}` formula: `{eq.get('formula')}`")
+        lines.append(f"- {eq.get('label') or 'unlabeled'} fallback_locator: source_tex=`{eq.get('source_tex')}` formula: `{eq.get('formula')}`")
     if not objects.get("equations"):
         lines.append("- none detected")
     lines.append("\n## Tables")
     for table in objects.get("tables") or []:
-        lines.append(f"- {table.get('label') or 'unlabeled'} source_tex: `{table.get('source_tex')}` parse_status: {table.get('parse_status')} caption: {table.get('caption')}")
+        lines.append(f"- {table.get('label') or 'unlabeled'} fallback_locator: source_tex=`{table.get('source_tex')}` parse_status: {table.get('parse_status')} caption: {table.get('caption')}")
     if not objects.get("tables"):
         lines.append("- none detected")
     lines.append("\n## Figures")
@@ -1743,7 +1809,7 @@ def render_tex_agent_objects_markdown(ir: dict[str, Any]) -> str:
         lines.append(f"- {figure.get('label') or 'unlabeled'}")
         lines.append(f"  - caption: {figure.get('caption')}")
         lines.append(f"  - image_path: `{figure.get('image_path')}`")
-        lines.append(f"  - source_tex: `{figure.get('source_tex')}`")
+        lines.append(f"  - fallback_locator: source_tex=`{figure.get('source_tex')}`")
         localized = figure.get("localized_path") if figure.get("localized_path") is not None else "null"
         lines.append(f"  - localized_path: {localized}")
         lines.append(f"  - visual_inspection: {figure.get('visual_inspection')}")
@@ -2321,6 +2387,28 @@ def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 
     return cards
 
 
+TEX_SEMANTIC_REF_ORDER = [
+    "tex_agent_map",
+    "tex_agent_core",
+    "tex_agent_objects",
+    "tex_agent_audit",
+]
+
+
+def tex_semantic_first_reads(source_refs: dict[str, Any] | None) -> list[str]:
+    refs = source_refs or {}
+    return [str(refs[key]) for key in TEX_SEMANTIC_REF_ORDER if refs.get(key)]
+
+
+def has_tex_semantic_source_refs(source_refs: dict[str, Any] | None) -> bool:
+    refs = source_refs or {}
+    return all(bool(refs.get(key)) for key in ["tex_agent_map", "tex_agent_core", "tex_agent_objects"])
+
+
+def tex_semantic_fallback_policy() -> str:
+    return "Use paper_full.agent.md or source_tex as exact-span fallback after parsed Markdown sidecars expose a concrete gap; name the concrete gap first and open the exact formula/table/figure/limitation/uncertain-claim span"
+
+
 def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | None, digest: dict[str, Any] | None, resource_boundary: dict[str, Any] | None) -> dict[str, Any]:
     files = bundle.get("files") or {}
     duplicate_summary = (preflight or {}).get("duplicate_summary") or {}
@@ -2346,18 +2434,25 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         source_refs["tex_agent_full"] = files.get("tex_agent_full")
     if files.get("tex_agent_audit_markdown"):
         source_refs["tex_agent_audit"] = files.get("tex_agent_audit_markdown")
+    semantic_tex = has_tex_semantic_source_refs(source_refs)
     agent_actions = [
-        "Read the writing contract refs before source spans; they are the quality gate for raw_body_draft.md.",
-        "Read paper_digest.md before opening source spans; use it as an evidence index, then keep reading original source wherever quality needs more detail.",
+        "Read the writing contract refs before source evidence; they are the quality gate for raw_body_draft.md.",
+        "Read paper_digest.md as a scientific evidence index before opening source evidence.",
         f"Write a body-only raw draft at `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata fields.",
         "Run raw-fast note assembly so script-owned metadata is locked before closeout.",
         "Run raw-fast closeout after assembly; do not run native refresh while wiki integration is pending.",
     ]
-    if source_refs.get("tex_agent_map"):
+    if semantic_tex:
         agent_actions.insert(
             2,
-            "Then read paper_map.md, paper_core.md, and paper_objects.md as semantic starting surfaces, not source-reading caps; for figure objects marked visual_inspection required/recommended, use the preserved image_path/localized_path with vision rather than relying on caption text alone.",
+            f"Then read paper_map.md, paper_core.md, and paper_objects.md as the default TeX semantic surfaces; inspect tex_agent_ir_audit.md for coverage warnings; fallback rule: {tex_semantic_fallback_policy()}.",
         )
+        agent_actions.insert(
+            3,
+            "For figure objects marked visual_inspection required/recommended, use the preserved image_path/localized_path with vision rather than relying on caption text alone.",
+        )
+    else:
+        agent_actions.insert(2, "Use source_read_plan spans only for claims that need more detail than paper_digest.md provides.")
     return {
         "ok": True,
         "protected_anchors": {
@@ -2503,10 +2598,21 @@ def manual_reference_policy(*, visible: bool = False) -> dict[str, Any]:
     }
 
 
-def handoff_automation_next_action(source_read_plan: dict[str, Any] | None, *, manual_required: bool) -> dict[str, Any]:
+def handoff_automation_next_action(source_read_plan: dict[str, Any] | None, *, manual_required: bool, source_refs: dict[str, Any] | None = None) -> dict[str, Any]:
     if manual_required:
         return {"action": "read_manual_reference_paths", "reason": "manual_required", "manual_reference_policy": "only_on_manual_required"}
     required_first_reads = [ref["path"] for ref in WRITING_CONTRACT_REFS]
+    if source_read_plan and has_tex_semantic_source_refs(source_refs):
+        return {
+            "action": "read_writing_contract_then_tex_semantic_sidecars",
+            "manual_reference_policy": "only_on_manual_required",
+            "required_first_reads": required_first_reads,
+            "digest_read_before_source": "paper_digest.md",
+            "semantic_first_reads": tex_semantic_first_reads(source_refs),
+            "fallback_source_plan": "source_read_plan",
+            "fallback_policy": tex_semantic_fallback_policy(),
+            "then": "read_tex_semantic_sidecars_then_source_read_plan_if_needed",
+        }
     if source_read_plan:
         return {
             "action": "read_writing_contract_then_follow_source_read_plan",
@@ -2525,17 +2631,23 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
     manual_paths: list[str] = []
     source_refs = dict(brief.get("source_refs") or {})
     source_read_plan = brief.get("source_read_plan") if isinstance(brief.get("source_read_plan"), dict) else None
+    semantic_tex = has_tex_semantic_source_refs(source_refs)
     agent_actions = [
         "Before drafting, read every writing_contract_refs path and paper_digest.md; this is the default quality gate and evidence index.",
-        "Use Default source reads as starting anchors, not caps; keep reading original source spans wherever formulas, table/figure conclusions, limitations, or uncertain claims need more detail.",
         f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
         "Run raw-fast note assembly to create protected_anchors.next_raw_path from script-owned metadata, then run closeout with generated closeout_args when available.",
     ]
-    if source_refs.get("tex_agent_map"):
+    if semantic_tex:
+        agent_actions.insert(
+            1,
+            f"Read paper_map.md, paper_core.md, and paper_objects.md as the default TeX semantic surfaces; inspect tex_agent_ir_audit.md for coverage warnings; fallback rule: {tex_semantic_fallback_policy()}.",
+        )
         agent_actions.insert(
             2,
-            "Read paper_map.md, paper_core.md, and paper_objects.md as semantic starting surfaces, not source-reading caps; for figure objects marked visual_inspection required/recommended, use preserved image_path/localized_path with vision rather than relying on caption text alone.",
+            "For figure objects marked visual_inspection required/recommended, use preserved image_path/localized_path with vision rather than relying on caption text alone.",
         )
+    else:
+        agent_actions.insert(1, "Use source_read_plan spans only for claims that need more detail than paper_digest.md provides.")
     return {
         "ok": True,
         "status": "ready" if not resource_review_required else "manual_required",
@@ -2548,7 +2660,7 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "quality_gate": dict(RAW_FAST_QUALITY_GATE),
         "resource_review_required": resource_review_required,
         "manual_reference_policy": manual_reference_policy(visible=resource_review_required),
-        "automation_next_action": handoff_automation_next_action(source_read_plan, manual_required=resource_review_required),
+        "automation_next_action": handoff_automation_next_action(source_read_plan, manual_required=resource_review_required, source_refs=source_refs),
         "manual_reason": resource.get("manual_reason") if resource_review_required else None,
         "manual_reference_paths": manual_paths,
         "source_refs": source_refs,
@@ -2601,17 +2713,32 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
     for raw_ref in handoff.get("writing_contract_refs") or WRITING_CONTRACT_REFS:
         ref = raw_ref if isinstance(raw_ref, dict) else {}
         lines.append(f"- read before `{ref.get('read_before')}`: `{ref.get('path')}` — {ref.get('reason')}")
+    raw_source_refs = handoff.get("source_refs")
+    source_refs: dict[str, Any] = raw_source_refs if isinstance(raw_source_refs, dict) else {}
+    semantic_tex = has_tex_semantic_source_refs(source_refs)
     source_plan = handoff.get("source_read_plan") if isinstance(handoff.get("source_read_plan"), dict) else None
     if source_plan:
-        lines.append("\n## Default source reads")
-        if source_plan.get("source_kind") == "tex_source":
-            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then start from the TeX spans below and continue reading original source as needed for quality.")
+        if semantic_tex and source_plan.get("source_kind") == "tex_source":
+            lines.append("\n## Default TeX semantic reads")
+            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then read `paper_map.md`, `paper_core.md`, and `paper_objects.md`; inspect `tex_agent_ir_audit.md` for coverage warnings.")
+            lines.append("\n## Fallback TeX source contract")
+            lines.append("- parsed Markdown sidecars are the default reading surface; `source_read_plan` and `source_tex` are locator metadata, not a read queue.")
+            lines.append(f"- {tex_semantic_fallback_policy()} for a specific formula, table/figure conclusion, limitation, or uncertain claim.")
+            if source_refs.get("tex_agent_full"):
+                lines.append(f"- fallback full source view locator: `{source_refs.get('tex_agent_full')}` — resolve the named gap before raw source lookup.")
+            if source_plan.get("first_reads"):
+                lines.append(f"- source_read_plan locator count: {len(source_plan.get('first_reads') or [])}; map broad locators to the exact needed span for the named gap.")
         else:
-            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then start from the Docling PDF spans below and continue reading original source as needed for quality.")
+            lines.append("\n## Default source reads")
+            if source_plan.get("source_kind") == "tex_source":
+                lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then inspect the TeX spans below for claims that need more detail.")
+            else:
+                lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then inspect the Docling PDF spans below for claims that need more detail.")
         if source_plan.get("reading_strategy"):
             lines.append(f"- reading_strategy: {source_plan.get('reading_strategy')}")
-        for item in source_plan.get("first_reads") or []:
-            lines.append(f"- `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
+        if not (semantic_tex and source_plan.get("source_kind") == "tex_source"):
+            for item in source_plan.get("first_reads") or []:
+                lines.append(f"- source span: `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
     lines.append("\n## Source refs")
     for key, value in sorted((handoff.get("source_refs") or {}).items()):
         if value:
@@ -3200,7 +3327,7 @@ def process_arxiv(
         files["section_inventory"] = "section_inventory.json"
         files["figure_table_inventory"] = "figure_table_inventory.json"
         main_tex_text = read_text(workdir / main_tex, limit=200_000)
-        title = arxiv_api_title(workdir) or tex_command_arg(main_tex_text, "title") or tex_command_arg(tex_text, "title") or title_from_text(_plain_tex_prose(main_tex_text))
+        title = arxiv_api_title(workdir) or tex_title_from_text(main_tex_text) or tex_title_from_text(tex_text) or title_from_text(_plain_tex_prose(main_tex_text))
         arxiv_categories = arxiv_api_categories(workdir)
         links = {"ok": True, "links": []}
         resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=supplied_resource_candidates)

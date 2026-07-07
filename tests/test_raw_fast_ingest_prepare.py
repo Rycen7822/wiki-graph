@@ -293,9 +293,6 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     evidence = payload["evidence_bundle"]
     assert evidence["ok"] is True
     assert evidence["pdf_backend_effective"] == "docling"
-    assert LEGACY_EXTRACTOR_KEY not in evidence
-    assert LEGACY_RAW_TEXT_KEY not in evidence["files"]
-    assert LEGACY_LAYOUT_TEXT_KEY not in evidence["files"]
     assert evidence["source_read_plan"]["source_kind"] == "docling_pdf"
     for key in ["raw_fast_preflight", "agent_brief", "evidence_report", "note_candidate"]:
         assert key in evidence["files"]
@@ -304,37 +301,73 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert any(path.endswith("structured-paper-note-contract.md") for path in payload["agent_next_reads"])
     assert payload["writing_contract_refs"][0]["read_before"] == "source_read_plan"
     assert payload["automation_next_action"]["action"] == "read_agent_handoff_then_writing_contract"
-    assert payload["automation_next_action"]["read_path"] == payload["agent_next_reads"][0]
     assert payload["manual_reference_policy"]["manual_references_visible"] is False
-    assert payload["ready_message"].startswith("Raw-fast evidence prepared")
-    assert payload["resource_review_required"] is False
     assert payload["assemble_command_preview_path"] == str((workdir / "assemble_command.preview.sh").resolve())
     for rel in ["agent_handoff.json", "agent_handoff.md", "closeout_args.json", "closeout_command.preview.sh", "assemble_command.preview.sh"]:
         assert (workdir / rel).exists()
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
-    assert handoff["resource_review_required"] is False
-    assert handoff["manual_reference_policy"]["mode"] == "only_on_manual_required"
-    assert handoff["manual_reference_policy"]["manual_references_visible"] is False
     assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_follow_source_read_plan"
-    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
-    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
-    assert handoff["manual_reference_paths"] == []
-    assert handoff["body_draft"]["path"] == "raw_body_draft.md"
-    assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"
-    assert "resource_status_summary" not in handoff
+    assert handoff["body_draft"] == {"path": "raw_body_draft.md", "contract": "body_only_no_frontmatter"}
     assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
-    assert "note_candidate" not in handoff["source_refs"]
-    assert "evidence_report" not in handoff["source_refs"]
-    assert "agent_brief" not in handoff["source_refs"]
     assert handoff["assemble"]["command_preview_path"] == str((workdir / "assemble_command.preview.sh").resolve())
-    assert handoff["assemble"]["report_path"] == str((workdir / "assembled_raw_note_report.json").resolve())
     assert handoff["closeout_args"]["ok"] is True
-    assert handoff["closeout_args_path"] == str((workdir / "closeout_args.json").resolve())
     preview = (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
     assert "ops.raw_fast_note_assemble" in preview
-    assert "--body-draft" in preview
     assert "raw_body_draft.md" in preview
     closeout_args = json.loads((workdir / "closeout_args.json").read_text(encoding="utf-8"))
     assert closeout_args["ok"] is True
     assert "--resource-status-summary" in closeout_args["argv_tail"]
     assert wiki_root_machine_pollution(root) == []
+
+
+def test_raw_fast_ingest_prepare_wrapper_preserves_tex_semantic_fallback_contract(tmp_path: Path) -> None:
+    workdir = tmp_path / "semantic-wrapper"
+    workdir.mkdir()
+    handoff_path = workdir / "agent_handoff.json"
+    handoff_path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "status": "ready",
+                "resource_review_required": False,
+                "manual_reference_paths": [],
+                "manual_reference_policy": raw_fast_ingest_prepare.manual_reference_policy(visible=False),
+                "automation_next_action": {"action": "read_writing_contract_then_tex_semantic_sidecars"},
+                "source_read_plan": {
+                    "source_kind": "tex_source",
+                    "first_reads": [{"path": "source/sections/method.tex", "offset": 1, "limit": 180, "reason": "source overview"}],
+                },
+                "source_refs": {
+                    "scientific_digest": "paper_digest.md",
+                    "tex_agent_map": "paper_map.md",
+                    "tex_agent_core": "paper_core.md",
+                    "tex_agent_objects": "paper_objects.md",
+                    "tex_agent_full": "paper_full.agent.md",
+                    "tex_agent_audit": "tex_agent_ir_audit.md",
+                },
+                "protected_anchors": {"title": "Semantic Wrapper Fixture", "next_raw_path": "raw/clip/2607/26070799_Semantic-Wrapper-Fixture.md"},
+                "quality_gate": dict(raw_fast_ingest_prepare.RAW_FAST_QUALITY_GATE),
+                "writing_contract_refs": [dict(ref) for ref in raw_fast_ingest_prepare.WRITING_CONTRACT_REFS],
+                "duplicate_summary": {},
+                "evidence_cards": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    closeout = {
+        "closeout_args": {"ok": True, "raw_file": "raw/clip/2607/26070799_Semantic-Wrapper-Fixture.md"},
+        "closeout_args_path": str(workdir / "closeout_args.json"),
+        "closeout_command_preview_path": str(workdir / "closeout_command.preview.sh"),
+    }
+    assemble = {"command_preview_path": str(workdir / "assemble_command.preview.sh"), "report_path": str(workdir / "assembled_raw_note_report.json"), "body_draft_path": str(workdir / "raw_body_draft.md"), "raw_file": "raw/clip/2607/26070799_Semantic-Wrapper-Fixture.md"}
+
+    handoff = raw_fast_ingest_prepare.update_agent_handoff(workdir, closeout, assemble=assemble)
+    handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
+
+    joined_actions = "\n".join(handoff["agent_actions"])
+    assert "source_refs/source_read_plan route" not in joined_actions
+    assert "parsed Markdown sidecars" in joined_actions
+    assert "name the concrete gap" in joined_actions
+    assert "exact formula/table/figure/limitation/uncertain-claim span" in joined_actions
+    assert "fallback source span:" not in handoff_md

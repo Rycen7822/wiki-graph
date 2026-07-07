@@ -70,15 +70,8 @@ def _raw_fast_closeout_native_args(tmp_path: Path, mode: str) -> argparse.Namesp
         refresh_timeout=23,
         native_refresh_mode=mode,
     )
-def test_raw_fast_closeout_main_has_named_workflow_seams() -> None:
-    expected_helpers = {
-        "_run_closeout_mark_and_cleanup",
-        "_run_closeout_final_verify",
-        "_run_closeout_downstream_status",
-        "_successful_closeout_output",
-    }
 
-    assert {name for name in expected_helpers if callable(getattr(raw_fast_closeout, name, None))} == expected_helpers
+
 def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"

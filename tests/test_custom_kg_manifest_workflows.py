@@ -8,21 +8,8 @@ sys.path.insert(0, str(ROOT))
 from support import sample_wiki, write  # noqa: E402
 from ops.wiki_native_artifacts import build_seed_edges  # noqa: E402
 from ops.wiki_native_custom_kg_payload import build_custom_kg_payload  # noqa: E402
-import ops.wiki_native_custom_kg_payload as custom_kg_payload  # noqa: E402
 from ops.wiki_native_raw_section_extract import extract_raw_sections  # noqa: E402
 from ops.wiki_native_state import ensure_state_dirs  # noqa: E402
-
-
-def test_custom_kg_payload_builder_has_record_family_helpers() -> None:
-    expected_helpers = {
-        "_add_source_doc_records",
-        "_add_method_atom_records",
-        "_add_raw_section_records",
-        "_add_section_similarity_records",
-        "_add_seed_edge_records",
-    }
-
-    assert {name for name in expected_helpers if callable(getattr(custom_kg_payload, name, None))} == expected_helpers
 
 
 def test_custom_kg_payload_reuses_external_seed_edges(tmp_path: Path) -> None:

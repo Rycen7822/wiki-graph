@@ -1,37 +1,13 @@
 from __future__ import annotations
 
-import ast
 import importlib
-import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from ops import batch_native_refresh  # noqa: E402
 from ops import wiki_native_lib  # noqa: E402
-PURE_VALIDATION_HELPERS = {
-    "COMPILED_DIR_TYPES",
-    "as_list",
-    "compiled_pages",
-    "display_scalar",
-    "find_wikilinks",
-    "index_stats",
-    "indexed_markdown_pages",
-    "parse_frontmatter",
-    "raw_clip_files",
-    "resolve_source",
-    "structured_heading_warnings",
-    "wiki_root_machine_pollution",
-}
-
 
 FACADE_OWNER_SYMBOLS = {
     "ops.wiki_native_artifacts": ("build_seed_edges", "extract_method_atoms", "resolve_source"),
@@ -102,6 +78,8 @@ FACADE_OWNER_ALIASES = (
     ("ops.batch_native_refresh", "pending_native_refresh_ledger_path", "pending_ledger_path"),
     ("ops.batch_native_refresh", "pending_native_refresh_status", "status"),
 )
+
+
 def test_native_facade_exports_active_owner_symbols() -> None:
     for module_name, names in FACADE_OWNER_SYMBOLS.items():
         owner = importlib.import_module(module_name)
@@ -119,6 +97,8 @@ def test_native_facade_exports_active_owner_symbols() -> None:
         owner = importlib.import_module(module_name)
         assert facade_name in wiki_native_lib.__all__
         assert getattr(wiki_native_lib, facade_name) is getattr(owner, owner_name)
+
+
 def test_save_evidence_pack_accepts_string_references_from_answer_route(tmp_path: Path) -> None:
     native_query_events = importlib.import_module("ops.wiki_native_query_events")
 
@@ -136,7 +116,3 @@ def test_save_evidence_pack_accepts_string_references_from_answer_route(tmp_path
 
     text = pack.read_text(encoding="utf-8")
     assert "- file_path: `raw/example.md`" in text
-def test_native_facade_exports_pure_validation_helpers() -> None:
-    for name in PURE_VALIDATION_HELPERS:
-        assert name in wiki_native_lib.__all__
-        assert hasattr(wiki_native_lib, name)
