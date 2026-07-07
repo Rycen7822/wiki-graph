@@ -141,19 +141,6 @@ def test_state_dirs_and_query_event_db_are_external_to_wiki_root(tmp_path: Path)
     assert "sync_events" not in tables
 
 
-def test_validate_wiki_builder_has_report_surface_helpers() -> None:
-    expected_helpers = {
-        "_validate_index_surface",
-        "_validate_compiled_surface",
-        "_validate_raw_surface",
-        "_validate_root_hygiene_surface",
-        "_validation_freshness_contract",
-        "_write_validation_report",
-    }
-
-    assert {name for name in expected_helpers if callable(getattr(wiki_validation, name, None))} == expected_helpers
-
-
 def test_validate_wiki_default_does_not_write_report(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"

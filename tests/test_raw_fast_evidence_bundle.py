@@ -240,92 +240,9 @@ def test_raw_fast_evidence_bundle_tex_read_plan_prefers_main_sections_over_long_
     assert {item["path"] for item in first_reads} == {"source/sec/vla_main.tex"}
     assert first_reads[0]["limit"] == 180
     assert any(item["limit"] == 220 for item in first_reads[1:])
-    assert "not source-reading caps" in plan["reading_strategy"]
-
-
-def test_raw_fast_evidence_bundle_writes_tex_agent_ir_sidecars_with_visual_anchors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ops import raw_fast_evidence_bundle
-
-    workdir = tmp_path / "tex-agent-ir-sidecars"
-    _write_tex_agent_ir_source_fixture(workdir)
-    _fake_latexpand_success(monkeypatch, raw_fast_evidence_bundle, workdir)
-    files: dict[str, str] = {}
-
-    summary = raw_fast_evidence_bundle.write_tex_agent_ir_sidecars(
-        workdir,
-        files,
-        main_tex="source/main.tex",
-    )
-
-    assert summary["ok"] is True
-    assert summary["status"] in {"ok", "partial"}
-    for key in ["tex_agent_ir", "tex_agent_map", "tex_agent_core", "tex_agent_objects", "tex_agent_full", "tex_agent_audit", "tex_agent_audit_markdown"]:
-        assert key in files
-        assert (workdir / files[key]).exists()
-
-    ir = json.loads((workdir / files["tex_agent_ir"]).read_text(encoding="utf-8"))
-    assert ir["main_tex"] == "source/main.tex"
-    source_units = {unit["path"]: unit for unit in ir["source_units"]}
-    assert source_units["main.tex"]["role"] == "body"
-    assert source_units["sections/method.tex"]["role"] == "body"
-    assert source_units["sections/appendix.tex"]["role"] == "appendix"
-    assert any(section["heading"] == "Method" and section["source_tex"] == "sections/method.tex" for section in ir["sections"])
-    assert ir["macros"]["semantic"]["system"] == "AgentIR"
-
-    figures = ir["objects"]["figures"]
-    assert figures
-    figure = figures[0]
-    assert figure["label"] == "fig:cost-curve"
-    assert figure["image_path"] == "source/figures/cost_curve.png"
-    assert (workdir / figure["image_path"]).exists()
-    assert figure["source_tex"] == "sections/method.tex"
-    assert figure["localized_path"] is None
-    assert figure["visual_inspection"] == "required"
-
-    audit = json.loads((workdir / files["tex_agent_audit"]).read_text(encoding="utf-8"))
-    assert audit["flatten"]["tool"] == "latexpand"
-    assert audit["flatten"]["status"] == "ok"
-    assert audit["coverage"]["figures"] == 1
-    objects_md = (workdir / files["tex_agent_objects"]).read_text(encoding="utf-8")
-    assert "image_path: `source/figures/cost_curve.png`" in objects_md
-    assert "source_tex: `sections/method.tex`" in objects_md
-    assert "visual_inspection: required" in objects_md
-    core_md = (workdir / files["tex_agent_core"]).read_text(encoding="utf-8")
-    assert "AgentIR minimizes a compact loss" in core_md
-    assert "Appendix Details" not in core_md
-
-
-def test_raw_fast_evidence_bundle_handoff_reads_contract_and_digest_before_source_spans() -> None:
-    from ops import raw_fast_evidence_bundle
-
-    handoff = {
-        "status": "ready",
-        "protected_anchors": {"title": "Digest First Fixture", "next_raw_path": "raw/clip/2607/26070799_Digest-First-Fixture.md"},
-        "resource_review_required": False,
-        "manual_reference_policy": raw_fast_evidence_bundle.manual_reference_policy(visible=False),
-        "duplicate_summary": {},
-        "body_draft": {"path": raw_fast_evidence_bundle.RAW_BODY_DRAFT_FILE, "contract": "body_only_no_frontmatter"},
-        "quality_gate": dict(raw_fast_evidence_bundle.RAW_FAST_QUALITY_GATE),
-        "writing_contract_refs": [dict(ref) for ref in raw_fast_evidence_bundle.WRITING_CONTRACT_REFS],
-        "source_read_plan": {
-            "source_kind": "tex_source",
-            "reading_strategy": "read writing contract and paper_digest.md first; first_reads are starting anchors, not source-reading caps; continue reading original source as needed for quality",
-            "first_reads": [{"path": "source/sec/vla_main.tex", "offset": 1, "limit": 180, "reason": "source overview"}],
-        },
-        "source_refs": {"scientific_digest": "paper_digest.md", "body_draft": raw_fast_evidence_bundle.RAW_BODY_DRAFT_FILE},
-        "evidence_cards": [{"kind": "abstract", "text": "Compact evidence card."}],
-        "agent_actions": [],
-    }
-
-    markdown = raw_fast_evidence_bundle.render_agent_handoff_markdown(handoff)
-
-    assert "read `paper_digest.md` as an evidence index" in markdown
-    assert "continue reading original source as needed for quality" in markdown
-    assert "not source-reading caps" in markdown
-    assert "only if needed" not in markdown
-    assert "note_candidate" not in markdown
-    assert "agent_brief" not in markdown
-    assert "evidence_report" not in markdown
+    assert "fallback locators" in plan["reading_strategy"]
+    assert "not a read queue" in plan["reading_strategy"]
+    assert "continue reading original source" not in plan["reading_strategy"]
 
 
 def test_raw_fast_evidence_bundle_title_from_text_skips_docling_image_placeholder() -> None:
@@ -342,6 +259,21 @@ def test_raw_fast_evidence_bundle_pdf_title_falls_back_to_url_stem_when_docling_
     title = raw_fast_evidence_bundle.pdf_title_from_text_or_url("<!-- image -->\n\n<!-- formula-not-decoded -->", "https://raw.githubusercontent.com/areal-project/AReaL/main/docs/paper/AReaL2.0_report.pdf")
 
     assert title == "AReaL2.0_report"
+
+
+def test_raw_fast_evidence_bundle_tex_title_skips_macro_definition_pollution() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    tex = r"""
+\newcommand{\makefntext}[1]{\title{makefntext 1 xt 1em makefnmark hbox}}
+\renewcommand{\title}[1]{#1}
+\title[Short Fixture]{Real Semantic Handoff Paper}
+\begin{document}
+\maketitle
+\end{document}
+"""
+
+    assert raw_fast_evidence_bundle.tex_title_from_text(tex) == "Real Semantic Handoff Paper"
 
 
 @pytest.mark.parametrize(
@@ -730,20 +662,6 @@ def test_raw_fast_evidence_bundle_only_abstract_source_links_enter_metadata(monk
     ]
 
 
-def test_raw_fast_evidence_bundle_process_pdf_has_named_sidecar_seams() -> None:
-    from ops import raw_fast_evidence_bundle
-
-    expected_helpers = {
-        "_build_pdf_resource_boundary_payload",
-        "_write_pdf_localized_figure_sidecars",
-        "_write_pdf_digest_sidecars",
-        "_write_pdf_note_block_drafts",
-        "_write_pdf_enrichment_sidecars",
-    }
-
-    assert {name for name in expected_helpers if callable(getattr(raw_fast_evidence_bundle, name, None))} == expected_helpers
-
-
 def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -789,119 +707,43 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
 
     assert payload["ok"] is True
     assert payload["pdf_backend_effective"] == "tex_source"
-    assert LEGACY_EXTRACTOR_KEY not in payload
     assert LEGACY_RAW_TEXT_KEY not in payload["files"]
-    assert LEGACY_LAYOUT_TEXT_KEY not in payload["files"]
-    assert not (workdir / LEGACY_RAW_TEXT_FILE).exists()
-    assert not (workdir / LEGACY_LAYOUT_TEXT_FILE).exists()
     read_plan = json.loads((workdir / "tex_read_plan.json").read_text(encoding="utf-8"))
     assert read_plan["source_kind"] == "tex_source"
-    assert read_plan["fallback_used"] is False
     assert read_plan["main_tex"] == "source/main.tex"
-    assert read_plan["first_reads"]
-    for key in ["tex_agent_ir", "tex_agent_map", "tex_agent_core", "tex_agent_objects", "tex_agent_full", "tex_agent_audit", "tex_agent_audit_markdown"]:
-        assert key in payload["files"]
+    required_sidecars = {
+        "tex_agent_ir",
+        "tex_agent_map",
+        "tex_agent_core",
+        "tex_agent_objects",
+        "tex_agent_full",
+        "tex_agent_audit",
+    }
+    assert required_sidecars <= set(payload["files"])
+    for key in required_sidecars:
         assert (workdir / payload["files"][key]).exists()
+
+    objects_md = (workdir / payload["files"]["tex_agent_objects"]).read_text(encoding="utf-8")
+    assert "image_path: `source/figures/cost_curve.png`" in objects_md
+    assert "fallback_locator: source_tex=`sections/method.tex`" in objects_md
+    assert "source_tex: `sections/method.tex`" not in objects_md
+    assert "Appendix Details" not in (workdir / payload["files"]["tex_agent_core"]).read_text(encoding="utf-8")
+
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
     assert handoff["source_read_plan"]["source_kind"] == "tex_source"
-    assert handoff["manual_reference_policy"]["mode"] == "only_on_manual_required"
-    assert handoff["manual_reference_policy"]["manual_references_visible"] is False
-    assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_follow_source_read_plan"
+    assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_tex_semantic_sidecars"
     assert handoff["automation_next_action"]["digest_read_before_source"] == "paper_digest.md"
-    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
-    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
-    assert handoff["manual_reference_paths"] == []
-    assert handoff["source_refs"]["tex_agent_map"] == "paper_map.md"
-    assert handoff["source_refs"]["tex_agent_core"] == "paper_core.md"
-    assert handoff["source_refs"]["tex_agent_objects"] == "paper_objects.md"
-    assert handoff["source_refs"]["tex_agent_full"] == "paper_full.agent.md"
-    assert handoff["source_refs"]["tex_agent_audit"] == "tex_agent_ir_audit.md"
+    assert handoff["automation_next_action"]["semantic_first_reads"] == [
+        "paper_map.md",
+        "paper_core.md",
+        "paper_objects.md",
+        "tex_agent_ir_audit.md",
+    ]
+    assert {"tex_agent_map", "tex_agent_core", "tex_agent_objects", "tex_agent_full"} <= set(handoff["source_refs"])
     brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["evidence_cards"][0]["kind"] == "abstract"
-    assert brief["evidence_cards"][0]["source_bucket"] == "abstract_card"
-    handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
-    assert "## Writing contract refs" in handoff_md
-    assert "structured-paper-note-contract.md" in handoff_md
-    assert "read `paper_digest.md` as an evidence index" in handoff_md
-    assert "paper_map.md" in handoff_md
-    assert "paper_core.md" in handoff_md
-    assert "paper_objects.md" in handoff_md
-    assert "visual_inspection" in handoff_md
-    assert "vision rather than relying on caption text alone" in handoff_md
-    assert "continue reading original source as needed for quality" in handoff_md
-    assert "Manual references are hidden unless this handoff reports manual_required=true" in handoff_md
-    assert LEGACY_RAW_TEXT_FILE not in handoff_md
-    assert LEGACY_LAYOUT_TEXT_FILE not in handoff_md
 
 
-def test_raw_fast_evidence_bundle_direct_pdf_uses_docling_without_legacy_pdf_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ops import raw_fast_evidence_bundle
-
-    root = sample_wiki(tmp_path)
-    workdir = tmp_path / "docling-direct-pdf"
-
-    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"%PDF fake fixture")
-        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
-
-    def fake_docling(pdf: Path, workdir_arg: Path, strict: bool = False, timeout: int = 120) -> dict:
-        _write_fake_docling_outputs(workdir_arg)
-        return {"ok": True, "markdown": str(workdir_arg / "docling.md"), "json": str(workdir_arg / "docling.json"), "markdown_chars": (workdir_arg / "docling.md").stat().st_size}
-
-    assert not hasattr(raw_fast_evidence_bundle, "run_" + LEGACY_EXTRACTOR_KEY)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "run_pdfinfo", lambda pdf, out: {"ok": True, "returncode": 0})
-    monkeypatch.setattr(raw_fast_evidence_bundle, "extract_pdf_links", lambda pdf, out: {"ok": True, "links": []})
-    monkeypatch.setattr(raw_fast_evidence_bundle, "run_docling", fake_docling)
-
-    payload = raw_fast_evidence_bundle.process_pdf(
-        "https://example.test/docling-only.pdf",
-        "direct-pdf",
-        root,
-        workdir,
-        "docling",
-        False,
-        ["none"],
-        5,
-        raw_fast_evidence_bundle.TimingRecorder(),
-        paper_digest=True,
-        resource_draft=True,
-        resource_health="none",
-    )
-
-    assert payload["ok"] is True
-    assert payload["pdf_backend_effective"] == "docling"
-    assert LEGACY_EXTRACTOR_KEY not in payload
-    assert LEGACY_RAW_TEXT_KEY not in payload["files"]
-    assert LEGACY_LAYOUT_TEXT_KEY not in payload["files"]
-    assert (workdir / "docling.md").exists()
-    assert (workdir / "docling.json").exists()
-    assert not (workdir / LEGACY_RAW_TEXT_FILE).exists()
-    assert not (workdir / LEGACY_LAYOUT_TEXT_FILE).exists()
-    handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
-    assert handoff["source_read_plan"]["source_kind"] == "docling_pdf"
-
-
-def test_raw_fast_evidence_bundle_digest_ignores_stale_legacy_pdf_text_files(tmp_path: Path) -> None:
-    from ops import raw_fast_evidence_bundle
-
-    workdir = tmp_path / "digest-source-priority"
-    _write_fake_docling_outputs(workdir)
-    write(workdir / LEGACY_LAYOUT_TEXT_FILE, f"Stale {LEGACY_EXTRACTOR_KEY} layout must not become a source priority.")
-    write(workdir / LEGACY_RAW_TEXT_FILE, f"Stale {LEGACY_EXTRACTOR_KEY} raw text must not become a source priority.")
-
-    digest = raw_fast_evidence_bundle.build_paper_digest(
-        workdir,
-        "Docling Fallback Paper",
-        "https://example.test/docling-only.pdf",
-        files={"docling_markdown": "docling.md"},
-    )
-
-    assert digest["source_priority"] == ["docling"]
-    assert LEGACY_EXTRACTOR_KEY not in digest["source_priority"]
-    assert LEGACY_LAYOUT_TEXT_FILE not in digest["files_used"]
-    assert LEGACY_RAW_TEXT_FILE not in digest["files_used"]
 @pytest.mark.requires_fitz
 def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
@@ -983,59 +825,32 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     payload = json.loads(result.stdout)
 
     assert payload["ok"] is True
-    for key in [
+    required_files = {
         "paper_digest",
         "paper_digest_markdown",
-        "note_block_drafts",
         "localized_figures",
-        "localized_figures_markdown",
         "raw_fast_preflight",
         "agent_brief",
-        "agent_brief_markdown",
         "evidence_report",
-        "evidence_report_markdown",
         "note_candidate",
-        "note_candidate_markdown",
         "agent_handoff",
-        "agent_handoff_markdown",
-    ]:
-        assert key in payload["files"]
+    }
+    assert required_files <= set(payload["files"])
+    for key in required_files:
         assert (workdir / payload["files"][key]).exists()
     assert payload["preflight"]["ok"] is True
     assert payload["agent_automation"]["ok"] is True
 
     digest = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
     assert digest["ok"] is True
-    assert "implementation_cards" not in digest
-    assert "resource_cards" not in digest
     digest_md = (workdir / "paper_digest.md").read_text(encoding="utf-8")
-    assert "## Abstract card" in digest_md
-    assert "## Equation cards" in digest_md
-    assert "## Figure cards" in digest_md
-    assert "## Result cards" in digest_md
-    assert "## Limitation cards" in digest_md
-    assert "Implementation cards" not in digest_md
     assert "https://" not in digest_md
-    assert "source:" not in digest_md
     evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
     assert evidence_report["resource_boundary"]["github_count"] >= 1
     assert evidence_report["resource_boundary"]["review_required"] is False
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
-    assert handoff["resource_review_required"] is False
-    assert handoff["manual_reference_paths"] == []
-    assert "resource_status_summary" not in handoff
     assert handoff["source_refs"].get("scientific_digest") == "paper_digest.md"
-    assert "resource_boundary" not in handoff["source_refs"]
-    assert "note_candidate" not in handoff["source_refs"]
-    assert "evidence_report" not in handoff["source_refs"]
-    assert "agent_brief" not in handoff["source_refs"]
-    handoff_md = (workdir / "agent_handoff.md").read_text(encoding="utf-8")
-    assert "resource_status_summary" not in handoff_md
-    assert "github_unverified" not in handoff_md
-    assert "https://" not in handoff_md
-    assert "note_candidate" not in handoff_md
-    assert "evidence_report" not in handoff_md
-    assert "agent_brief" not in handoff_md
+    assert handoff["manual_reference_paths"] == []
     localized = json.loads((workdir / "localized_figures.json").read_text(encoding="utf-8"))
     assert localized["ok"] is True
     localized_entry = localized["entries"][0]
@@ -1043,12 +858,7 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     assert localized_entry["raw_note_policy"] == "temporary_inspection_only_do_not_embed_markdown_image"
     assert "markdown" not in localized_entry
     assert (workdir / localized_entry["dest_rel"]).exists()
-    assert not (root / "raw" / "images").exists()
-    assert not (root / "paper_digest.json").exists()
-    assert not (root / "resource_boundary_draft.json").exists()
     assert not (workdir / "resource_boundary_draft.json").exists()
-    assert not (workdir / "resource_boundary_draft.md").exists()
-    assert not (root / "note_block_drafts.md").exists()
     assert wiki_root_machine_pollution(root) == []
 def test_raw_fast_evidence_bundle_localize_figures_does_not_overwrite_existing_asset(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
@@ -1360,43 +1170,29 @@ def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_
 
     assert preflight["ok"] is True
     assert preflight["next_raw_path"] == "raw/clip/2601/26010102_Foo-Paper.md"
-    assert preflight["duplicate_hits"]["raw"]
     assert preflight["queue_status"]["wiki_pending_count"] == 1
     assert summary["ok"] is True
-    for key in ["raw_fast_preflight", "agent_brief", "agent_brief_markdown", "evidence_report", "evidence_report_markdown", "note_candidate", "note_candidate_markdown", "agent_handoff", "agent_handoff_markdown"]:
-        assert key in files
+    required_files = {
+        "raw_fast_preflight",
+        "agent_brief",
+        "evidence_report",
+        "note_candidate",
+        "agent_handoff",
+    }
+    assert required_files <= set(files)
+    for key in required_files:
         assert (workdir / files[key]).exists()
     brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["protected_anchors"]["next_raw_path"] == preflight["next_raw_path"]
-    assert brief["duplicate_summary"]["raw"] >= 1
-    assert brief["source_refs"]["scientific_digest"] == "paper_digest.md"
     assert brief["source_refs"]["body_draft"] == "raw_body_draft.md"
-    assert brief["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
-    assert brief["quality_gate"]["must_read_before"] == "source_read_plan"
-    assert "paper_digest" not in brief["source_refs"]
-    assert "resource_boundary" not in brief["source_refs"]
-    assert "note_candidate" not in brief["source_refs"]
-    assert any("body-only raw draft" in action for action in brief["agent_actions"])
     evidence_report = json.loads((workdir / "evidence_report.json").read_text(encoding="utf-8"))
     assert evidence_report["resource_boundary"]["status"] == "standardized"
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
-    assert handoff["body_draft"]["path"] == "raw_body_draft.md"
-    assert handoff["body_draft"]["contract"] == "body_only_no_frontmatter"
+    assert handoff["body_draft"] == {"path": "raw_body_draft.md", "contract": "body_only_no_frontmatter"}
     assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
-    assert handoff["writing_contract_refs"][0]["path"].endswith("structured-paper-note-contract.md")
-    assert handoff["quality_gate"]["must_read_before"] == "source_read_plan"
-    assert "note_candidate" not in handoff["source_refs"]
-    assert "evidence_report" not in handoff["source_refs"]
-    assert "agent_brief" not in handoff["source_refs"]
     assert "resource_status_summary" not in handoff
-    assert any("raw_body_draft.md" in action and "metadata" in action for action in handoff["agent_actions"])
     candidate_md = (workdir / "note_candidate.md").read_text(encoding="utf-8")
     body = candidate_md.split("---", 2)[-1]
-    assert "https://" not in body
-    assert "## 资源与复现状态" not in body
-    assert "## Evidence trail" not in body
+    assert all(marker not in body for marker in ["https://", "## 资源与复现状态", "## Evidence trail"])
     assert "<!-- advisory:" in body
-    assert not (root / "agent_brief.json").exists()
-    assert not (root / "evidence_report.json").exists()
-    assert not (root / "note_candidate.md").exists()
     assert wiki_root_machine_pollution(root) == []

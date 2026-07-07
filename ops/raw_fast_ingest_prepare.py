@@ -19,7 +19,20 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from ops.raw_fast_evidence_bundle import ASSEMBLED_RAW_NOTE_REPORT_FILE, RAW_BODY_DRAFT_FILE, RAW_FAST_QUALITY_GATE, WRITING_CONTRACT_REFS, canonical_openreview_pdf_url, detect_kind, manual_reference_policy, openreview_id_from_url, render_agent_handoff_markdown, slugify
+from ops.raw_fast_evidence_bundle import (
+    ASSEMBLED_RAW_NOTE_REPORT_FILE,
+    RAW_BODY_DRAFT_FILE,
+    RAW_FAST_QUALITY_GATE,
+    WRITING_CONTRACT_REFS,
+    canonical_openreview_pdf_url,
+    detect_kind,
+    has_tex_semantic_source_refs,
+    manual_reference_policy,
+    openreview_id_from_url,
+    render_agent_handoff_markdown,
+    slugify,
+    tex_semantic_fallback_policy,
+)
 from ops.raw_fast_closeout import derive_closeout_args_from_bundle
 
 PROD_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
@@ -297,8 +310,12 @@ def update_agent_handoff(workdir: Path, closeout: dict[str, Any], assemble: dict
             "body_draft_path": assemble["body_draft_path"],
             "raw_file": assemble.get("raw_file"),
         }
+    if has_tex_semantic_source_refs(source_refs):
+        first_action = "Read this handoff first; read paper_digest.md, then paper_map.md, paper_core.md, paper_objects.md, and tex_agent_ir_audit.md before source evidence; source_read_plan/source_tex are fallback locators only. Fallback rule: " + tex_semantic_fallback_policy() + "."
+    else:
+        first_action = "Read this handoff first; read paper_digest.md, then use source_read_plan spans only for named claims that need more detail than the parsed evidence provides."
     handoff["agent_actions"] = [
-        "Read this handoff first; use Default source reads and the sanitized scientific digest for body synthesis.",
+        first_action,
         f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
         "Run assemble_command.preview.sh to create the canonical raw note from script-owned metadata, then run closeout_command.preview.sh.",
     ]
@@ -401,7 +418,7 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
     resource_review_required = bool(handoff.get("resource_review_required")) or handoff.get("status") == "manual_required"
     output.update(
         {
-            "ready_message": "Raw-fast evidence prepared; read agent_handoff.md first, then the returned writing_contract_refs before source reads; do not run manual resource discovery unless the handoff says manual_required.",
+            "ready_message": "Raw-fast evidence prepared; read agent_handoff.md first, then writing_contract_refs and the generated semantic source guidance. For TeX semantic handoffs, source_read_plan/source_tex are fallback locators only; do not run manual resource discovery unless the handoff says manual_required.",
             "resource_review_required": resource_review_required,
             "closeout_args_path": closeout["closeout_args_path"],
             "closeout_command_preview_path": closeout["closeout_command_preview_path"],

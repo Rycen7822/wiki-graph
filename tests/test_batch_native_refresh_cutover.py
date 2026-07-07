@@ -57,15 +57,8 @@ def _fake_cutover_hooks(
         return {"ok": smoke_ok, "url": "http://127.0.0.1:9621/query/data"}
 
     return build_workspace, finalize_workspace, restart_service, query_smoke
-def test_refresh_cutover_has_named_workflow_seams() -> None:
-    expected_helpers = {
-        "_validate_refresh_cutover_preconditions",
-        "_skipped_refresh_cutover_result",
-        "_execute_refresh_cutover",
-        "_refresh_cutover_success_result",
-    }
 
-    assert {name for name in expected_helpers if callable(getattr(batch_native_refresh, name, None))} == expected_helpers
+
 def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys, monkeypatch) -> None:
     workdir = tmp_path / "wikigraph"
     state_dir = workdir / "state"

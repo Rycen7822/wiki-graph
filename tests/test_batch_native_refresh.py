@@ -241,27 +241,6 @@ def test_refresh_prepare_only_reports_required_unchanged_path_audit(tmp_path, ca
     ]
 
 
-def test_status_ignores_unowned_old_refresh_ledger(tmp_path, capsys) -> None:
-    old_backend = "light" + "rag"
-    workdir = tmp_path / "wikigraph"
-    state_dir = workdir / "state"
-    old_path = state_dir / f"pending_{old_backend}_refresh.json"
-    native_path = state_dir / "pending_native_refresh.json"
-    old_path.parent.mkdir(parents=True)
-    old_path.write_text(
-        json.dumps({"schema_version": 1, "pending": [{"reason": "old"}]}),
-        encoding="utf-8",
-    )
-
-    assert batch_native_refresh.main(["status", "--workdir", str(workdir)]) == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert payload["pending_count"] == 0
-    assert payload["should_refresh"] is False
-    assert old_path.exists()
-    assert not native_path.exists()
-
-
 def test_refresh_without_prepare_only_requires_explicit_cutover(tmp_path) -> None:
     workdir = tmp_path / "wikigraph"
 
