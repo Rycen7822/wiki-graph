@@ -332,7 +332,7 @@ def test_create_and_open_workspace_collections_use_mmap_options(
     assert open_call[2].enable_mmap is True
 
 
-def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:
+def test_query_wrappers_use_hnsw_filter_fts_and_rrf(monkeypatch) -> None:
     fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
@@ -347,7 +347,7 @@ def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:
 
         def query(self, **kwargs):
             self.query_calls.append(kwargs)
-            return [Doc()]
+            return [Doc()] if isinstance(kwargs["queries"], fake_zvec.Query) else []
 
     collection = Collection()
     workspace = module.ZvecWorkspace(collection=collection)
@@ -372,28 +372,12 @@ def test_query_vector_uses_hnsw_param_filter_and_maps_hits(monkeypatch) -> None:
     assert isinstance(query.param, fake_zvec.HnswQueryParam)
     assert query.param.ef == 200
 
-
-def test_query_mix_uses_vector_fts_and_rrf(monkeypatch) -> None:
-    fake_zvec = install_fake_zvec(monkeypatch)
-    module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
-
-    class Collection:
-        def __init__(self) -> None:
-            self.query_calls = []
-
-        def query(self, **kwargs):
-            self.query_calls.append(kwargs)
-            return []
-
-    collection = Collection()
-    workspace = module.ZvecWorkspace(collection=collection)
-
     assert (
         workspace.query_mix("alpha beta", [1.0, 0.0], top_k=5, filter_expr=None)
         == []
     )
 
-    call = collection.query_calls[0]
+    call = collection.query_calls[1]
     assert call["topk"] == 5
     assert call["filter"] is None
     assert call["include_vector"] is False

@@ -126,33 +126,33 @@ def test_native_query_report_collector_posts_suite_rows_and_records_latency(tmp_
     assert calls[1]["payload"]["mode"] == "naive"
 
 
-@pytest.mark.parametrize("query_vector", [None, []])
-def test_native_query_report_collector_marks_endpoint_embedding_timing_for_missing_query_vectors(tmp_path: Path, query_vector: list[float] | None) -> None:
-    query_suite = tmp_path / "query_suite.jsonl"
-    row = {
-        "id": "q1",
-        "query": "alpha evidence",
-        "mode": "mix",
-        "top_k": 20,
-        "must_include_paths": ["a.md"],
-        "must_include_entities": [],
-        "notes": "fixture",
-    }
-    if query_vector is not None:
-        row["query_vector"] = query_vector
-    write_jsonl(query_suite, [row])
+def test_native_query_report_collector_marks_endpoint_embedding_timing_for_missing_query_vectors(tmp_path: Path) -> None:
+    for index, query_vector in enumerate([None, []]):
+        query_suite = tmp_path / f"query_suite_{index}.jsonl"
+        row = {
+            "id": "q1",
+            "query": "alpha evidence",
+            "mode": "mix",
+            "top_k": 20,
+            "must_include_paths": ["a.md"],
+            "must_include_entities": [],
+            "notes": "fixture",
+        }
+        if query_vector is not None:
+            row["query_vector"] = query_vector
+        write_jsonl(query_suite, [row])
 
-    def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
-        return {"source_paths": ["a.md"]}
+        def fake_post(_url: str, _payload: dict, *, timeout: int) -> dict:
+            return {"source_paths": ["a.md"]}
 
-    report = collect_native_query_report.collect_query_report(
-        query_suite_path=query_suite,
-        server="http://127.0.0.1:19637",
-        post_json=fake_post,
-        timer=iter([1.00, 1.01]).__next__,
-    )
+        report = collect_native_query_report.collect_query_report(
+            query_suite_path=query_suite,
+            server="http://127.0.0.1:19637",
+            post_json=fake_post,
+            timer=iter([1.00, 1.01]).__next__,
+        )
 
-    assert report["timing_scope"] == "endpoint_includes_embedding"
+        assert report["timing_scope"] == "endpoint_includes_embedding"
 
 
 def test_native_query_report_collector_records_repeated_samples_without_duplicate_results(tmp_path: Path) -> None:

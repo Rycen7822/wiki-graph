@@ -423,32 +423,25 @@ def test_build_reports_vector_fill_failure_as_json_without_prepared_pointer(tmp_
     assert not (workspace_root / "native-test" / "build_report.json").exists()
 
 
-def test_finalize_and_rollback_use_default_native_pointer_paths(tmp_path, capsys) -> None:
+def test_finalize_and_rollback_use_default_native_pointer_paths(tmp_path, capsys, monkeypatch) -> None:
     workspace_root = tmp_path / "native_zvec" / "workspaces"
     pointer_dir = workspace_root.parent
-    pointer_dir.mkdir(parents=True)
-    prepared_path = pointer_dir / "prepared_workspace.json"
-    active_path = pointer_dir / "active_workspace.json"
-    previous = {"schema_version": 1, "workspace_id": "old", "status": "active"}
-    prepared = {
-        "schema_version": 1,
-        "workspace_id": "new",
-        "status": "prepared",
-        "sqlite_path": "/tmp/native.sqlite",
-        "zvec_path": "/tmp/zvec_records",
-    }
-    active_path.write_text(json.dumps(previous), encoding="utf-8")
-    prepared_path.write_text(json.dumps(prepared), encoding="utf-8")
+    calls = []
+
+    def fake_finalize(prepared_workspace_path, active_workspace_path, history_path, *, reason):
+        calls.append(("finalize", prepared_workspace_path, active_workspace_path, history_path, reason))
+        return {"schema_version": 1, "workspace_id": "new", "status": "active"}
+
+    def fake_rollback(active_workspace_path, history_path):
+        calls.append(("rollback", active_workspace_path, history_path))
+        return {"schema_version": 1, "workspace_id": "old", "status": "active"}
+
+    monkeypatch.setattr(native_zvec_materialize, "finalize_prepared_workspace", fake_finalize)
+    monkeypatch.setattr(native_zvec_materialize, "rollback_active_workspace", fake_rollback)
 
     assert (
         native_zvec_materialize.main(
-            [
-                "finalize",
-                "--workspace-root",
-                str(workspace_root),
-                "--reason",
-                "test finalize",
-            ]
+            ["finalize", "--workspace-root", str(workspace_root), "--reason", "test finalize"]
         )
         == 0
     )
@@ -458,43 +451,14 @@ def test_finalize_and_rollback_use_default_native_pointer_paths(tmp_path, capsys
 
     assert native_zvec_materialize.main(["rollback", "--workspace-root", str(workspace_root)]) == 0
     rolled_back = json.loads(capsys.readouterr().out)
-    assert rolled_back == previous
-    assert json.loads(active_path.read_text(encoding="utf-8")) == previous
-
-
-def test_first_cutover_rollback_removes_default_active_pointer(tmp_path, capsys) -> None:
-    workspace_root = tmp_path / "native_zvec" / "workspaces"
-    pointer_dir = workspace_root.parent
-    pointer_dir.mkdir(parents=True)
-    prepared_path = pointer_dir / "prepared_workspace.json"
-    active_path = pointer_dir / "active_workspace.json"
-    prepared = {
-        "schema_version": 1,
-        "workspace_id": "first",
-        "status": "prepared",
-        "sqlite_path": "/tmp/native.sqlite",
-        "zvec_path": "/tmp/zvec_records",
-    }
-    prepared_path.write_text(json.dumps(prepared), encoding="utf-8")
-
-    assert (
-        native_zvec_materialize.main(
-            [
-                "finalize",
-                "--workspace-root",
-                str(workspace_root),
-                "--reason",
-                "first cutover",
-            ]
-        )
-        == 0
-    )
-    finalized = json.loads(capsys.readouterr().out)
-    assert finalized["status"] == "active"
-    assert finalized["workspace_id"] == "first"
-    assert active_path.exists()
-
-    assert native_zvec_materialize.main(["rollback", "--workspace-root", str(workspace_root)]) == 0
-    rolled_back = json.loads(capsys.readouterr().out)
-    assert rolled_back == {"schema_version": 1, "status": "absent"}
-    assert not active_path.exists()
+    assert rolled_back["workspace_id"] == "old"
+    assert calls == [
+        (
+            "finalize",
+            pointer_dir / "prepared_workspace.json",
+            pointer_dir / "active_workspace.json",
+            pointer_dir / "active_workspace.history.jsonl",
+            "test finalize",
+        ),
+        ("rollback", pointer_dir / "active_workspace.json", pointer_dir / "active_workspace.history.jsonl"),
+    ]

@@ -141,18 +141,7 @@ def test_state_dirs_and_query_event_db_are_external_to_wiki_root(tmp_path: Path)
     assert "sync_events" not in tables
 
 
-def test_validate_wiki_default_does_not_write_report(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-
-    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph")
-
-    assert "report_path" not in report
-    assert not state.exists()
-    assert not list((state / "validation_reports").glob("*_validate.json"))
-
-
-def test_validate_wiki_report_uses_native_output_fields(tmp_path: Path) -> None:
+def test_validate_wiki_default_is_read_only_and_reports_native_paths(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
     workdir = tmp_path / "work" / "wikigraph"
@@ -162,6 +151,9 @@ def test_validate_wiki_report_uses_native_output_fields(tmp_path: Path) -> None:
     assert report["native_unresolved_references"] == 0
     assert report["native_state_dir"] == str(state.resolve())
     assert report["native_workdir"] == str(workdir.resolve())
+    assert "report_path" not in report
+    assert not state.exists()
+    assert not list((state / "validation_reports").glob("*_validate.json"))
 
 
 def test_validate_wiki_can_sync_raw_clip_map_snapshot_when_explicit(tmp_path: Path) -> None:
@@ -376,22 +368,16 @@ def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path,
     assert "fingerprint_mismatch:index.md" in payload["validation_reuse"]["rejections"]
 
 
-def test_validation_report_freshness_accepts_matching_report() -> None:
+def test_validation_report_freshness_contracts() -> None:
     report, current = _fresh_validation_report_inputs()
-
-    result = validation_report_is_fresh(
+    assert validation_report_is_fresh(
         report,
         current,
         required_surfaces=["compiled", "_meta"],
         reason="refresh-artifact",
-    )
+    ) == {"fresh": True, "rejections": []}
 
-    assert result == {"fresh": True, "rejections": []}
-
-
-@pytest.mark.parametrize(
-    ("mutator", "required_surfaces", "reason", "expected_rejection"),
-    [
+    rejection_cases = [
         (lambda report, current: report.update({"warnings": ["secret warning"]}), ["compiled"], "refresh-artifact", "report_has_warnings"),
         (lambda report, current: report.update({"errors": ["broken_wikilinks=1"]}), ["compiled"], "refresh-artifact", "report_has_errors"),
         (lambda report, current: report.update({"schema_version": 0}), ["compiled"], "refresh-artifact", "schema_version_mismatch"),
@@ -410,16 +396,15 @@ def test_validation_report_freshness_accepts_matching_report() -> None:
             "refresh-artifact",
             "stale_fingerprint:deleted.md",
         ),
-    ],
-)
-def test_validation_report_freshness_rejects_stale_or_unsafe_reports(mutator, required_surfaces: list[str], reason: str, expected_rejection: str) -> None:
-    report, current = _fresh_validation_report_inputs()
-    mutator(report, current)
+    ]
+    for mutator, required_surfaces, reason, expected_rejection in rejection_cases:
+        report, current = _fresh_validation_report_inputs()
+        mutator(report, current)
 
-    result = validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
+        result = validation_report_is_fresh(report, current, required_surfaces=required_surfaces, reason=reason)
 
-    assert result["fresh"] is False
-    assert expected_rejection in result["rejections"]
+        assert result["fresh"] is False
+        assert expected_rejection in result["rejections"]
 
 
 def test_machine_pollution_detection(tmp_path: Path) -> None:

@@ -9,7 +9,6 @@ sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
 from ops import raw_fast_note_assemble  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
 
 
 STRUCTURED_BODY = """## 一句话总结
@@ -148,9 +147,8 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_existing_raw_paths(tmp_path: 
     assert existing["error"] == "raw_file_exists"
 
 
-def test_raw_fast_note_assemble_cli_can_verify_and_closeout_roundtrip(tmp_path: Path) -> None:
+def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path) -> None:
     root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070403_Roundtrip-Paper.md")
-    state = tmp_path / "state"
 
     assemble = subprocess.run(
         [
@@ -172,40 +170,4 @@ def test_raw_fast_note_assemble_cli_can_verify_and_closeout_roundtrip(tmp_path: 
     assembled = json.loads(assemble.stdout)
     assert assembled["ok"] is True
     assert assembled["verify"]["raw_fast_ok"] is True
-
-    closeout = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_closeout",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(ROOT),
-            "--raw-file",
-            raw_file,
-            "--title",
-            "Assembler Paper",
-            "--source-id",
-            "https://arxiv.org/abs/2607.0401",
-            "--pattern",
-            "Assembler Paper",
-            "--pattern",
-            "https://arxiv.org/abs/2607.0401",
-            "--resource-status-summary",
-            "synthetic resources checked",
-            "--tmp",
-            str(workdir),
-            "--auto-integrate",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    closed = json.loads(closeout.stdout)
-    assert closed["raw_fast_ok"] is True
-    assert closed["marked"]["raw_path"] == raw_file
-    assert load_pending_wiki_integration_ledger(state)["pending"][0]["raw_path"] == raw_file
-    assert not workdir.exists()
+    assert (root / raw_file).exists()

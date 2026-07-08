@@ -50,50 +50,30 @@ def test_native_embedding_posts_openai_compatible_request(monkeypatch) -> None:
     assert body == {"model": "embed-small", "input": "alpha"}
 
 
-def test_native_embedding_caches_exact_query_vectors(monkeypatch) -> None:
-    calls = []
+def test_native_embedding_cache_modes(monkeypatch) -> None:
+    for cache_size, mutate_first, expected_calls in [(4, True, 1), (0, False, 2)]:
+        calls = []
 
-    def fake_urlopen(request, timeout):
-        calls.append({"request": request, "timeout": timeout})
-        return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
+        def fake_urlopen(request, timeout):
+            calls.append({"request": request, "timeout": timeout})
+            return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    provider = NativeEmbedding(
-        NativeEmbeddingConfig(
-            base_url="https://embedding.local/v1",
-            model="embed-small",
-            api_key="secret",
-            cache_size=4,
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        provider = NativeEmbedding(
+            NativeEmbeddingConfig(
+                base_url="https://embedding.local/v1",
+                model="embed-small",
+                api_key="secret",
+                cache_size=cache_size,
+            )
         )
-    )
 
-    first = provider.embed_query("alpha")
-    first[0] = 99.0
+        first = provider.embed_query("alpha")
+        if mutate_first:
+            first[0] = 99.0
 
-    assert provider.embed_query("alpha") == [0.25, 0.75]
-    assert len(calls) == 1
-
-
-def test_native_embedding_cache_can_be_disabled(monkeypatch) -> None:
-    calls = []
-
-    def fake_urlopen(request, timeout):
-        calls.append({"request": request, "timeout": timeout})
-        return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    provider = NativeEmbedding(
-        NativeEmbeddingConfig(
-            base_url="https://embedding.local/v1",
-            model="embed-small",
-            api_key="secret",
-            cache_size=0,
-        )
-    )
-
-    assert provider.embed_query("alpha") == [0.25, 0.75]
-    assert provider.embed_query("alpha") == [0.25, 0.75]
-    assert len(calls) == 2
+        assert provider.embed_query("alpha") == [0.25, 0.75]
+        assert len(calls) == expected_calls
 
 
 def test_native_embedding_config_from_env_requires_endpoint_model_and_key() -> None:
@@ -110,8 +90,8 @@ def test_native_embedding_config_from_env_requires_endpoint_model_and_key() -> N
         )
 
 
-def test_native_embedding_config_from_env_accepts_compatible_binding_names() -> None:
-    config = NativeEmbeddingConfig.from_env(
+def test_native_embedding_config_from_env_aliases_and_native_precedence() -> None:
+    compatible = NativeEmbeddingConfig.from_env(
         {
             "EMBEDDING_BINDING_HOST": "https://embedding.local/v1",
             "EMBEDDING_MODEL": "BAAI/bge-m3",
@@ -121,18 +101,15 @@ def test_native_embedding_config_from_env_accepts_compatible_binding_names() -> 
             "EMBEDDING_CACHE_SIZE": "17",
         }
     )
+    assert compatible.base_url == "https://embedding.local/v1"
+    assert compatible.model == "BAAI/bge-m3"
+    assert compatible.api_key == "secret"
+    assert compatible.timeout_seconds == 77.0
+    assert compatible.embedding_dim == 1024
+    assert compatible.cache_size == 17
+    assert "secret" not in repr(compatible)
 
-    assert config.base_url == "https://embedding.local/v1"
-    assert config.model == "BAAI/bge-m3"
-    assert config.api_key == "secret"
-    assert config.timeout_seconds == 77.0
-    assert config.embedding_dim == 1024
-    assert config.cache_size == 17
-    assert "secret" not in repr(config)
-
-
-def test_native_embedding_config_prefers_native_names_over_compatible_names() -> None:
-    config = NativeEmbeddingConfig.from_env(
+    native = NativeEmbeddingConfig.from_env(
         {
             "LLM_WIKI_NATIVE_EMBEDDING_BASE_URL": "https://native.local/v1",
             "LLM_WIKI_NATIVE_EMBEDDING_MODEL": "native-model",
@@ -146,13 +123,12 @@ def test_native_embedding_config_prefers_native_names_over_compatible_names() ->
             "EMBEDDING_DIM": "1024",
         }
     )
-
-    assert config.base_url == "https://native.local/v1"
-    assert config.model == "native-model"
-    assert config.api_key == "native-secret"
-    assert config.timeout_seconds == 12.0
-    assert config.embedding_dim == 3
-    assert "native-secret" not in repr(config)
+    assert native.base_url == "https://native.local/v1"
+    assert native.model == "native-model"
+    assert native.api_key == "native-secret"
+    assert native.timeout_seconds == 12.0
+    assert native.embedding_dim == 3
+    assert "native-secret" not in repr(native)
 
 
 def test_native_embedding_validates_configured_dimension(monkeypatch) -> None:

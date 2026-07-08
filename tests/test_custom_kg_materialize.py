@@ -1,6 +1,6 @@
+import argparse
 import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -42,7 +42,7 @@ def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatc
     )
 
     report = custom_kg_incremental.run_export_manifest(
-        types.SimpleNamespace(root=root, state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
+        argparse.Namespace(root=root, state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
     )
 
     manifest_path = state_dir / "custom_kg_manifest.json"
@@ -54,34 +54,7 @@ def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatc
     assert not (state_dir / "prepared_swap").exists()
 
 
-def test_run_export_manifest_refuses_unexpected_manifest_metadata_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
-    manifest["metadata"]["unexpected_tool_version"] = "old"
-    state_dir = tmp_path / "state"
-
-    monkeypatch.setattr(
-        custom_kg_incremental,
-        "build_desired_manifest",
-        lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
-    )
-
-    with pytest.raises(RuntimeError, match="native manifest metadata contract") as exc_info:
-        custom_kg_incremental.run_export_manifest(
-            types.SimpleNamespace(
-                root=tmp_path / "wiki",
-                state_dir=state_dir,
-                workdir=tmp_path / "work",
-                limit_docs=None,
-                limit_edges=None,
-            )
-        )
-
-    assert "unexpected_tool_version" in str(exc_info.value)
-    assert not (state_dir / "custom_kg_manifest.json").exists()
-    assert not state_dir.exists()
-
-
-def test_run_audit_manifest_content_reports_native_contract_issues_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_manifest_metadata_contract_issues_audit_and_block_export_without_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     manifest = build_custom_kg_manifest(_payload(), native_manifest_tool_version="1.5.0", embedding_model="embed-a", embedding_dim=2)
     manifest["metadata"]["canonical_id_algorithm"] = "llm-wiki-canonical-id:v0"
     state_dir = tmp_path / "state"
@@ -92,10 +65,9 @@ def test_run_audit_manifest_content_reports_native_contract_issues_without_write
         "build_desired_manifest",
         lambda *_args, **_kwargs: (manifest, {"chunks": 1, "entities": 2, "relationships": 1}),
     )
+    args = argparse.Namespace(root=tmp_path / "wiki", state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
 
-    report = custom_kg_incremental.run_audit_manifest_content(
-        types.SimpleNamespace(root=tmp_path / "wiki", state_dir=state_dir, workdir=workdir, limit_docs=None, limit_edges=None)
-    )
+    report = custom_kg_incremental.run_audit_manifest_content(args)
 
     assert report["ok"] is False
     assert report["command"] == "audit-manifest-content"
@@ -103,6 +75,14 @@ def test_run_audit_manifest_content_reports_native_contract_issues_without_write
     assert report["issues"] == [
         {"type": "invalid_manifest_metadata_value", "path": "metadata.canonical_id_algorithm"}
     ]
+    assert not state_dir.exists()
+    assert not workdir.exists()
+
+    with pytest.raises(RuntimeError, match="native manifest metadata contract") as exc_info:
+        custom_kg_incremental.run_export_manifest(args)
+
+    assert "metadata.canonical_id_algorithm" in str(exc_info.value)
+    assert not (state_dir / "custom_kg_manifest.json").exists()
     assert not state_dir.exists()
     assert not workdir.exists()
 
@@ -297,93 +277,54 @@ def test_relationship_vector_content_uses_typed_directed_endpoint_order() -> Non
     assert relationship["content"] == "SOURCED_BY\ttopic:z\ndoc:a\ntopic:z SOURCED_BY doc:a"
 
 
-def test_custom_kg_incremental_export_manifest_cli_routes_to_export_runner(monkeypatch, tmp_path, capsys) -> None:
-    captured = {}
-
-    def fake_runner(args):
-        captured.update(
-            {
-                "root": args.root,
-                "state_dir": args.state_dir,
-                "workdir": args.workdir,
-                "limit_docs": args.limit_docs,
-                "limit_edges": args.limit_edges,
-            }
-        )
-        return {"ok": True, "command": "export-manifest", "manifest_path": str(tmp_path / "state" / "custom_kg_manifest.json")}
-
-    monkeypatch.setattr(custom_kg_incremental, "run_export_manifest", fake_runner)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "export-manifest",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--limit-docs",
-            "2",
-            "--limit-edges",
-            "3",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 0
-    assert captured == {
+def test_custom_kg_incremental_manifest_cli_routes_common_args_to_owner_runners(monkeypatch, tmp_path, capsys) -> None:
+    expected_args = {
         "root": tmp_path / "wiki",
         "state_dir": tmp_path / "state",
         "workdir": tmp_path / "work",
         "limit_docs": 2,
         "limit_edges": 3,
     }
-    assert json.loads(capsys.readouterr().out)["command"] == "export-manifest"
+    cases = [
+        ("export-manifest", "run_export_manifest", True, 0),
+        ("audit-manifest-content", "run_audit_manifest_content", False, 1),
+    ]
 
+    for command, runner_name, ok, expected_exit in cases:
+        captured = {}
 
-def test_custom_kg_incremental_audit_manifest_content_cli_routes_to_audit_runner(monkeypatch, tmp_path, capsys) -> None:
-    captured = {}
+        def fake_runner(args):
+            captured.update(
+                {
+                    "root": args.root,
+                    "state_dir": args.state_dir,
+                    "workdir": args.workdir,
+                    "limit_docs": args.limit_docs,
+                    "limit_edges": args.limit_edges,
+                }
+            )
+            return {"ok": ok, "command": command}
 
-    def fake_runner(args):
-        captured.update(
-            {
-                "root": args.root,
-                "state_dir": args.state_dir,
-                "workdir": args.workdir,
-                "limit_docs": args.limit_docs,
-                "limit_edges": args.limit_edges,
-            }
+        monkeypatch.setattr(custom_kg_incremental, runner_name, fake_runner)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "custom_kg_incremental.py",
+                command,
+                "--root",
+                str(expected_args["root"]),
+                "--state-dir",
+                str(expected_args["state_dir"]),
+                "--workdir",
+                str(expected_args["workdir"]),
+                "--limit-docs",
+                "2",
+                "--limit-edges",
+                "3",
+            ],
         )
-        return {"ok": False, "command": "audit-manifest-content", "token_variant_count": 1, "sources": []}
 
-    monkeypatch.setattr(custom_kg_incremental, "run_audit_manifest_content", fake_runner)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "custom_kg_incremental.py",
-            "audit-manifest-content",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(tmp_path / "state"),
-            "--workdir",
-            str(tmp_path / "work"),
-            "--limit-docs",
-            "2",
-            "--limit-edges",
-            "3",
-        ],
-    )
-
-    assert custom_kg_incremental.main() == 1
-    assert captured == {
-        "root": tmp_path / "wiki",
-        "state_dir": tmp_path / "state",
-        "workdir": tmp_path / "work",
-        "limit_docs": 2,
-        "limit_edges": 3,
-    }
-    assert json.loads(capsys.readouterr().out)["command"] == "audit-manifest-content"
+        assert custom_kg_incremental.main() == expected_exit
+        assert captured == expected_args
+        assert json.loads(capsys.readouterr().out)["command"] == command

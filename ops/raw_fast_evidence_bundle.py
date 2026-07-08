@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import html
 import json
 import os
 import re
@@ -33,6 +34,7 @@ DEFAULT_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DOWNLOAD_BYTES_ENV_VARS = ("LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES", "RAW_FAST_MAX_DOWNLOAD_BYTES")
 DEFAULT_MAX_TEXT_BYTES = 8 * 1024 * 1024
 RAW_BODY_DRAFT_FILE = "raw_body_draft.md"
+TEX_AGENT_SOURCE_FILE = "paper_source.agent.tex"
 ASSEMBLED_RAW_NOTE_REPORT_FILE = "assembled_raw_note_report.json"
 LLM_WIKI_SKILL_ROOT = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki"
 STRUCTURED_PAPER_NOTE_CONTRACT_PATH = str(LLM_WIKI_SKILL_ROOT / "references" / "structured-paper-note-contract.md")
@@ -400,6 +402,7 @@ def fetch_text(url: str, timeout: int, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) 
 
 ARXIV_ID_IN_PATH_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
 ARXIV_DIRECT_HOSTS = {"arxiv.org", "export.arxiv.org"}
+MODELSCOPE_HOST = "modelscope.ai"
 OPENREVIEW_HOST = "openreview.net"
 OPENREVIEW_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
 OPENREVIEW_API2_BASEURL = "https://api2.openreview.net"
@@ -443,6 +446,10 @@ def arxiv_id_from_url(url: str) -> str | None:
             return _last_arxiv_id(parts[1:])
         return None
     if host == "huggingface.co":
+        if parts[:1] == ["papers"]:
+            return _first_arxiv_id(parts[1:])
+        return None
+    if host == MODELSCOPE_HOST:
         if parts[:1] == ["papers"]:
             return _first_arxiv_id(parts[1:])
         return None
@@ -642,7 +649,7 @@ def figure_table_inventory(text: str) -> list[dict[str, Any]]:
 
 def extract_urls(text: str) -> list[str]:
     raw = re.findall(r"https?://[^\s)\]}>\"']+", text)
-    return sorted({u.rstrip(".,;:") for u in raw})
+    return sorted({u.rstrip(".,;:\\") for u in raw})
 
 
 def extract_url_contexts(text: str, *, radius: int = 180) -> dict[str, list[str]]:
@@ -750,6 +757,7 @@ def _resource_url_candidate(
     official: bool | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    url = html.unescape(str(url)).replace("\\/", "/").strip().rstrip(".,;:\\")
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
     parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
@@ -1060,6 +1068,109 @@ def collect_huggingface_paper_resources(arxiv_id: str, timeout: int) -> dict[str
     return {"ok": bool(candidates) or bool(paper_data) or bool(repos_data), "platform": "huggingface", "fetches": fetches, "candidates": candidates, "warnings": warnings}
 
 
+MODELSCOPE_RESOURCE_FIELDS: dict[str, str | None] = {
+    "CodeLink": "repository",
+    "CodeUrl": "repository",
+    "GithubLink": "repository",
+    "GitHubLink": "repository",
+    "ProjectLink": "project_page",
+    "ProjectUrl": "project_page",
+    "Homepage": "project_page",
+    "DemoLink": "project_page",
+    "DatasetLink": None,
+    "ModelLink": None,
+}
+
+
+def _modelscope_text_variants(text: str) -> list[str]:
+    variants: list[str] = []
+    seen: set[str] = set()
+    for base in [text or "", html.unescape(text or "")]:
+        normalized = base
+        for _ in range(2):
+            normalized = normalized.replace('\\\\"', '"').replace('\\"', '"').replace('\\/', '/')
+        normalized = normalized.replace('\\u002F', '/').replace('\\u002f', '/').replace('\\u003A', ':').replace('\\u003a', ':')
+        for variant in [base, normalized]:
+            if variant not in seen:
+                seen.add(variant)
+                variants.append(variant)
+    return variants
+
+
+def _modelscope_field_values(text: str, field: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    pattern = re.compile(rf'"{re.escape(field)}"\s*:\s*"([^"]*)"')
+    for variant in _modelscope_text_variants(text):
+        for match in pattern.finditer(variant):
+            value = html.unescape(match.group(1)).strip().replace('\\/', '/')
+            value = value.replace('\\u002F', '/').replace('\\u002f', '/').replace('\\u003A', ':').replace('\\u003a', ':')
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
+def _modelscope_urls_from_value(value: str) -> list[str]:
+    value = value.strip()
+    if value.startswith(("http://", "https://")):
+        return [value.rstrip(".,;:")]
+    return extract_urls(value)
+
+
+def collect_modelscope_paper_resources(supplied_url: str, arxiv_id: str, timeout: int) -> dict[str, Any]:
+    fetched = fetch_text(supplied_url, timeout)
+    fetches = [{key: fetched.get(key) for key in ["ok", "url", "status", "error", "message"] if key in fetched}]
+    if not fetched.get("ok"):
+        return {"ok": False, "platform": "modelscope", "fetches": fetches, "candidates": [], "warnings": ["modelscope_page_unavailable_or_unparseable"]}
+
+    text = str(fetched.get("text") or "")
+    candidates: list[dict[str, Any]] = []
+    ignored_urls: list[dict[str, str]] = []
+    warnings: list[str] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    def add_candidate(candidate: dict[str, Any] | None) -> None:
+        if not candidate:
+            return
+        key = (candidate["type"], candidate.get("repo") or candidate["url"])
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    page_ids = [re.sub(r"v\d+$", "", value) for value in _modelscope_field_values(text, "ArxivId")]
+    if page_ids and arxiv_id not in page_ids:
+        warnings.append("modelscope_arxiv_id_mismatch")
+
+    for field, relation in MODELSCOPE_RESOURCE_FIELDS.items():
+        for idx, value in enumerate(_modelscope_field_values(text, field)):
+            for url in _modelscope_urls_from_value(value):
+                candidate = _api_resource_candidate(
+                    url,
+                    source=f"modelscope_page.{field}",
+                    relation=relation,
+                    evidence={"arxiv_id": arxiv_id, "api_field": field, "field_index": idx, "source_url": supplied_url},
+                )
+                if candidate:
+                    add_candidate(candidate)
+                elif _url_host(url) not in {"arxiv.org", "export.arxiv.org", MODELSCOPE_HOST}:
+                    ignored_urls.append({"url": url, "reason": f"unsupported_modelscope_{field}"})
+
+    for url in extract_urls("\n".join(_modelscope_text_variants(text))):
+        host = _url_host(url)
+        if host == MODELSCOPE_HOST or host.endswith(".modelscope.ai"):
+            continue
+        candidate = _api_resource_candidate(
+            url,
+            source="modelscope_page.direct_url",
+            evidence={"arxiv_id": arxiv_id, "source_url": supplied_url},
+        )
+        add_candidate(candidate)
+
+    return {"ok": bool(candidates) or bool(text), "platform": "modelscope", "fetches": fetches, "candidates": candidates, "ignored_urls": ignored_urls, "warnings": warnings}
+
+
 def collect_supplied_page_resources(supplied_url: str, arxiv_id: str, timeout: int) -> dict[str, Any]:
     host = _url_host(supplied_url)
     platform_results: list[dict[str, Any]] = []
@@ -1072,6 +1183,9 @@ def collect_supplied_page_resources(supplied_url: str, arxiv_id: str, timeout: i
     elif host == "huggingface.co":
         platforms_checked.append("huggingface")
         platform_results.append(collect_huggingface_paper_resources(arxiv_id, timeout))
+    elif host == MODELSCOPE_HOST:
+        platforms_checked.append("modelscope")
+        platform_results.append(collect_modelscope_paper_resources(supplied_url, arxiv_id, timeout))
     else:
         return {"ok": True, "skipped": True, "reason": "unsupported_supplied_resource_host", "source_url": supplied_url, "arxiv_id": arxiv_id, "platforms_checked": [], "candidates": [], "warnings": []}
 
@@ -1146,8 +1260,8 @@ def strip_tex_markup(text: str, max_len: int = 500) -> str:
 
 
 def tex_command_arg(text: str, command: str) -> str | None:
-    match = re.search(rf"\\{re.escape(command)}\*?(?:\[[^\]]*\])?\{{(.*?)\}}", text, re.S)
-    return strip_tex_markup(match.group(1), max_len=500) if match else None
+    candidates = tex_command_arg_candidates(text or "", command)
+    return strip_tex_markup(candidates[0][1], max_len=500) if candidates else None
 
 
 def tex_command_arg_candidates(text: str, command: str) -> list[tuple[int, str]]:
@@ -1181,14 +1295,25 @@ def _tex_command_inside_definition(text: str, offset: int) -> bool:
 
 
 def tex_title_from_text(text: str) -> str | None:
-    for offset, raw_arg in tex_command_arg_candidates(text or "", "title"):
-        if _tex_command_inside_definition(text or "", offset):
+    source = text or ""
+    commands = ["title"]
+    seen = {"title"}
+    for match in re.finditer(r"\\([A-Za-z@]*title)\*?\s*(?:\[[^\]]*\]\s*)?\{", source, re.I):
+        command = match.group(1)
+        lowered = command.lower()
+        if lowered in seen or lowered in {"sectiontitle", "subsectiontitle", "subsubsectiontitle", "frametitle"}:
             continue
-        title = strip_tex_markup(raw_arg, max_len=300)
-        if placeholder_title(title):
-            continue
-        if 5 <= len(title) <= 300:
-            return title
+        seen.add(lowered)
+        commands.append(command)
+    for command in commands:
+        for offset, raw_arg in tex_command_arg_candidates(source, command):
+            if _tex_command_inside_definition(source, offset):
+                continue
+            title = strip_tex_markup(raw_arg, max_len=300)
+            if placeholder_title(title):
+                continue
+            if 5 <= len(title) <= 300:
+                return title
     return None
 
 
@@ -1336,7 +1461,7 @@ def build_source_read_plan(workdir: Path, *, source_kind: str, main_rel: str, fa
     if not first_reads:
         first_reads.append({"path": main_rel, "offset": 1, "limit": 220, "reason": "source overview"})
     if source_kind == "tex_source":
-        reading_strategy = "read writing contract and paper_digest.md first; when TeX semantic sidecars are available, read parsed Markdown sidecars before source spans; source_read_plan first_reads are fallback locators only, not a read queue"
+        reading_strategy = "read writing contract and paper_digest.md first; use the filtered original TeX source as the default reading surface; source_read_plan first_reads are fallback locators only, not a read queue; appendices remain available in the filtered source"
     else:
         reading_strategy = "read writing contract and paper_digest.md first; source_read_plan first_reads are starting spans for claims that need more detail"
     return {
@@ -1355,6 +1480,13 @@ def extract_tex_abstract(tex: str) -> str:
     return strip_tex_markup(match.group(1), max_len=1200) if match else ""
 
 
+def _tex_line_span(text: str, start: int, end: int) -> dict[str, int]:
+    return {
+        "line_start": text.count("\n", 0, max(0, start)) + 1,
+        "line_end": text.count("\n", 0, max(start, end)) + 1,
+    }
+
+
 def extract_tex_section_cards(tex: str) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     pattern = re.compile(r"\\(?P<level>section|subsection|subsubsection)\*?\{(?P<title>.*?)\}", re.S)
@@ -1364,7 +1496,7 @@ def extract_tex_section_cards(tex: str) -> list[dict[str, Any]]:
         end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(tex), start + 2000)
         heading = strip_tex_markup(match.group("title"), max_len=180)
         excerpt = strip_tex_markup(tex[start:end], max_len=600)
-        cards.append({"level": match.group("level"), "heading": heading, "excerpt": excerpt})
+        cards.append({"level": match.group("level"), "heading": heading, "excerpt": excerpt, **_tex_line_span(tex, match.start(), end)})
     return cards
 
 
@@ -1375,8 +1507,43 @@ def extract_tex_equation_cards(tex: str) -> list[dict[str, Any]]:
         body = match.group("body")
         label = tex_command_arg(body, "label")
         formula = re.sub(r"\\label\{[^{}]*\}", "", body).strip()
-        cards.append({"env": match.group("env"), "label": label, "formula": compact_ws(formula, max_len=900)})
+        cards.append({"env": match.group("env"), "label": label, "formula": compact_ws(formula, max_len=900), **_tex_line_span(tex, match.start(), match.end())})
         if len(cards) >= 60:
+            break
+    return cards
+
+
+def extract_tex_statement_cards(tex: str) -> list[dict[str, Any]]:
+    """Extract theorem-like environments as first-class source cards.
+
+    These cards keep machine diagnostics label-oriented while the agent-facing
+    reading surface remains filtered original TeX.
+    """
+
+    envs = "theorem|lemma|proposition|corollary|definition|remark|example|claim"
+    pattern = re.compile(
+        rf"\\begin\{{(?P<env>{envs})\*?\}}(?:\[(?P<title>[^\]]*)\])?(?P<body>.*?)\\end\{{(?P=env)\*?\}}",
+        re.S | re.I,
+    )
+    proof_pattern = re.compile(r"\s*\\begin\{proof\}(?:\[(?P<title>[^\]]*)\])?(?P<body>.*?)\\end\{proof\}", re.S | re.I)
+    cards: list[dict[str, Any]] = []
+    for match in pattern.finditer(tex):
+        body = match.group("body")
+        proof_match = proof_pattern.match(tex[match.end() :])
+        span_end = match.end() + (proof_match.end() if proof_match else 0)
+        proof_excerpt = strip_tex_markup(proof_match.group("body"), max_len=900) if proof_match else ""
+        cards.append(
+            {
+                "env": match.group("env").rstrip("*"),
+                "title": strip_tex_markup(match.group("title") or "", max_len=180),
+                "label": tex_command_arg(body, "label"),
+                "excerpt": strip_tex_markup(body, max_len=1200),
+                "proof_title": strip_tex_markup(proof_match.group("title") or "", max_len=120) if proof_match else "",
+                "proof_excerpt": proof_excerpt,
+                **_tex_line_span(tex, match.start(), span_end),
+            }
+        )
+        if len(cards) >= 120:
             break
     return cards
 
@@ -1389,7 +1556,7 @@ def extract_tex_table_cards(tex: str) -> list[dict[str, Any]]:
         label = tex_command_arg(env, "label")
         tabular = re.search(r"\\begin\{tabular\}\{[^{}]*\}(.*?)\\end\{tabular\}", env, re.S | re.I)
         body_excerpt = strip_tex_markup(tabular.group(1) if tabular else env, max_len=900)
-        cards.append({"label": label, "caption": caption, "body_excerpt": body_excerpt})
+        cards.append({"label": label, "caption": caption, "body_excerpt": body_excerpt, **_tex_line_span(tex, match.start(), match.end())})
         if len(cards) >= 40:
             break
     return cards
@@ -1414,7 +1581,7 @@ def extract_figure_contexts(workdir: Path) -> list[dict[str, Any]]:
             caption = tex_command_arg(env_text, "caption")
             label = tex_command_arg(env_text, "label")
             for include in include_re.findall(env_text):
-                contexts.append({"tex_file": str(tex_path), "tex_rel": str(tex_path.relative_to(source_root)) if source_root.exists() and tex_path.resolve().is_relative_to(source_root) else tex_path.name, "include": include.strip(), "caption": caption, "label": label})
+                contexts.append({"tex_file": str(tex_path), "tex_rel": str(tex_path.relative_to(source_root)) if source_root.exists() and tex_path.resolve().is_relative_to(source_root) else tex_path.name, "include": include.strip(), "caption": caption, "label": label, **_tex_line_span(text, env_match.start(), env_match.end())})
                 if len(contexts) >= 80:
                     return contexts
     return contexts
@@ -1464,6 +1631,8 @@ def extract_tex_figure_cards(workdir: Path) -> list[dict[str, Any]]:
             "caption": context.get("caption"),
             "include": context.get("include"),
             "tex_rel": context.get("tex_rel"),
+            "line_start": context.get("line_start"),
+            "line_end": context.get("line_end"),
             "localizable": bool(resolved),
             "source_path": str(resolved.relative_to(source_root)) if resolved and resolved.is_relative_to(source_root) else None,
             "reason": reason,
@@ -1498,13 +1667,18 @@ def _resolve_tex_include(source_root: Path, tex_file: Path, include: str) -> tup
     raw = Path(include.strip())
     if raw.is_absolute() or any(part == ".." for part in raw.parts):
         return None, "path_traversal"
-    if raw.suffix and raw.suffix.lower() != ".tex":
-        return None, "unsupported_extension"
     bases = [tex_file.parent / raw, source_root / raw]
     candidates: list[Path] = []
     seen: set[str] = set()
     for base in bases:
-        expanded = [base] if base.suffix else [base.with_suffix(".tex")]
+        if raw.suffix.lower() == ".tex":
+            expanded = [base]
+        elif raw.suffix:
+            # LaTeX sources often omit the final .tex while using dotted stems,
+            # e.g. \input{sections/1.introduction} -> sections/1.introduction.tex.
+            expanded = [Path(str(base) + ".tex")]
+        else:
+            expanded = [base.with_suffix(".tex")]
         for candidate in expanded:
             key = str(candidate)
             if key not in seen:
@@ -1517,7 +1691,7 @@ def _resolve_tex_include(source_root: Path, tex_file: Path, include: str) -> tup
         if not resolved.is_relative_to(source_root):
             return None, "path_traversal"
         return resolved, None
-    return None, "missing_source"
+    return None, "unsupported_extension" if raw.suffix and raw.suffix.lower() != ".tex" else "missing_source"
 
 
 def _tex_include_events(text: str) -> list[tuple[str, str | None]]:
@@ -1659,6 +1833,185 @@ def _localized_figure_map(localized_figures: dict[str, Any] | None) -> dict[str,
     return mapping
 
 
+TEX_AGENT_FORMAT_COMMAND_ROOTS = ("affiliation", "author", "date", "email", "institute", "thanks", "title")
+TEX_AGENT_DROP_LINE_COMMANDS = {
+    "addtolength",
+    "bibliography",
+    "bibliographystyle",
+    "declaremathoperator",
+    "declarerobustcommand",
+    "def",
+    "documentclass",
+    "hypersetup",
+    "include",
+    "input",
+    "maketitle",
+    "newcommand",
+    "newtheorem",
+    "pagestyle",
+    "printbibliography",
+    "providecommand",
+    "renewcommand",
+    "requirepackage",
+    "setcounter",
+    "setlength",
+    "thispagestyle",
+    "usepackage",
+    "vspace",
+}
+
+
+def _tex_agent_format_env(env: str) -> bool:
+    lowered = env.rstrip("*").lower()
+    return lowered == "frontmatter" or lowered.endswith("frontmatter") or "author" in lowered or "affiliation" in lowered
+
+
+def _tex_agent_format_command(command: str | None) -> bool:
+    if not command:
+        return False
+    lowered = command.lower()
+    if lowered in TEX_AGENT_FORMAT_COMMAND_ROOTS:
+        return True
+    return any(lowered.endswith(root) for root in TEX_AGENT_FORMAT_COMMAND_ROOTS) or "author" in lowered
+
+
+def _strip_tex_line_comment(line: str) -> str:
+    idx = 0
+    while True:
+        pos = line.find("%", idx)
+        if pos < 0:
+            return line.rstrip()
+        backslashes = 0
+        cursor = pos - 1
+        while cursor >= 0 and line[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return line[:pos].rstrip()
+        idx = pos + 1
+
+
+def _tex_command_name_at_start(line: str) -> str | None:
+    match = re.match(r"\s*\\([A-Za-z@]+)\*?\b", line)
+    return match.group(1) if match else None
+
+
+def _brace_delta(line: str) -> int:
+    delta = 0
+    escaped = False
+    for char in line:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "{":
+            delta += 1
+        elif char == "}":
+            delta -= 1
+    return delta
+
+
+def _tex_appendix_marker(line: str) -> bool:
+    return bool(re.search(r"\\appendix\b|\\begin\{appendices\}|\\section\*?\{\s*Appendix", line, re.I))
+
+
+def _tex_reference_heading(line: str) -> bool:
+    return bool(
+        re.search(r"\\(?:section|chapter)\*?\{\s*(?:References|Bibliography|参考文献)\s*\}", line, re.I)
+        or re.search(r"\\begin\{(?:thebibliography|references)\}", line, re.I)
+    )
+
+
+def _filter_tex_agent_unit(text: str, *, main_unit: bool) -> list[str]:
+    lines = text.splitlines()
+    if main_unit:
+        for idx, line in enumerate(lines):
+            if re.search(r"\\begin\{document\}", line):
+                lines = lines[idx + 1 :]
+                break
+
+    filtered: list[str] = []
+    skip_env: str | None = None
+    skip_command_balance: int | None = None
+    skip_references = False
+    for raw_line in lines:
+        line = _strip_tex_line_comment(raw_line).rstrip()
+        stripped = line.strip()
+
+        if skip_env:
+            if re.search(rf"\\end\{{{re.escape(skip_env)}\}}", stripped, re.I):
+                skip_env = None
+            continue
+        if skip_command_balance is not None:
+            skip_command_balance += _brace_delta(line)
+            if skip_command_balance <= 0:
+                skip_command_balance = None
+            continue
+        if skip_references:
+            if _tex_appendix_marker(stripped):
+                skip_references = False
+            else:
+                continue
+
+        if not stripped:
+            if filtered and filtered[-1] != "":
+                filtered.append("")
+            continue
+        if re.search(r"\\end\{document\}", stripped):
+            continue
+
+        env_match = re.match(r"\\begin\{([^{}]+)\}", stripped)
+        if env_match:
+            env = env_match.group(1).rstrip("*")
+            if _tex_agent_format_env(env) or env in {"references", "thebibliography"}:
+                skip_env = env_match.group(1)
+                continue
+
+        if _tex_reference_heading(stripped):
+            skip_references = True
+            continue
+
+        command = _tex_command_name_at_start(stripped)
+        if command and command.lower() in TEX_AGENT_DROP_LINE_COMMANDS:
+            continue
+        if _tex_agent_format_command(command):
+            balance = _brace_delta(stripped)
+            if balance > 0:
+                skip_command_balance = balance
+            continue
+
+        filtered.append(line)
+
+    while filtered and filtered[-1] == "":
+        filtered.pop()
+    return filtered
+
+
+def build_filtered_tex_agent_source(source_units: list[dict[str, Any]], unit_texts: dict[str, str]) -> str:
+    output: list[str] = [
+        "% llm-wiki filtered original TeX view for agent reading.",
+        "% Removed: preamble/style/author formatting, include wrappers, comments, and references/bibliography commands.",
+        "% Preserved: paper body, equations/tables/figures, and appendices.",
+        "",
+    ]
+    for unit in source_units:
+        rel = str(unit.get("path") or "")
+        role = str(unit.get("role") or "body")
+        lines = _filter_tex_agent_unit(unit_texts.get(rel, ""), main_unit=unit.get("include_order") == 0)
+        if not lines:
+            continue
+        output.extend([f"% --- source: {rel} role={role} ---", *lines, ""])
+    while output and output[-1] == "":
+        output.pop()
+    return "\n".join(output).rstrip() + "\n"
+
+
+def render_tex_agent_source_tex(ir: dict[str, Any]) -> str:
+    return str(ir.get("filtered_source") or "")
+
+
 def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     source_root = (workdir / "source").resolve()
     source_units, diagnostics = build_tex_source_units(workdir, main_tex)
@@ -1670,17 +2023,21 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
         except OSError:
             unit_texts[unit["path"]] = ""
     combined_tex = "\n".join(unit_texts.get(unit["path"], "") for unit in source_units)
+    filtered_source = build_filtered_tex_agent_source(source_units, unit_texts)
     macros = _extract_simple_tex_macros(combined_tex)
     expanded_texts = {path: _expand_simple_tex_macros(text, macros) for path, text in unit_texts.items()}
     expanded_full = "\n".join(expanded_texts.get(unit["path"], "") for unit in source_units)
 
     sections: list[dict[str, Any]] = []
+    statements: list[dict[str, Any]] = []
     equations: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
     for unit in source_units:
         text = expanded_texts.get(unit["path"], "")
         for card in extract_tex_section_cards(text):
             sections.append({**card, "source_tex": unit["path"], "role": unit["role"]})
+        for card in extract_tex_statement_cards(text):
+            statements.append({**card, "source_tex": unit["path"], "role": unit["role"]})
         for card in extract_tex_equation_cards(text):
             equations.append({**card, "source_tex": unit["path"], "role": unit["role"]})
         for card in extract_tex_table_cards(text):
@@ -1707,6 +2064,8 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
             "source_tex": source_tex,
             "localized_path": localized_path,
             "role": role_by_path.get(source_tex, "body"),
+            "line_start": card.get("line_start"),
+            "line_end": card.get("line_end"),
             "visual_inspection": "optional",
             "localizable": bool(card.get("localizable")),
             "reason": card.get("reason"),
@@ -1717,7 +2076,7 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
     flatten = _run_latexpand_flatten(workdir, main_tex)
     main_source_rel = _tex_source_rel(source_root, workdir / main_tex)
     abstract = extract_tex_abstract(expanded_texts.get(main_source_rel, "")) or extract_tex_abstract(expanded_full)
-    title = tex_command_arg(expanded_full, "title")
+    title = tex_title_from_text(expanded_full)
     ir = {
         "ok": True,
         "main_tex": main_tex,
@@ -1726,12 +2085,14 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
         "source_units": source_units,
         "macros": {"semantic": macros},
         "sections": sections[:80],
-        "objects": {"equations": equations[:80], "tables": tables[:60], "figures": figures[:80]},
+        "objects": {"statements": statements[:120], "equations": equations[:80], "tables": tables[:60], "figures": figures[:80]},
+        "filtered_source": filtered_source,
         "full_text": flatten.get("text") or expanded_full,
     }
     coverage = {
         "source_units": len(source_units),
         "sections": len(ir["sections"]),
+        "statements": len(ir["objects"]["statements"]),
         "equations": len(ir["objects"]["equations"]),
         "tables": len(ir["objects"]["tables"]),
         "figures": len(ir["objects"]["figures"]),
@@ -1747,81 +2108,6 @@ def build_tex_agent_ir(workdir: Path, main_tex: str, localized_figures: dict[str
     return ir, audit
 
 
-def render_tex_agent_map_markdown(ir: dict[str, Any], audit: dict[str, Any]) -> str:
-    lines = [
-        "# TeX agent map",
-        "",
-        f"- main_tex: `{ir.get('main_tex')}`",
-        f"- audit_status: {audit.get('status')}",
-        "- fallback_policy: Source paths below are locator metadata. Default reading surface: paper_core.md and paper_objects.md. TeX fallback: named parsed-Markdown gap -> exact span.",
-        "",
-        "## Source units",
-    ]
-    for unit in ir.get("source_units") or []:
-        parent = unit.get("parent") or "root"
-        sections = ", ".join(unit.get("section_titles") or []) or "none"
-        lines.append(f"- `{unit.get('path')}` role={unit.get('role')} parent=`{parent}` sections={sections}")
-    if audit.get("diagnostics"):
-        lines.append("\n## Diagnostics")
-        for item in audit.get("diagnostics") or []:
-            lines.append(f"- {json.dumps(item, ensure_ascii=False, sort_keys=True)}")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_tex_agent_core_markdown(ir: dict[str, Any]) -> str:
-    lines = [
-        "# TeX agent core",
-        "",
-        f"- title: {ir.get('title') or 'Untitled'}",
-        "- fallback_policy: Parsed Markdown is the default reading surface. `fallback_locator` maps named concrete gaps in this parsed section to exact source spans.",
-        "",
-    ]
-    if ir.get("abstract"):
-        lines += ["## Abstract", str(ir.get("abstract")), ""]
-    lines.append("## Body sections")
-    for section in ir.get("sections") or []:
-        if section.get("role") != "body":
-            continue
-        lines += ["", f"### {section.get('heading')}", f"fallback_locator: source_tex=`{section.get('source_tex')}`", "", str(section.get("excerpt") or "")]
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_tex_agent_objects_markdown(ir: dict[str, Any]) -> str:
-    objects = ir.get("objects") or {}
-    lines = [
-        "# TeX agent objects",
-        "",
-        "- fallback_policy: Parsed Markdown objects are the default reading surface. `fallback_locator` maps named formula/table/figure context gaps to exact source spans.",
-        "",
-        "## Equations",
-    ]
-    for eq in objects.get("equations") or []:
-        lines.append(f"- {eq.get('label') or 'unlabeled'} fallback_locator: source_tex=`{eq.get('source_tex')}` formula: `{eq.get('formula')}`")
-    if not objects.get("equations"):
-        lines.append("- none detected")
-    lines.append("\n## Tables")
-    for table in objects.get("tables") or []:
-        lines.append(f"- {table.get('label') or 'unlabeled'} fallback_locator: source_tex=`{table.get('source_tex')}` parse_status: {table.get('parse_status')} caption: {table.get('caption')}")
-    if not objects.get("tables"):
-        lines.append("- none detected")
-    lines.append("\n## Figures")
-    for figure in objects.get("figures") or []:
-        lines.append(f"- {figure.get('label') or 'unlabeled'}")
-        lines.append(f"  - caption: {figure.get('caption')}")
-        lines.append(f"  - image_path: `{figure.get('image_path')}`")
-        lines.append(f"  - fallback_locator: source_tex=`{figure.get('source_tex')}`")
-        localized = figure.get("localized_path") if figure.get("localized_path") is not None else "null"
-        lines.append(f"  - localized_path: {localized}")
-        lines.append(f"  - visual_inspection: {figure.get('visual_inspection')}")
-    if not objects.get("figures"):
-        lines.append("- none detected")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_tex_agent_full_markdown(ir: dict[str, Any]) -> str:
-    return "# TeX agent full view\n\n```tex\n" + str(ir.get("full_text") or "")[:200_000] + "\n```\n"
-
-
 def render_tex_agent_audit_markdown(audit: dict[str, Any]) -> str:
     lines = ["# TeX agent IR audit", "", f"- status: {audit.get('status')}", f"- flatten: {json.dumps(audit.get('flatten') or {}, ensure_ascii=False, sort_keys=True)}", f"- coverage: {json.dumps(audit.get('coverage') or {}, ensure_ascii=False, sort_keys=True)}"]
     if audit.get("diagnostics"):
@@ -1833,22 +2119,16 @@ def render_tex_agent_audit_markdown(audit: dict[str, Any]) -> str:
 
 def write_tex_agent_ir_sidecars(workdir: Path, files: dict[str, str], *, main_tex: str, localized_figures: dict[str, Any] | None = None) -> dict[str, Any]:
     ir, audit = build_tex_agent_ir(workdir, main_tex, localized_figures=localized_figures)
-    ir_json = {key: value for key, value in ir.items() if key != "full_text"}
-    ir_json["full_text_path"] = "paper_full.agent.md"
+    ir_json = {key: value for key, value in ir.items() if key not in {"filtered_source", "full_text"}}
+    ir_json["filtered_source_path"] = TEX_AGENT_SOURCE_FILE
     write_json(workdir / "tex_agent_ir.json", ir_json)
-    write_text(workdir / "paper_map.md", render_tex_agent_map_markdown(ir, audit))
-    write_text(workdir / "paper_core.md", render_tex_agent_core_markdown(ir))
-    write_text(workdir / "paper_objects.md", render_tex_agent_objects_markdown(ir))
-    write_text(workdir / "paper_full.agent.md", render_tex_agent_full_markdown(ir))
+    write_text(workdir / TEX_AGENT_SOURCE_FILE, render_tex_agent_source_tex(ir))
     write_json(workdir / "tex_agent_ir_audit.json", audit)
     write_text(workdir / "tex_agent_ir_audit.md", render_tex_agent_audit_markdown(audit))
     files.update(
         {
             "tex_agent_ir": "tex_agent_ir.json",
-            "tex_agent_map": "paper_map.md",
-            "tex_agent_core": "paper_core.md",
-            "tex_agent_objects": "paper_objects.md",
-            "tex_agent_full": "paper_full.agent.md",
+            "tex_agent_source": TEX_AGENT_SOURCE_FILE,
             "tex_agent_audit": "tex_agent_ir_audit.json",
             "tex_agent_audit_markdown": "tex_agent_ir_audit.md",
         }
@@ -1875,6 +2155,29 @@ def arxiv_api_title(workdir: Path) -> str | None:
         return None
     title = compact_ws(re.sub(r"<[^>]+>", " ", match.group(1)), max_len=300)
     return title or None
+
+
+def arxiv_abs_title(workdir: Path) -> str | None:
+    abs_path = workdir / "abs.html"
+    if not abs_path.exists():
+        return None
+    text = abs_path.read_text(encoding="utf-8", errors="replace")
+    meta_patterns = [
+        r"<meta\b(?=[^>]*\bname=[\"']citation_title[\"'])(?=[^>]*\bcontent=[\"']([^\"']+)[\"'])[^>]*>",
+        r"<meta\b(?=[^>]*\bproperty=[\"']og:title[\"'])(?=[^>]*\bcontent=[\"']([^\"']+)[\"'])[^>]*>",
+    ]
+    candidates: list[str] = []
+    for pattern in meta_patterns:
+        candidates.extend(re.findall(pattern, text, flags=re.I | re.S))
+    h1_match = re.search(r"<h1\b[^>]*\bclass=[\"'][^\"']*title[^\"']*[\"'][^>]*>(.*?)</h1>", text, flags=re.I | re.S)
+    if h1_match:
+        candidates.append(re.sub(r"<[^>]+>", " ", h1_match.group(1)))
+    for candidate in candidates:
+        title = compact_ws(html.unescape(candidate), max_len=300)
+        title = re.sub(r"(?i)^\s*title\s*:\s*", "", title).strip()
+        if title and not placeholder_title(title):
+            return title
+    return None
 
 
 def arxiv_api_categories(workdir: Path) -> list[str]:
@@ -1971,8 +2274,9 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
         text_candidates.append(read_text(docling_path, limit=100_000))
     combined_text = "\n".join(text_candidates)
     api_title = arxiv_api_title(workdir)
-    tex_title = tex_command_arg(tex_text, "title") if tex_text else None
-    metadata_title = next((candidate for candidate in [api_title, tex_title, title] if candidate and not placeholder_title(candidate)), title or "Untitled Paper")
+    abs_title = arxiv_abs_title(workdir)
+    tex_title = tex_title_from_text(tex_text) if tex_text else None
+    metadata_title = next((candidate for candidate in [api_title, abs_title, tex_title, title] if candidate and not placeholder_title(candidate)), title or "Untitled Paper")
     section_cards = extract_tex_section_cards(tex_text) if tex_text else section_inventory(combined_text)
     equation_cards = extract_tex_equation_cards(tex_text) if tex_text else []
     table_cards = extract_tex_table_cards(tex_text) if tex_text else []
@@ -2387,26 +2691,24 @@ def _brief_cards_from_digest(digest: dict[str, Any] | None, *, max_cards: int = 
     return cards
 
 
-TEX_SEMANTIC_REF_ORDER = [
-    "tex_agent_map",
-    "tex_agent_core",
-    "tex_agent_objects",
+TEX_FILTERED_REF_ORDER = [
     "tex_agent_audit",
+    "tex_agent_source",
 ]
 
 
-def tex_semantic_first_reads(source_refs: dict[str, Any] | None) -> list[str]:
+def tex_filtered_first_reads(source_refs: dict[str, Any] | None) -> list[str]:
     refs = source_refs or {}
-    return [str(refs[key]) for key in TEX_SEMANTIC_REF_ORDER if refs.get(key)]
+    return [str(refs[key]) for key in TEX_FILTERED_REF_ORDER if refs.get(key)]
 
 
-def has_tex_semantic_source_refs(source_refs: dict[str, Any] | None) -> bool:
+def has_tex_filtered_source_refs(source_refs: dict[str, Any] | None) -> bool:
     refs = source_refs or {}
-    return all(bool(refs.get(key)) for key in ["tex_agent_map", "tex_agent_core", "tex_agent_objects"])
+    return bool(refs.get("tex_agent_source"))
 
 
-def tex_semantic_fallback_policy() -> str:
-    return "Use paper_full.agent.md or source_tex as exact-span fallback after parsed Markdown sidecars expose a concrete gap; name the concrete gap first and open the exact formula/table/figure/limitation/uncertain-claim span"
+def tex_filtered_fallback_policy() -> str:
+    return "Use source_read_plan/source_tex only as exact-span locators after the filtered TeX source leaves a concrete formula/table/figure/limitation/uncertain-claim gap"
 
 
 def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | None, digest: dict[str, Any] | None, resource_boundary: dict[str, Any] | None) -> dict[str, Any]:
@@ -2424,17 +2726,11 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         source_refs["source_read_plan"] = files.get("source_read_plan")
     if files.get("docling_markdown") and (source_read_plan or {}).get("source_kind") == "docling_pdf":
         source_refs["docling_markdown"] = files.get("docling_markdown")
-    if files.get("tex_agent_map"):
-        source_refs["tex_agent_map"] = files.get("tex_agent_map")
-    if files.get("tex_agent_core"):
-        source_refs["tex_agent_core"] = files.get("tex_agent_core")
-    if files.get("tex_agent_objects"):
-        source_refs["tex_agent_objects"] = files.get("tex_agent_objects")
-    if files.get("tex_agent_full"):
-        source_refs["tex_agent_full"] = files.get("tex_agent_full")
+    if files.get("tex_agent_source"):
+        source_refs["tex_agent_source"] = files.get("tex_agent_source")
     if files.get("tex_agent_audit_markdown"):
         source_refs["tex_agent_audit"] = files.get("tex_agent_audit_markdown")
-    semantic_tex = has_tex_semantic_source_refs(source_refs)
+    filtered_tex = has_tex_filtered_source_refs(source_refs)
     agent_actions = [
         "Read the writing contract refs before source evidence; they are the quality gate for raw_body_draft.md.",
         "Read paper_digest.md as a scientific evidence index before opening source evidence.",
@@ -2442,10 +2738,10 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         "Run raw-fast note assembly so script-owned metadata is locked before closeout.",
         "Run raw-fast closeout after assembly; do not run native refresh while wiki integration is pending.",
     ]
-    if semantic_tex:
+    if filtered_tex:
         agent_actions.insert(
             2,
-            f"Then read paper_map.md, paper_core.md, and paper_objects.md as the default TeX semantic surfaces; inspect tex_agent_ir_audit.md for coverage warnings; fallback rule: {tex_semantic_fallback_policy()}.",
+            f"Then read tex_agent_ir_audit.md and paper_source.agent.tex as the default filtered original TeX source; fallback rule: {tex_filtered_fallback_policy()}.",
         )
         agent_actions.insert(
             3,
@@ -2602,16 +2898,16 @@ def handoff_automation_next_action(source_read_plan: dict[str, Any] | None, *, m
     if manual_required:
         return {"action": "read_manual_reference_paths", "reason": "manual_required", "manual_reference_policy": "only_on_manual_required"}
     required_first_reads = [ref["path"] for ref in WRITING_CONTRACT_REFS]
-    if source_read_plan and has_tex_semantic_source_refs(source_refs):
+    if source_read_plan and has_tex_filtered_source_refs(source_refs):
         return {
-            "action": "read_writing_contract_then_tex_semantic_sidecars",
+            "action": "read_writing_contract_then_filtered_tex_source",
             "manual_reference_policy": "only_on_manual_required",
             "required_first_reads": required_first_reads,
             "digest_read_before_source": "paper_digest.md",
-            "semantic_first_reads": tex_semantic_first_reads(source_refs),
+            "filtered_tex_first_reads": tex_filtered_first_reads(source_refs),
             "fallback_source_plan": "source_read_plan",
-            "fallback_policy": tex_semantic_fallback_policy(),
-            "then": "read_tex_semantic_sidecars_then_source_read_plan_if_needed",
+            "fallback_policy": tex_filtered_fallback_policy(),
+            "then": "read_filtered_tex_source_then_source_read_plan_if_needed",
         }
     if source_read_plan:
         return {
@@ -2631,16 +2927,16 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
     manual_paths: list[str] = []
     source_refs = dict(brief.get("source_refs") or {})
     source_read_plan = brief.get("source_read_plan") if isinstance(brief.get("source_read_plan"), dict) else None
-    semantic_tex = has_tex_semantic_source_refs(source_refs)
+    filtered_tex = has_tex_filtered_source_refs(source_refs)
     agent_actions = [
         "Before drafting, read every writing_contract_refs path and paper_digest.md; this is the default quality gate and evidence index.",
         f"Write the raw-note body only to `{RAW_BODY_DRAFT_FILE}`; do not write YAML frontmatter or metadata.",
         "Run raw-fast note assembly to create protected_anchors.next_raw_path from script-owned metadata, then run closeout with generated closeout_args when available.",
     ]
-    if semantic_tex:
+    if filtered_tex:
         agent_actions.insert(
             1,
-            f"Read paper_map.md, paper_core.md, and paper_objects.md as the default TeX semantic surfaces; inspect tex_agent_ir_audit.md for coverage warnings; fallback rule: {tex_semantic_fallback_policy()}.",
+            f"Read tex_agent_ir_audit.md and paper_source.agent.tex as the default filtered original TeX source; fallback rule: {tex_filtered_fallback_policy()}.",
         )
         agent_actions.insert(
             2,
@@ -2715,17 +3011,15 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
         lines.append(f"- read before `{ref.get('read_before')}`: `{ref.get('path')}` — {ref.get('reason')}")
     raw_source_refs = handoff.get("source_refs")
     source_refs: dict[str, Any] = raw_source_refs if isinstance(raw_source_refs, dict) else {}
-    semantic_tex = has_tex_semantic_source_refs(source_refs)
+    filtered_tex = has_tex_filtered_source_refs(source_refs)
     source_plan = handoff.get("source_read_plan") if isinstance(handoff.get("source_read_plan"), dict) else None
     if source_plan:
-        if semantic_tex and source_plan.get("source_kind") == "tex_source":
-            lines.append("\n## Default TeX semantic reads")
-            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then read `paper_map.md`, `paper_core.md`, and `paper_objects.md`; inspect `tex_agent_ir_audit.md` for coverage warnings.")
+        if filtered_tex and source_plan.get("source_kind") == "tex_source":
+            lines.append("\n## Default filtered TeX reads")
+            lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then read `tex_agent_ir_audit.md` and `paper_source.agent.tex` as the filtered original TeX source.")
             lines.append("\n## Fallback TeX source contract")
-            lines.append("- parsed Markdown sidecars are the default reading surface; `source_read_plan` and `source_tex` are locator metadata, not a read queue.")
-            lines.append(f"- {tex_semantic_fallback_policy()} for a specific formula, table/figure conclusion, limitation, or uncertain claim.")
-            if source_refs.get("tex_agent_full"):
-                lines.append(f"- fallback full source view locator: `{source_refs.get('tex_agent_full')}` — resolve the named gap before raw source lookup.")
+            lines.append("- `paper_source.agent.tex` is the default reading surface; `source_read_plan` and `source_tex` are locator metadata, not a read queue.")
+            lines.append(f"- {tex_filtered_fallback_policy()}.")
             if source_plan.get("first_reads"):
                 lines.append(f"- source_read_plan locator count: {len(source_plan.get('first_reads') or [])}; map broad locators to the exact needed span for the named gap.")
         else:
@@ -2736,7 +3030,7 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
                 lines.append("Default next action: after writing_contract_refs, read `paper_digest.md` as an evidence index, then inspect the Docling PDF spans below for claims that need more detail.")
         if source_plan.get("reading_strategy"):
             lines.append(f"- reading_strategy: {source_plan.get('reading_strategy')}")
-        if not (semantic_tex and source_plan.get("source_kind") == "tex_source"):
+        if not (filtered_tex and source_plan.get("source_kind") == "tex_source"):
             for item in source_plan.get("first_reads") or []:
                 lines.append(f"- source span: `{item.get('path')}` offset={item.get('offset')} limit={item.get('limit')} — {item.get('reason')}")
     lines.append("\n## Source refs")
@@ -3327,7 +3621,7 @@ def process_arxiv(
         files["section_inventory"] = "section_inventory.json"
         files["figure_table_inventory"] = "figure_table_inventory.json"
         main_tex_text = read_text(workdir / main_tex, limit=200_000)
-        title = arxiv_api_title(workdir) or tex_title_from_text(main_tex_text) or tex_title_from_text(tex_text) or title_from_text(_plain_tex_prose(main_tex_text))
+        title = arxiv_api_title(workdir) or arxiv_abs_title(workdir) or tex_title_from_text(main_tex_text) or tex_title_from_text(tex_text) or title_from_text(_plain_tex_prose(main_tex_text))
         arxiv_categories = arxiv_api_categories(workdir)
         links = {"ok": True, "links": []}
         resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=supplied_resource_candidates)

@@ -281,54 +281,33 @@ def test_query_smoke_from_args_loads_active_first_vector_source(tmp_path, monkey
             },
         )
     ]
-def test_query_smoke_request_requires_query_data_endpoint_before_http() -> None:
-    calls = []
 
-    def urlopen(request, *, timeout):
-        calls.append(("urlopen", request.full_url, timeout))
-        raise AssertionError("non-/query/data smoke must fail before HTTP")
 
-    try:
-        batch_native_refresh.query_smoke_request(
-            "http://127.0.0.1:9621/query",
-            query="native smoke",
-            urlopen=urlopen,
-        )
-    except ValueError as exc:
-        assert "/query/data" in str(exc)
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("query smoke endpoint must be /query/data")
+def test_query_smoke_request_rejects_invalid_endpoint_or_mode_before_http() -> None:
+    cases = [
+        ("http://127.0.0.1:9621/query", "mix", ("/query/data",)),
+        ("http://127.0.0.1:9621/query/data", "bypass", ("bypass",)),
+        ("http://127.0.0.1:9621/query/data", "naive", ("mix", "naive")),
+    ]
+    for url, mode, expected_terms in cases:
+        calls = []
 
-    assert calls == []
-@pytest.mark.parametrize(
-    ("mode", "expected_terms"),
-    [
-        ("bypass", ("bypass",)),
-        ("naive", ("mix", "naive")),
-    ],
-)
-def test_query_smoke_request_rejects_invalid_mode_before_http(mode: str, expected_terms: tuple[str, ...]) -> None:
-    calls = []
+        def urlopen(request, *, timeout):
+            calls.append(("urlopen", request.full_url, timeout))
+            raise AssertionError("invalid smoke request must fail before HTTP")
 
-    def urlopen(request, *, timeout):
-        calls.append(("urlopen", request.full_url, timeout))
-        raise AssertionError("invalid smoke mode must fail before HTTP")
-
-    try:
-        batch_native_refresh.query_smoke_request(
-            "http://127.0.0.1:9621/query/data",
-            query="native smoke",
-            mode=mode,
-            urlopen=urlopen,
-        )
-    except ValueError as exc:
-        message = str(exc)
+        with pytest.raises(ValueError) as excinfo:
+            batch_native_refresh.query_smoke_request(
+                url,
+                query="native smoke",
+                mode=mode,
+                urlopen=urlopen,
+            )
         for term in expected_terms:
-            assert term in message
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("invalid smoke mode must be rejected")
+            assert term in str(excinfo.value)
+        assert calls == []
 
-    assert calls == []
+
 def test_query_smoke_request_requires_zvec_trace_hits() -> None:
     class Response:
         status = 200

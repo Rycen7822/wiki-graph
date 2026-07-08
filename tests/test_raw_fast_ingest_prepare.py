@@ -91,47 +91,35 @@ def test_raw_fast_ingest_prepare_print_command_normalizes_github_blob_pdf_to_raw
     assert command[command.index("--kind") + 1] == "direct-pdf"
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
+def test_raw_fast_ingest_prepare_print_command_plumbs_cross_site_arxiv_kind(tmp_path: Path) -> None:
+    urls = [
         "https://paperswithcode.co/paper/2606.28436",
-        "https://paperswithcode.co/paper/arxiv/2606.30410v2",
-        "https://huggingface.co/papers/2606.02572",
-        "https://www.alphaxiv.org/abs/2606.04036",
-        "https://alphaxiv.org/overview/2606.04036v3?tab=discussion",
-    ],
-)
-def test_raw_fast_ingest_prepare_print_command_routes_cross_site_arxiv_urls(tmp_path: Path, url: str) -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_ingest_prepare",
-            "--url",
-            url,
-            "--tmp-root",
-            str(tmp_path / "raw-fast-tmp"),
-            "--print-command",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
+        "https://modelscope.ai/papers/2606.07591",
+    ]
+    for url in urls:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ops.raw_fast_ingest_prepare",
+                "--url",
+                url,
+                "--tmp-root",
+                str(tmp_path / "raw-fast-tmp"),
+                "--print-command",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
 
-    command = payload["command"]
-    assert command[command.index("--kind") + 1] == "arxiv"
+        command = payload["command"]
+        assert command[command.index("--kind") + 1] == "arxiv"
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "https://openreview.net/forum?id=mLhZzo7BIb",
-        "https://openreview.net/pdf?id=mLhZzo7BIb",
-        "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf",
-    ],
-)
-def test_raw_fast_ingest_prepare_print_command_normalizes_openreview_routes(tmp_path: Path, url: str) -> None:
+def test_raw_fast_ingest_prepare_print_command_plumbs_openreview_canonical_pdf(tmp_path: Path) -> None:
+    url = "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf"
     result = subprocess.run(
         [
             sys.executable,
@@ -320,8 +308,8 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert wiki_root_machine_pollution(root) == []
 
 
-def test_raw_fast_ingest_prepare_wrapper_preserves_tex_semantic_fallback_contract(tmp_path: Path) -> None:
-    workdir = tmp_path / "semantic-wrapper"
+def test_raw_fast_ingest_prepare_wrapper_preserves_filtered_tex_fallback_contract(tmp_path: Path) -> None:
+    workdir = tmp_path / "filtered-tex-wrapper"
     workdir.mkdir()
     handoff_path = workdir / "agent_handoff.json"
     handoff_path.write_text(
@@ -332,17 +320,14 @@ def test_raw_fast_ingest_prepare_wrapper_preserves_tex_semantic_fallback_contrac
                 "resource_review_required": False,
                 "manual_reference_paths": [],
                 "manual_reference_policy": raw_fast_ingest_prepare.manual_reference_policy(visible=False),
-                "automation_next_action": {"action": "read_writing_contract_then_tex_semantic_sidecars"},
+                "automation_next_action": {"action": "read_writing_contract_then_filtered_tex_source"},
                 "source_read_plan": {
                     "source_kind": "tex_source",
                     "first_reads": [{"path": "source/sections/method.tex", "offset": 1, "limit": 180, "reason": "source overview"}],
                 },
                 "source_refs": {
                     "scientific_digest": "paper_digest.md",
-                    "tex_agent_map": "paper_map.md",
-                    "tex_agent_core": "paper_core.md",
-                    "tex_agent_objects": "paper_objects.md",
-                    "tex_agent_full": "paper_full.agent.md",
+                    "tex_agent_source": "paper_source.agent.tex",
                     "tex_agent_audit": "tex_agent_ir_audit.md",
                 },
                 "protected_anchors": {"title": "Semantic Wrapper Fixture", "next_raw_path": "raw/clip/2607/26070799_Semantic-Wrapper-Fixture.md"},
@@ -367,7 +352,9 @@ def test_raw_fast_ingest_prepare_wrapper_preserves_tex_semantic_fallback_contrac
 
     joined_actions = "\n".join(handoff["agent_actions"])
     assert "source_refs/source_read_plan route" not in joined_actions
-    assert "parsed Markdown sidecars" in joined_actions
-    assert "name the concrete gap" in joined_actions
-    assert "exact formula/table/figure/limitation/uncertain-claim span" in joined_actions
+    assert "filtered original TeX source" in joined_actions
+    assert "paper_source.agent.tex" in joined_actions
+    assert "parsed " + "Markdown sidecars" not in joined_actions
+    for retired in ["map", "core", "objects"]:
+        assert f"paper_{retired}.md" not in joined_actions
     assert "fallback source span:" not in handoff_md
