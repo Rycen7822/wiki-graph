@@ -308,12 +308,13 @@ def test_data_only_query_engine_rejects_building_workspace(tmp_path) -> None:
         engine.query("native-test", "alpha query", [1.0, 0.0], mode="mix", record_types=("entity",))
 
 
-def test_data_only_query_engine_rejects_unknown_mode(tmp_path) -> None:
+def test_data_only_query_engine_rejects_unknown_or_retired_modes(tmp_path) -> None:
     db = SQLiteWorkspace(tmp_path / "native.sqlite")
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
-    with pytest.raises(ValueError, match="mode"):
-        engine.query("native-test", "alpha query", [1.0], mode="unsupported")
+    for mode in ["unsupported", "local", "global", "hybrid"]:
+        with pytest.raises(ValueError, match="mode"):
+            engine.query("native-test", "alpha query", [1.0], mode=mode)
 
 
 def test_data_only_query_engine_rejects_unknown_record_type(tmp_path) -> None:

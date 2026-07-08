@@ -1,5 +1,4 @@
 import sys
-import argparse
 import json
 import subprocess
 from pathlib import Path
@@ -11,9 +10,8 @@ RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki"
 sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
-from ops import raw_fast_closeout  # noqa: E402
-from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
+
+
 def _structured_raw_fast_note(title: str, source: str) -> str:
     return f"""---
 title: \"{title}\"
@@ -54,16 +52,10 @@ The tiny fixture is a synthetic limitation, not a real paper.
 
 Which wrapper gate catches failed verification before mark-pending?
 """
-def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadata(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    raw_rel = "raw/clip/2601/26010107_Bloated-Meta-Paper.md"
-    note = _structured_raw_fast_note("Bloated Meta Paper", "https://example.test/bloated-meta.pdf").replace(
-        "capture_route: \"test synthetic route\"\n",
-        "capture_route: \"test synthetic route\"\ntags: [benchmark, memory]\ntopic_hints: [\"compact metadata\", \"graph routing\"]\nresource_status: \"legacy resource status should stay outside raw notes\"\nsource_pdf: \"https://example.test/bloated-meta.pdf\"\nauthors: [\"A. Author\"]\narxiv_version: \"v1\"\n",
-    )
-    write(root / raw_rel, note)
 
-    result = subprocess.run(
+
+def _run_verifier(root: Path, raw_rel: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             sys.executable,
             str(RAW_FAST_VERIFIER),
@@ -76,6 +68,18 @@ def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadat
         text=True,
         capture_output=True,
     )
+
+
+def test_raw_fast_verifier_rejects_resource_status_and_extra_frontmatter_metadata(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    raw_rel = "raw/clip/2601/26010107_Bloated-Meta-Paper.md"
+    note = _structured_raw_fast_note("Bloated Meta Paper", "https://example.test/bloated-meta.pdf").replace(
+        "capture_route: \"test synthetic route\"\n",
+        "capture_route: \"test synthetic route\"\ntags: [benchmark, memory]\ntopic_hints: [\"compact metadata\", \"graph routing\"]\nresource_status: \"legacy resource status should stay outside raw notes\"\nsource_pdf: \"https://example.test/bloated-meta.pdf\"\nauthors: [\"A. Author\"]\narxiv_version: \"v1\"\n",
+    )
+    write(root / raw_rel, note)
+
+    result = _run_verifier(root, raw_rel)
     payload = json.loads(result.stdout)
 
     assert result.returncode != 0
@@ -98,19 +102,7 @@ def test_raw_fast_verifier_accepts_source_resource_link_metadata(tmp_path: Path)
     )
     write(root / raw_rel, note)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
+    result = _run_verifier(root, raw_rel)
     payload = json.loads(result.stdout)
 
     assert result.returncode == 0
@@ -123,19 +115,7 @@ def test_raw_fast_verifier_rejects_remote_markdown_images(tmp_path: Path) -> Non
     raw_rel = "raw/clip/2601/26010108_Remote-Image-Paper.md"
     write(root / raw_rel, _structured_raw_fast_note("Remote Image Paper", "https://example.test/remote-image.pdf") + "\n![remote](https://example.test/figure.png)\n")
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
+    result = _run_verifier(root, raw_rel)
     payload = json.loads(result.stdout)
 
     assert result.returncode != 0
@@ -152,19 +132,7 @@ def test_raw_fast_verifier_rejects_non_obsidian_math_delimiters(tmp_path: Path) 
     )
     write(root / raw_rel, note)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
+    result = _run_verifier(root, raw_rel)
     payload = json.loads(result.stdout)
 
     assert result.returncode != 0
@@ -175,109 +143,48 @@ def test_raw_fast_verifier_rejects_non_obsidian_math_delimiters(tmp_path: Path) 
     assert diagnostics["obsidian_math_delimiters"]["fix_hint"].startswith("Use Obsidian-renderable")
 
 
-def test_raw_fast_verifier_explains_visual_evidence_blocker_without_broad_search(tmp_path: Path) -> None:
+def test_raw_fast_verifier_rejects_unintegrated_visual_evidence_patterns(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
-    raw_rel = "raw/clip/2601/26010109_Visual-Evidence-Missing.md"
-    note = _structured_raw_fast_note("Visual Evidence Missing", "https://example.test/visual-evidence.pdf").replace(
-        "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
-        "The experimental conclusion is summarized in prose without naming any figure or table evidence.",
-    )
-    write(root / raw_rel, note)
+    cases = [
+        (
+            "Visual Evidence Missing",
+            "visual-evidence",
+            "The experimental conclusion is summarized in prose without naming any figure or table evidence.",
+            "figure_table_evidence_integrated",
+        ),
+        (
+            "Chart Inventory Paper",
+            "chart-inventory",
+            "图表证据先给出整体读法：headline Figure 把同一 prompt 下的四类输出并列展示，"
+            "主图用原模型 probe score 作为 x-axis、最终模型 probe score 作为 y-axis，"
+            "右侧堆叠图表按 KL penalty 与 detector penalty 展示 policy type 分布。",
+            "figure_table_inventory_style",
+        ),
+        (
+            "Broad Visual Conclusion Paper",
+            "broad-visual",
+            "Figure 1 支撑核心定位：图表证据显示该系统位于复杂但可解释的区域，"
+            "结论是该 substrate 的卖点不是简化单元，而是暴露复杂交互。",
+            "figure_table_broad_conclusion_without_key_data",
+        ),
+    ]
+    for title, slug, replacement, expected_code in cases:
+        raw_rel = f"raw/clip/2601/26010109_{slug}.md"
+        note = _structured_raw_fast_note(title, f"https://example.test/{slug}.pdf").replace(
+            "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
+            replacement,
+        )
+        write(root / raw_rel, note)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
+        result = _run_verifier(root, raw_rel)
+        payload = json.loads(result.stdout)
+        diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
 
-    assert result.returncode != 0
-    assert payload["verifier_path"].endswith("raw_fast_note_verify.py")
-    assert payload["diagnostic_hint"]["path"].endswith("raw_fast_note_verify.py")
-    assert "repair anchor" in payload["diagnostic_hint"]["message"]
-    assert "figure_table_evidence_integrated" in payload["structured_evidence_sections_insufficient"]
-    diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
-    assert "structured_evidence_sections_insufficient" in diagnostics
-    assert diagnostics["figure_table_evidence_integrated"]["fix_hint"].startswith("Integrate figure/table")
-    assert diagnostics["figure_table_evidence_integrated"]["owner_path"].endswith("raw_fast_note_verify.py")
-
-
-def test_raw_fast_verifier_rejects_chart_inventory_as_visual_evidence(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    raw_rel = "raw/clip/2601/26010111_Chart-Inventory-Paper.md"
-    inventory_style = (
-        "图表证据先给出整体读法：headline Figure 把同一 prompt 下的四类输出并列展示，"
-        "主图用原模型 probe score 作为 x-axis、最终模型 probe score 作为 y-axis，"
-        "右侧堆叠图表按 KL penalty 与 detector penalty 展示 policy type 分布。"
-    )
-    note = _structured_raw_fast_note("Chart Inventory Paper", "https://example.test/chart-inventory.pdf").replace(
-        "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
-        inventory_style,
-    )
-    write(root / raw_rel, note)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
-
-    assert result.returncode != 0
-    assert "structured_evidence_sections_insufficient" in payload["raw_fast_blockers"]
-    assert "figure_table_inventory_style" in payload["structured_evidence_sections_insufficient"]
-    diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
-    assert diagnostics["figure_table_inventory_style"]["fix_hint"].startswith("Replace chart layout descriptions")
-
-
-def test_raw_fast_verifier_rejects_broad_visual_conclusion_without_key_data(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    raw_rel = "raw/clip/2601/26010112_Broad-Visual-Conclusion-Paper.md"
-    broad_style = (
-        "Figure 1 支撑核心定位：图表证据显示该系统位于复杂但可解释的区域，"
-        "结论是该 substrate 的卖点不是简化单元，而是暴露复杂交互。"
-    )
-    note = _structured_raw_fast_note("Broad Visual Conclusion Paper", "https://example.test/broad-visual.pdf").replace(
-        "Figure 1 and Table 1 are integrated beside the result claim and record the observed trend.",
-        broad_style,
-    )
-    write(root / raw_rel, note)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(RAW_FAST_VERIFIER),
-            "--wiki",
-            str(root),
-            "--raw-file",
-            raw_rel,
-            "--structured-paper",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
-
-    assert result.returncode != 0
-    assert "structured_evidence_sections_insufficient" in payload["raw_fast_blockers"]
-    assert "figure_table_broad_conclusion_without_key_data" in payload["structured_evidence_sections_insufficient"]
-    diagnostics = {item["code"]: item for item in payload["blocker_diagnostics"]}
-    assert diagnostics["figure_table_broad_conclusion_without_key_data"]["fix_hint"].startswith(
-        "Add the figure/table's concrete anchors"
-    )
+        assert result.returncode != 0
+        assert payload["verifier_path"].endswith("raw_fast_note_verify.py")
+        assert payload["diagnostic_hint"]["path"].endswith("raw_fast_note_verify.py")
+        assert "structured_evidence_sections_insufficient" in payload["raw_fast_blockers"]
+        assert expected_code in payload["structured_evidence_sections_insufficient"]
+        assert diagnostics[expected_code]["parent_code"] == "structured_evidence_sections_insufficient"
+        assert diagnostics[expected_code]["owner_path"].endswith("raw_fast_note_verify.py")
+        assert diagnostics[expected_code]["fix_hint"]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import importlib
 import json
 import os
@@ -15,20 +14,7 @@ OPS = ROOT / "ops"
 SCRIPTS = OPS
 sys.path.insert(0, str(ROOT))
 
-from ops import batch_native_refresh  # noqa: E402
-from ops import wiki_native_lib  # noqa: E402
-def test_native_cli_common_helpers_preserve_defaults_and_json_output(capsys: pytest.CaptureFixture[str]) -> None:
-    native_cli = importlib.import_module("ops.wiki_native_cli")
 
-    parser = wiki_native_lib.common_paths_parser("demo")
-    args = parser.parse_args([])
-    assert args.root == native_cli.DEFAULT_WIKI_ROOT
-    assert args.state_dir == native_cli.DEFAULT_STATE_DIR
-    assert args.workdir == native_cli.DEFAULT_WORKDIR
-    assert args.server == native_cli.DEFAULT_SERVER
-
-    wiki_native_lib.print_json({"ok": True})
-    assert '"ok": true' in capsys.readouterr().out
 def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.update(
@@ -60,6 +46,8 @@ def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None
         "workdir": str(tmp_path / "repo-root"),
         "server": "http://127.0.0.1:9999",
     }
+
+
 def test_active_sources_do_not_embed_operator_local_paths() -> None:
     scanned = [
         SCRIPTS / "wiki_native_cli.py",
@@ -80,14 +68,18 @@ def test_active_sources_do_not_embed_operator_local_paths() -> None:
                 offenders.append(f"{path.relative_to(ROOT)} contains {pattern}")
 
     assert offenders == []
+
+
 def test_native_state_ensure_state_dirs_creates_expected_subdirs(tmp_path: Path) -> None:
     native_state = importlib.import_module("ops.wiki_native_state")
 
     state = tmp_path / "state"
-    wiki_native_lib.ensure_state_dirs(state)
+    native_state.ensure_state_dirs(state)
 
     for name in native_state.STATE_SUBDIRS:
         assert (state / name).is_dir()
+
+
 def test_native_runtime_env_helpers_share_env_and_redaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     native_runtime_env = importlib.import_module("ops.native_runtime_env")
     env_file = tmp_path / ".env"

@@ -10,71 +10,28 @@ from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 from support import native_record
 
 
-def test_load_engine_from_workspace_pointer_uses_read_only_zvec_factory_for_active_default(tmp_path) -> None:
-    pointer_path = tmp_path / "active_workspace.json"
-    sqlite_path = tmp_path / "records.sqlite"
-    zvec_path = tmp_path / "zvec_records"
+def _write_pointer(tmp_path: Path, *, status: str = "active", workspace_id: str | None = None) -> tuple[Path, Path, Path]:
+    workspace_id = workspace_id or f"native-{status}"
+    pointer_path = tmp_path / f"{status}_workspace.json"
+    sqlite_path = tmp_path / f"{status}_records.sqlite"
+    zvec_path = tmp_path / f"{status}_zvec_records"
     pointer_path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
-                "workspace_id": "native-active",
-                "status": "active",
+                "workspace_id": workspace_id,
+                "status": status,
                 "sqlite_path": str(sqlite_path),
                 "zvec_path": str(zvec_path),
             }
         ),
         encoding="utf-8",
     )
-    calls = {}
-
-    class DB:
-        pass
-
-    class Zvec:
-        pass
-
-    def sqlite_factory(path: Path) -> DB:
-        calls["sqlite_path"] = path
-        return DB()
-
-    def zvec_factory(path: Path, *, read_only: bool) -> Zvec:
-        calls["zvec_path"] = path
-        calls["read_only"] = read_only
-        return Zvec()
-
-    engine = runtime.load_engine_from_workspace_pointer(
-        pointer_path,
-        sqlite_workspace_factory=sqlite_factory,
-        zvec_workspace_factory=zvec_factory,
-    )
-
-    assert calls == {
-        "sqlite_path": sqlite_path,
-        "zvec_path": zvec_path,
-        "read_only": True,
-    }
-    assert isinstance(engine.db, DB)
-    assert isinstance(engine.zvec_workspace, Zvec)
-    assert engine.default_workspace_id == "native-active"
+    return pointer_path, sqlite_path, zvec_path
 
 
-def test_load_engine_from_workspace_pointer_uses_read_only_sqlite_open_existing_by_default(tmp_path, monkeypatch) -> None:
-    pointer_path = tmp_path / "active_workspace.json"
-    sqlite_path = tmp_path / "records.sqlite"
-    zvec_path = tmp_path / "zvec_records"
-    pointer_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "workspace_id": "native-active",
-                "status": "active",
-                "sqlite_path": str(sqlite_path),
-                "zvec_path": str(zvec_path),
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_load_engine_from_workspace_pointer_opens_active_workspace_read_only(tmp_path, monkeypatch) -> None:
+    pointer_path, sqlite_path, zvec_path = _write_pointer(tmp_path, workspace_id="native-active")
     calls = {}
 
     class DB:
@@ -107,6 +64,8 @@ def test_load_engine_from_workspace_pointer_uses_read_only_sqlite_open_existing_
         "zvec_read_only": True,
     }
     assert isinstance(engine.db, DB)
+    assert isinstance(engine.zvec_workspace, Zvec)
+    assert getattr(engine, "default_workspace_id") == "native-active"
 
 
 def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_path) -> None:
@@ -153,41 +112,11 @@ def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_p
     assert result["hits"][0]["record"]["vector_text"] == "Alpha"
 
 
-def test_load_engine_from_workspace_pointer_rejects_prepared_by_default(tmp_path) -> None:
-    pointer_path = tmp_path / "prepared_workspace.json"
-    pointer_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "workspace_id": "native-prepared",
-                "status": "prepared",
-                "sqlite_path": str(tmp_path / "records.sqlite"),
-                "zvec_path": str(tmp_path / "zvec_records"),
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_load_engine_from_workspace_pointer_status_policy_for_prepared(tmp_path) -> None:
+    pointer_path, _, _ = _write_pointer(tmp_path, status="prepared", workspace_id="native-prepared")
 
     with pytest.raises(ValueError, match="workspace pointer status must be one of: active"):
         runtime.load_engine_from_workspace_pointer(pointer_path)
-
-
-def test_load_engine_from_workspace_pointer_accepts_prepared_when_explicitly_allowed(tmp_path) -> None:
-    pointer_path = tmp_path / "prepared_workspace.json"
-    sqlite_path = tmp_path / "records.sqlite"
-    zvec_path = tmp_path / "zvec_records"
-    pointer_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "workspace_id": "native-prepared",
-                "status": "prepared",
-                "sqlite_path": str(sqlite_path),
-                "zvec_path": str(zvec_path),
-            }
-        ),
-        encoding="utf-8",
-    )
 
     class DB:
         pass
@@ -202,4 +131,4 @@ def test_load_engine_from_workspace_pointer_accepts_prepared_when_explicitly_all
         zvec_workspace_factory=lambda path, *, read_only: Zvec(),
     )
 
-    assert engine.default_workspace_id == "native-prepared"
+    assert getattr(engine, "default_workspace_id") == "native-prepared"

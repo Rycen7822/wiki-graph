@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 import ast
-import importlib
-import json
-import os
-import subprocess
-import sys
 from pathlib import Path
+import tomllib
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
-sys.path.insert(0, str(ROOT))
 
-from ops import batch_native_refresh  # noqa: E402
-from ops import wiki_native_lib  # noqa: E402
+PACKAGE_ISOLATION_SMOKE_SCRIPT = """#!/usr/bin/env bash
+set -euo pipefail
+python3 -m venv /tmp/wiki-graph-package-smoke
+/tmp/wiki-graph-package-smoke/bin/python -m pip install -U pip
+/tmp/wiki-graph-package-smoke/bin/python -m pip install -e .
+/tmp/wiki-graph-package-smoke/bin/llm-wiki-native --help
+/tmp/wiki-graph-package-smoke/bin/wiki-graph-batch-native-refresh --help
+/tmp/wiki-graph-package-smoke/bin/wiki-graph-search --help
+/tmp/wiki-graph-package-smoke/bin/wiki-graph-native-query-report --help
+/tmp/wiki-graph-package-smoke/bin/wiki-graph-native-server-control --help
+/tmp/wiki-graph-package-smoke/bin/python -c "import llm_wiki_native, ops.batch_native_refresh, ops.wiki_search"
+"""
+
 def test_leaf_entrypoint_wrappers_import_owner_modules_directly() -> None:
     wrapper_paths = [
         "ops/audit_raw_note_sections.py",
@@ -42,6 +45,7 @@ def test_leaf_entrypoint_wrappers_import_owner_modules_directly() -> None:
                         offenders.append(f"{rel_path}:{node.lineno}:{alias.name}")
 
     assert offenders == []
+
 def test_native_package_does_not_import_ops_modules() -> None:
     offenders: list[str] = []
     for path in sorted((ROOT / "llm_wiki_native").rglob("*.py")):
@@ -57,6 +61,19 @@ def test_native_package_does_not_import_ops_modules() -> None:
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:{module}")
 
     assert offenders == []
-def test_native_query_report_entrypoint_remains_available() -> None:
-    assert (SCRIPTS / "collect_native_query_report.py").exists()
-    assert importlib.util.find_spec("ops.collect_native_query_report") is not None
+
+def test_package_isolation_smoke_script_documents_installed_entrypoints() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = pyproject["project"]["scripts"]
+    expected = {
+        "llm-wiki-native": "llm_wiki_native.cli:main",
+        "wiki-graph-batch-native-refresh": "ops.batch_native_refresh:main",
+        "wiki-graph-search": "ops.wiki_search:main",
+        "wiki-graph-native-query-report": "ops.collect_native_query_report:main",
+        "wiki-graph-native-server-control": "ops.native_server_control:main",
+    }
+
+    assert {name: scripts[name] for name in expected} == expected
+    for entrypoint in expected:
+        assert f"/tmp/wiki-graph-package-smoke/bin/{entrypoint} --help" in PACKAGE_ISOLATION_SMOKE_SCRIPT
+    assert "PYTHONPATH" not in PACKAGE_ISOLATION_SMOKE_SCRIPT

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
@@ -187,68 +186,53 @@ def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_plan_and_native_s
     assert "local_result" not in compact
 
 
-def test_raw_fast_closeout_native_refresh_defaults_to_status_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    args = _raw_fast_closeout_native_args(tmp_path, "status")
-    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
-    calls: list[dict[str, object]] = []
+def test_raw_fast_closeout_native_refresh_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = [
+        ("status", 1, {"ran": False, "skipped": True, "skip_reason": "native_refresh_status_only"}),
+        ("prepare", 2, {"ran": True, "prepared_only": True, "build_ok": True}),
+    ]
+    for mode, expected_call_count, expected_refresh in cases:
+        args = _raw_fast_closeout_native_args(tmp_path, mode)
+        status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
+        calls: list[dict[str, object]] = []
 
-    def fake_run_json(command, *, cwd, timeout):
-        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
-        if command[3] == "status":
-            return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
-        raise AssertionError("default raw-fast closeout should not run native prepare-only")
+        def fake_run_json(command, *, cwd, timeout):
+            calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+            if command[3] == "status":
+                return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
+            assert mode == "prepare"
+            assert command[1:5] == ["-m", "ops.batch_native_refresh", "refresh", "--prepare-only"]
+            return {
+                "returncode": 0,
+                "json": {
+                    "prepared_only": True,
+                    "skipped": False,
+                    "status_before": status,
+                    "build": {"ok": True},
+                },
+            }
 
-    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
+        monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
 
-    status_result = raw_fast_closeout.run_native_refresh_status(args)
-    refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
+        status_result = raw_fast_closeout.run_native_refresh_status(args)
+        refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
 
-    assert len(calls) == 1
-    status_command = calls[0]["command"]
-    assert isinstance(status_command, list)
-    assert status_command[1:4] == ["-m", "ops.batch_native_refresh", "status"]
-    assert "--workdir" in status_command
-    assert status_result["pending_count"] == 1
-    assert status_result["command_returncode"] == 0
-    assert refresh_result["ran"] is False
-    assert refresh_result["skipped"] is True
-    assert refresh_result["skip_reason"] == "native_refresh_status_only"
-    assert refresh_result["refresh_mode"] == "status"
-    assert refresh_result["pending_count"] == 1
-def test_raw_fast_closeout_native_refresh_prepare_mode_uses_batch_native_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    args = _raw_fast_closeout_native_args(tmp_path, "prepare")
-    status = {"command_returncode": 0, "pending_count": 1, "should_refresh": True}
-    calls: list[dict[str, object]] = []
+        assert len(calls) == expected_call_count
+        status_command = calls[0]["command"]
+        assert isinstance(status_command, list)
+        assert status_command[1:4] == ["-m", "ops.batch_native_refresh", "status"]
+        assert "--workdir" in status_command
+        assert status_result["pending_count"] == 1
+        assert status_result["command_returncode"] == 0
+        assert refresh_result["refresh_mode"] == mode
+        for key, value in expected_refresh.items():
+            assert refresh_result[key] == value
+        if mode == "status":
+            assert refresh_result["pending_count"] == 1
+        else:
+            assert refresh_result["status"]["pending_count"] == 1
 
-    def fake_run_json(command, *, cwd, timeout):
-        calls.append({"command": command, "cwd": cwd, "timeout": timeout})
-        if command[3] == "status":
-            return {"returncode": 0, "json": {"pending_count": 1, "should_refresh": True}}
-        return {
-            "returncode": 0,
-            "json": {
-                "prepared_only": True,
-                "skipped": False,
-                "status_before": status,
-                "build": {"ok": True},
-            },
-        }
 
-    monkeypatch.setattr(raw_fast_closeout, "run_json", fake_run_json)
-
-    status_result = raw_fast_closeout.run_native_refresh_status(args)
-    refresh_result = raw_fast_closeout.run_native_refresh_if_needed(args, status)
-
-    assert len(calls) == 2
-    refresh_command = calls[1]["command"]
-    assert isinstance(refresh_command, list)
-    assert refresh_command[1:5] == ["-m", "ops.batch_native_refresh", "refresh", "--prepare-only"]
-    assert status_result["pending_count"] == 1
-    assert status_result["command_returncode"] == 0
-    assert refresh_result["ran"] is True
-    assert refresh_result["prepared_only"] is True
-    assert refresh_result["refresh_mode"] == "prepare"
-    assert refresh_result["status"]["pending_count"] == 1
 def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
@@ -347,6 +331,8 @@ def test_raw_fast_closeout_final_verify_only_waives_post_integration_non_raw_hit
 
     final_with_tmp_left = dict(final, tmp_absent={"/tmp/raw-fast": False})
     assert raw_fast_closeout.final_verify_acceptable(pre, final_with_tmp_left) is False
+
+
 def test_raw_fast_closeout_fast_final_verify_records_tmp_absence(tmp_path: Path) -> None:
     state = tmp_path / "state"
     args = argparse.Namespace(state_dir=state, raw_file="raw/clip/2601/26010112_Fast-Final.md")
@@ -376,28 +362,29 @@ def test_raw_fast_closeout_fast_final_verify_records_tmp_absence(tmp_path: Path)
     assert report["fast_final_verify"] is True
     assert report["tmp_absent"] == {str(tmp_bundle): True}
     assert Path(report["report_path"]).exists()
-def test_raw_fast_closeout_compact_log_entry_is_bounded() -> None:
-    args = argparse.Namespace(
+
+
+def test_raw_fast_closeout_compact_log_contracts(tmp_path: Path) -> None:
+    basic_args = argparse.Namespace(
         title="Compact Log Paper",
         source_id="https://arxiv.org/abs/2601.0101",
         raw_file="raw/clip/2601/26010112_Compact-Log-Paper.md",
         resource_status_summary="official abs/pdf/source verified; claimed code unresolved",
     )
-    output = {
+    basic_output = {
         "raw_fast_ok": True,
         "final_verify": {"report_path": "/state/raw_fast_reports/compact_final_verify.json"},
         "wiki_integration": {"pending_count": 4, "actionable_pending_count": 4, "threshold": 10, "should_integrate": False, "next_required_action": "none"},
         "native_refresh_status": {"blocked_by_pending_wiki_integration": True, "graph_ready_pending_count": 0, "should_refresh": False},
     }
+    basic_entry = raw_fast_closeout.build_compact_log_entry(basic_args, basic_output)
 
-    entry = raw_fast_closeout.build_compact_log_entry(args, output)
+    assert len(basic_entry.splitlines()) <= 5
+    assert "26010112_Compact-Log-Paper.md" in basic_entry
+    assert "raw_fast_ok=true" in basic_entry
+    assert "checksums" not in basic_entry.lower()
 
-    assert len(entry.splitlines()) <= 5
-    assert "26010112_Compact-Log-Paper.md" in entry
-    assert "raw_fast_ok=true" in entry
-    assert "checksums" not in entry.lower()
-def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tmp_path: Path) -> None:
-    args = argparse.Namespace(
+    blocked_args = argparse.Namespace(
         title="Blocked Native Ledger Paper",
         source_id="https://arxiv.org/abs/2601.0102",
         raw_file="raw/clip/2601/26010113_Blocked-Native-Ledger-Paper.md",
@@ -412,33 +399,32 @@ def test_raw_fast_closeout_blocked_log_distinguishes_standalone_native_ledger(tm
         "should_integrate": False,
         "next_required_action": "wiki_integration",
     }
-    standalone_status = {
-        "command_returncode": 0,
-        "pending_count": 1,
-        "should_refresh": True,
-        "ledger_path": str(tmp_path / "state" / "pending_native_refresh.json"),
-    }
-
     native_status = raw_fast_closeout.synthesize_blocked_native_refresh_status(
-        args,
+        blocked_args,
         wiki_status,
-        standalone_status=standalone_status,
+        standalone_status={
+            "command_returncode": 0,
+            "pending_count": 1,
+            "should_refresh": True,
+            "ledger_path": str(tmp_path / "state" / "pending_native_refresh.json"),
+        },
     )
-    output = {
-        "raw_fast_ok": True,
-        "final_verify": {"report_path": "/state/raw_fast_reports/blocked_final_verify.json"},
-        "wiki_integration": wiki_status,
-        "native_refresh_status": raw_fast_closeout.compact_native_refresh_status(native_status),
-    }
-
-    entry = raw_fast_closeout.build_compact_log_entry(args, output)
+    blocked_entry = raw_fast_closeout.build_compact_log_entry(
+        blocked_args,
+        {
+            "raw_fast_ok": True,
+            "final_verify": {"report_path": "/state/raw_fast_reports/blocked_final_verify.json"},
+            "wiki_integration": wiki_status,
+            "native_refresh_status": raw_fast_closeout.compact_native_refresh_status(native_status),
+        },
+    )
 
     assert native_status["blocked_by_pending_wiki_integration"] is True
     assert native_status["graph_ready_pending_count"] == 0
     assert native_status["standalone_native_pending_count"] == 1
     assert native_status["standalone_native_should_refresh"] is True
-    assert "graph-ready pending `0`" in entry
-    assert "standalone native ledger pending `1`" in entry
+    assert "graph-ready pending `0`" in blocked_entry
+    assert "standalone native ledger pending `1`" in blocked_entry
 
 
 def test_raw_fast_closeout_derives_args_from_evidence_bundle_without_mutation(tmp_path: Path) -> None:

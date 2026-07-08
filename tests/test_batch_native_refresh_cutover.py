@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from ops import batch_native_refresh  # noqa: E402
+
+
 def _cutover_context(tmp_path: Path, *, pending: bool = False) -> SimpleNamespace:
     state_dir = tmp_path / "wikigraph" / "state"
     root = tmp_path / "wiki"
@@ -29,6 +31,8 @@ def _cutover_context(tmp_path: Path, *, pending: bool = False) -> SimpleNamespac
         watched_dir=watched_dir,
         calls=calls,
     )
+
+
 def _fake_cutover_hooks(
     calls: list[tuple],
     *,
@@ -260,39 +264,37 @@ def test_refresh_cutover_success_preserves_pending_until_smoke_then_clears(tmp_p
         ("smoke", str(state_dir), "candidate", True),
     ]
     assert not batch_native_refresh.pending_ledger_path(state_dir).exists()
-@pytest.mark.parametrize(
-    ("smoke_kwargs", "expected_terms"),
-    [
+
+
+def test_refresh_cutover_keeps_pending_for_smoke_error_shapes(tmp_path) -> None:
+    cases = [
         ({"smoke_raises": RuntimeError("smoke failed")}, ("smoke failed",)),
         ({"smoke_ok": False}, ("query smoke", "ok")),
-    ],
-)
-def test_refresh_cutover_keeps_pending_for_smoke_error_shapes(
-    tmp_path,
-    smoke_kwargs: dict[str, object],
-    expected_terms: tuple[str, ...],
-) -> None:
-    context = _cutover_context(tmp_path, pending=True)
-    build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(context.calls, **smoke_kwargs)
+    ]
+    for index, (smoke_kwargs, expected_terms) in enumerate(cases):
+        context = _cutover_context(tmp_path / f"smoke-error-{index}", pending=True)
+        build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(context.calls, **smoke_kwargs)
 
-    with pytest.raises(RuntimeError) as excinfo:
-        batch_native_refresh.refresh_cutover(
-            root=context.root,
-            state_dir=context.state_dir,
-            workspace_root=context.workspace_root,
-            workspace_id="candidate",
-            embedding_profile="conservative",
-            build_workspace=build_workspace,
-            finalize_workspace=finalize_workspace,
-            restart_service=restart_service,
-            query_smoke=query_smoke,
-            required_unchanged_paths=[context.watched_dir],
-        )
+        with pytest.raises(RuntimeError) as excinfo:
+            batch_native_refresh.refresh_cutover(
+                root=context.root,
+                state_dir=context.state_dir,
+                workspace_root=context.workspace_root,
+                workspace_id="candidate",
+                embedding_profile="conservative",
+                build_workspace=build_workspace,
+                finalize_workspace=finalize_workspace,
+                restart_service=restart_service,
+                query_smoke=query_smoke,
+                required_unchanged_paths=[context.watched_dir],
+            )
 
-    message = str(excinfo.value)
-    for term in expected_terms:
-        assert term in message
-    assert batch_native_refresh.pending_ledger_path(context.state_dir).exists()
+        message = str(excinfo.value)
+        for term in expected_terms:
+            assert term in message
+        assert batch_native_refresh.pending_ledger_path(context.state_dir).exists()
+
+
 def test_refresh_cutover_fails_before_pending_clear_when_required_unchanged_path_changes(tmp_path) -> None:
     context = _cutover_context(tmp_path, pending=True)
     watched_file = context.watched_dir / "storage.json"
@@ -317,6 +319,8 @@ def test_refresh_cutover_fails_before_pending_clear_when_required_unchanged_path
         )
 
     assert batch_native_refresh.pending_ledger_path(context.state_dir).exists()
+
+
 def test_refresh_cutover_reuses_active_workspace_when_build_report_fingerprints_match(tmp_path, monkeypatch) -> None:
     context = _cutover_context(tmp_path, pending=True)
     fingerprints = {"custom_kg_manifest.json": {"exists": True, "sha256": "state-hash"}}
@@ -379,104 +383,70 @@ def test_refresh_cutover_reuses_active_workspace_when_build_report_fingerprints_
     assert not batch_native_refresh.pending_ledger_path(context.state_dir).exists()
 
 
-def test_refresh_cutover_builds_for_wiki_integration_pending_even_when_active_fingerprint_matches(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    context = _cutover_context(tmp_path, pending=False)
-    context.watched_dir.mkdir(parents=True)
-    batch_native_refresh.mark_pending(context.state_dir, context.root, reason="wiki-integration:threshold")
-    fingerprints = {
-        "custom_kg_manifest.json": {"exists": True, "sha256": "same-manifest", "size": 10, "mtime_ns": 1},
-    }
-    active = {
-        "schema_version": 1,
-        "workspace_id": "active-a",
-        "status": "active",
-        "source_manifest_hash": "manifest-hash",
-        "counts": {"chunks": 1},
-    }
-    active_path = batch_native_refresh.active_workspace_path(context.state_dir)
-    active_path.parent.mkdir(parents=True)
-    active_path.write_text(json.dumps(active), encoding="utf-8")
-    build_report_path = context.workspace_root / "active-a" / "build_report.json"
-    build_report_path.parent.mkdir(parents=True)
-    build_report_path.write_text(
-        json.dumps(
-            {
-                "ok": True,
-                "workspace_id": "active-a",
-                "input_fingerprints": fingerprints,
-                "native_report": {"source_manifest_hash": "manifest-hash"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(batch_native_refresh, "state_input_fingerprints", lambda state_dir: fingerprints, raising=False)
-
-    build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(context.calls)
-
-    result = batch_native_refresh.refresh_cutover(
-        root=context.root,
-        state_dir=context.state_dir,
-        workspace_root=context.workspace_root,
-        workspace_id="candidate-after-wiki",
-        embedding_profile="conservative",
-        build_workspace=build_workspace,
-        finalize_workspace=finalize_workspace,
-        restart_service=restart_service,
-        query_smoke=query_smoke,
-        required_unchanged_paths=[context.watched_dir],
-    )
-
-    assert result["build_executed"] is True
-    assert result.get("active_already_fresh") is not True
-    assert result["active"]["workspace_id"] == "candidate"
-    assert context.calls == [
-        ("build", "candidate-after-wiki"),
-        ("finalize", "native graph incremental refresh: cutover"),
-        ("restart", str(context.state_dir)),
-        ("smoke", str(context.state_dir), "candidate"),
-    ]
-    assert not batch_native_refresh.pending_ledger_path(context.state_dir).exists()
-
-
-def test_refresh_cutover_does_not_use_active_fresh_skip_for_full_rebuild_policy(tmp_path, monkeypatch) -> None:
-    context = _cutover_context(tmp_path, pending=True)
-    build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(context.calls)
+def test_refresh_cutover_builds_when_active_fresh_shortcut_is_disabled(tmp_path, monkeypatch) -> None:
+    original_status = batch_native_refresh.status
     full_policy = {
         "next_refresh_kind": batch_native_refresh.REFRESH_KIND_FULL_REBUILD,
         "completed_incremental_refresh_count": batch_native_refresh.NATIVE_INCREMENTAL_REFRESH_THRESHOLD,
         "incremental_rebuild_threshold": batch_native_refresh.NATIVE_INCREMENTAL_REFRESH_THRESHOLD,
         "vector_cache_required": True,
-        "vector_cache_path": str(context.state_dir / "vector_cache.sqlite"),
+        "vector_cache_path": "vector_cache.sqlite",
     }
 
-    def fake_status(root, state_dir):
-        return {"should_refresh": True, "refresh_policy": full_policy}
+    def run_case(case_name: str, *, reason: str, workspace_id: str, refresh_policy: dict | None = None):
+        context = _cutover_context(tmp_path / case_name, pending=False)
+        context.watched_dir.mkdir(parents=True)
+        batch_native_refresh.mark_pending(context.state_dir, context.root, reason=reason)
+        build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(context.calls)
 
-    def fail_if_active_fresh_checked(**_kwargs):
-        raise AssertionError("full-rebuild policy must not use active-fresh shortcut")
+        def fail_if_active_fresh_checked(**_kwargs):
+            raise AssertionError("shortcut-disabled cutover must not check active-fresh state")
 
-    monkeypatch.setattr(batch_native_refresh, "status", fake_status)
-    monkeypatch.setattr(batch_native_refresh, "active_already_fresh_report", fail_if_active_fresh_checked)
+        with monkeypatch.context() as patch_context:
+            patch_context.setattr(batch_native_refresh, "active_already_fresh_report", fail_if_active_fresh_checked)
+            if refresh_policy is not None:
+                def fake_status(root, state_dir):
+                    current = original_status(root, state_dir)
+                    current["refresh_policy"] = refresh_policy
+                    current["next_refresh_kind"] = refresh_policy["next_refresh_kind"]
+                    return current
 
-    result = batch_native_refresh.refresh_cutover(
-        root=context.root,
-        state_dir=context.state_dir,
-        workspace_root=context.workspace_root,
-        workspace_id="candidate-full",
-        embedding_profile="conservative",
-        build_workspace=build_workspace,
-        finalize_workspace=finalize_workspace,
-        restart_service=restart_service,
-        query_smoke=query_smoke,
-        required_unchanged_paths=[context.watched_dir],
+                patch_context.setattr(batch_native_refresh, "status", fake_status)
+
+            result = batch_native_refresh.refresh_cutover(
+                root=context.root,
+                state_dir=context.state_dir,
+                workspace_root=context.workspace_root,
+                workspace_id=workspace_id,
+                embedding_profile="conservative",
+                build_workspace=build_workspace,
+                finalize_workspace=finalize_workspace,
+                restart_service=restart_service,
+                query_smoke=query_smoke,
+                required_unchanged_paths=[context.watched_dir],
+            )
+
+        return result, context
+
+    wiki_result, wiki_context = run_case(
+        "wiki-pending",
+        reason="wiki-integration:threshold",
+        workspace_id="candidate-after-wiki",
     )
+    assert wiki_result["build_executed"] is True
+    assert wiki_result.get("active_already_fresh") is not True
+    assert wiki_context.calls[0] == ("build", "candidate-after-wiki")
+    assert not batch_native_refresh.pending_ledger_path(wiki_context.state_dir).exists()
 
-    assert result["refresh_kind"] == batch_native_refresh.REFRESH_KIND_FULL_REBUILD
-    assert result["build_executed"] is True
-    assert context.calls[0] == ("build", "candidate-full")
+    full_result, full_context = run_case(
+        "full-policy",
+        reason="manual-smoke",
+        workspace_id="candidate-full",
+        refresh_policy=full_policy,
+    )
+    assert full_result["refresh_kind"] == batch_native_refresh.REFRESH_KIND_FULL_REBUILD
+    assert full_result["build_executed"] is True
+    assert full_context.calls[0] == ("build", "candidate-full")
 
 
 def test_refresh_cutover_skipped_result_marks_no_execution(tmp_path) -> None:

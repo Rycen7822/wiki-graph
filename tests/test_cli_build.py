@@ -175,10 +175,11 @@ def test_build_workspace_materializes_source_root_lexical_spans(tmp_path) -> Non
     assert table_hits[0]["source_path"] == "concepts/table-demo.md"
 
 
-def test_workspace_build_can_write_zvec_staging_workspace(tmp_path) -> None:
+def test_workspace_build_can_write_zvec_staging_workspace_and_prepared_pointer(tmp_path) -> None:
     state = _sample_state(tmp_path)
     db_path = tmp_path / "native.sqlite"
-    zvec_path = tmp_path / "native.zvec"
+    zvec_path = tmp_path / "native_zvec" / "workspaces" / "native-test" / "zvec_records"
+    prepared_path = tmp_path / "native_zvec" / "prepared_workspace.json"
 
     created = {}
 
@@ -187,6 +188,7 @@ def test_workspace_build_can_write_zvec_staging_workspace(tmp_path) -> None:
         db_path,
         "native-test",
         zvec_path=zvec_path,
+        prepared_workspace_path=prepared_path,
         zvec_workspace_factory=_fake_zvec_factory(created),
     )
 
@@ -208,25 +210,6 @@ def test_workspace_build_can_write_zvec_staging_workspace(tmp_path) -> None:
     }
     assert created["workspace"].flushed is True
     assert len(created["workspace"].sample_doc_ids) == 4
-
-
-def test_workspace_build_can_write_prepared_workspace_pointer(tmp_path) -> None:
-    state = _sample_state(tmp_path)
-    db_path = tmp_path / "native.sqlite"
-    zvec_path = tmp_path / "native_zvec" / "workspaces" / "native-test" / "zvec_records"
-    prepared_path = tmp_path / "native_zvec" / "prepared_workspace.json"
-
-    created = {}
-
-    report = workspace_build.build_workspace_from_state(
-        state,
-        db_path,
-        "native-test",
-        zvec_path=zvec_path,
-        prepared_workspace_path=prepared_path,
-        zvec_workspace_factory=_fake_zvec_factory(created),
-    )
-
     pointer = json.loads(prepared_path.read_text(encoding="utf-8"))
     assert report["prepared_workspace"] == str(prepared_path)
     assert pointer["schema_version"] == 1
