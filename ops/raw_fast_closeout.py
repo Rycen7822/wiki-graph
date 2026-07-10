@@ -322,6 +322,97 @@ def build_raw_fast_session_summary(final_report: dict[str, Any]) -> dict[str, An
     }
 
 
+def _compact_json(value: Any, limit: int = 1200) -> str:
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return short_text(rendered, limit)
+
+
+def _append_compact_stream_tail(lines: list[str], label: str, value: Any) -> None:
+    if not isinstance(value, str):
+        return
+    tail = [short_text(line.strip(), 500) for line in value.splitlines() if line.strip()][-20:]
+    if not tail:
+        return
+    lines.append(f"{label}_tail:")
+    lines.extend(f"  {line}" for line in tail)
+
+
+def _append_compact_failure_details(lines: list[str], details: Any) -> None:
+    start = len(lines)
+    if isinstance(details, list):
+        failed_items = [
+            item
+            for item in details
+            if not isinstance(item, dict)
+            or item.get("ok") is False
+            or item.get("error")
+            or item.get("errors")
+            or item.get("returncode") not in (None, 0)
+            or item.get("command_returncode") not in (None, 0)
+        ]
+        for item in failed_items[:20]:
+            lines.append(f"failure: {_compact_json(item)}")
+        if len(failed_items) > 20:
+            lines.append(f"failure_items_omitted: {len(failed_items) - 20}")
+    elif isinstance(details, dict):
+        for key in (
+            "error",
+            "errors",
+            "reason",
+            "message",
+            "code",
+            "returncode",
+            "command_returncode",
+            "report_path",
+            "verifier_path",
+            "path",
+            "resolved",
+            "control_count",
+            "control_hits",
+        ):
+            value = details.get(key)
+            if value not in (None, "", [], {}):
+                lines.append(f"{key}: {_compact_json(value)}")
+        hint = details.get("diagnostic_hint")
+        if hint not in (None, "", [], {}):
+            lines.append(f"diagnostic_hint: {_compact_json(hint)}")
+        blockers = details.get("blocker_diagnostics")
+        if isinstance(blockers, list):
+            for blocker in blockers[:20]:
+                lines.append(f"blocker: {_compact_json(blocker)}")
+            if len(blockers) > 20:
+                lines.append(f"blockers_omitted: {len(blockers) - 20}")
+        for label in ("stderr", "stdout"):
+            value = details.get(f"{label}_tail")
+            if not isinstance(value, str) or not value.strip():
+                value = details.get(label)
+            _append_compact_stream_tail(lines, label, value)
+    elif details not in (None, ""):
+        lines.append(f"details: {_compact_json(details)}")
+
+    if len(lines) == start and details not in (None, {}, []):
+        lines.append(f"details: {_compact_json(details)}")
+
+
+def build_raw_fast_failure_summary(output: dict[str, Any]) -> dict[str, Any]:
+    stage = str(output.get("stage") or "unknown")
+    lines = ["raw_fast_ok: false", f"stage: {stage}"]
+    for key in ("error", "errors", "returncode", "command_returncode", "report_path", "raw_file"):
+        value = output.get(key)
+        if value not in (None, "", [], {}):
+            lines.append(f"{key}: {_compact_json(value)}")
+    _append_compact_failure_details(lines, output.get(stage))
+    return {"ok": False, "stage": stage, "markdown": "\n".join(lines) + "\n"}
+
+
+def print_closeout_output(payload: dict[str, Any], output_mode: str) -> None:
+    if output_mode == "compact":
+        summary = build_raw_fast_session_summary(payload) if payload.get("ok") else build_raw_fast_failure_summary(payload)
+        print(summary["markdown"], end="")
+        return
+    print_json(payload)
+
+
 def capture_tmp_evidence_reports(args: argparse.Namespace) -> dict[str, Any]:
     summaries: list[dict[str, Any]] = []
     for idx, tmp_path in enumerate(args.tmp):
@@ -880,6 +971,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topic-hint", action="append", default=[])
     parser.add_argument("--required-section", action="append", default=[])
     parser.add_argument("--resource-status-summary", default="")
+    parser.add_argument("--output-mode", choices=["full", "compact"], default="full", help="Render the complete JSON report (default) or a compact terminal summary")
     parser.add_argument("--tmp", action="append", default=[], type=Path)
     parser.add_argument("--allow-non-tmp-cleanup", action="store_true", help="Permit cleanup outside /tmp after protection checks; default refuses non-/tmp paths")
     parser.add_argument("--threshold", type=int, default=None, help="Override pending wiki-integration threshold")
@@ -900,11 +992,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fail(stage: str, payload: dict[str, Any], code: int = 1, timings: TimingRecorder | None = None) -> int:
+def fail(
+    stage: str,
+    payload: dict[str, Any],
+    code: int = 1,
+    timings: TimingRecorder | None = None,
+    *,
+    output_mode: str = "full",
+) -> int:
     output = {"ok": False, "stage": stage, **payload}
     if timings is not None:
         output["timings"] = timings.snapshot()
-    print_json(output)
+    print_closeout_output(output, output_mode)
     return code
 
 
@@ -1043,24 +1142,30 @@ def main() -> int:
     args.workdir = args.workdir.resolve()
     args.verifier = args.verifier.resolve()
     if Path(args.raw_file).is_absolute() or ".." in Path(args.raw_file).parts or not args.raw_file.startswith("raw/clip/"):
-        return fail("preflight", {"raw_fast_ok": False, "error": "invalid_raw_file", "raw_file": args.raw_file}, 1, timings)
+        return fail("preflight", {"raw_fast_ok": False, "error": "invalid_raw_file", "raw_file": args.raw_file}, 1, timings, output_mode=args.output_mode)
     raw_note = args.root / args.raw_file
 
     pre_verify = timings.record("pre_verify", verify_note, args, label="pre_verify")
     if not raw_fast_ok(pre_verify):
-        return fail("pre_verify", {"raw_fast_ok": False, "pre_verify": pre_verify}, 1, timings)
+        return fail("pre_verify", {"raw_fast_ok": False, "pre_verify": pre_verify}, 1, timings, output_mode=args.output_mode)
 
     scan = timings.record("control_scan", control_scan, raw_note)
     if scan["control_count"]:
-        return fail("control_scan", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan}, 1, timings)
+        return fail("control_scan", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan}, 1, timings, output_mode=args.output_mode)
 
     cleanup_check = timings.record("cleanup_preflight", cleanup_preflight, args.tmp, root=args.root, workdir=args.workdir, allow_non_tmp_cleanup=args.allow_non_tmp_cleanup)
     if any(not item.get("ok") for item in cleanup_check):
-        return fail("cleanup_preflight", {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "cleanup_preflight": cleanup_check}, 1, timings)
+        return fail(
+            "cleanup_preflight",
+            {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "cleanup_preflight": cleanup_check},
+            1,
+            timings,
+            output_mode=args.output_mode,
+        )
 
     mark_cleanup = _run_closeout_mark_and_cleanup(args, timings, pre_verify=pre_verify, scan=scan)
     if not mark_cleanup["ok"]:
-        return fail(mark_cleanup["stage"], mark_cleanup["payload"], mark_cleanup["code"], timings)
+        return fail(mark_cleanup["stage"], mark_cleanup["payload"], mark_cleanup["code"], timings, output_mode=args.output_mode)
     evidence_reports = mark_cleanup["evidence_reports"]
     marked_payload = mark_cleanup["marked_payload"]
     cleanup = mark_cleanup["cleanup"]
@@ -1072,6 +1177,7 @@ def main() -> int:
             {"raw_fast_ok": False, "pre_verify": pre_verify, "control_scan": scan, "marked": marked_payload.get("marked"), "cleanup": cleanup, "final_verify": final_verify},
             1,
             timings,
+            output_mode=args.output_mode,
         )
 
     downstream = _run_closeout_downstream_status(args, timings)
@@ -1093,6 +1199,7 @@ def main() -> int:
             },
             int(native_refresh.get("returncode") or 1),
             timings,
+            output_mode=args.output_mode,
         )
 
     output = _successful_closeout_output(
@@ -1106,7 +1213,7 @@ def main() -> int:
         final_verify=final_verify,
         downstream=downstream,
     )
-    print_json(output)
+    print_closeout_output(output, args.output_mode)
     return 0
 
 
