@@ -146,6 +146,53 @@ def test_raw_fast_closeout_marks_pending_after_verifier_and_cleans_tmp(tmp_path:
     ledger = load_pending_wiki_integration_ledger(state)
     assert ledger["pending"][0]["raw_path"] == raw_rel
     assert "resources" not in ledger["pending"][0]["required_sections"]
+
+
+def test_raw_fast_closeout_compact_success_prints_session_summary(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010119_Compact-Wrapper-Paper.md"
+    title = "Compact Wrapper Paper"
+    source = "https://example.test/compact-wrapper-paper.pdf"
+    write(root / raw_rel, _structured_raw_fast_note(title, source))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            title,
+            "--source-id",
+            source,
+            "--pattern",
+            source,
+            "--output-mode",
+            "compact",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    visible_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert 1 <= len(visible_lines) <= 8
+    assert "raw_fast_ok=true" in result.stdout
+    assert f"raw=`{raw_rel}`" in result.stdout
+    assert "final_report=`" in result.stdout
+    assert "wiki pending=1" in result.stdout
+    for full_tree_key in ['"pre_verify":', '"evidence_reports":', '"timings":', '"final_verify":']:
+        assert full_tree_key not in result.stdout
+
+
 def test_raw_fast_closeout_compact_auto_integrate_keeps_runner_plan_and_native_summary_without_local_payload() -> None:
     compact = raw_fast_closeout.compact_auto_integrate(
         {
@@ -277,6 +324,52 @@ def test_raw_fast_closeout_does_not_mark_pending_when_verifier_fails(tmp_path: P
     _assert_timing_step(payload, "pre_verify")
     assert "mark_pending" not in payload["timings"]["steps"]
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
+
+
+def test_raw_fast_closeout_compact_pre_verify_failure_prints_only_diagnostics(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010120_Bad-Compact-Wrapper-Paper.md"
+    source = "https://example.test/bad-compact.pdf"
+    write(root / raw_rel, f"---\ntitle: Bad Compact\nsource: {source}\n---\n\n## Methodology\n\nTODO\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            "Bad Compact Wrapper Paper",
+            "--source-id",
+            source,
+            "--pattern",
+            source,
+            "--output-mode",
+            "compact",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "raw_fast_ok: false" in result.stdout
+    assert "stage: pre_verify" in result.stdout
+    assert "structured_evidence_sections_insufficient" in result.stdout
+    assert "figure_table_evidence_integrated" in result.stdout
+    assert "repair anchor" in result.stdout
+    for unrelated_key in ['"pre_verify":', '"timings":', '"mark_pending":', '"cleanup":', '"evidence_reports":']:
+        assert unrelated_key not in result.stdout
+    assert load_pending_wiki_integration_ledger(state)["pending"] == []
+
+
 def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
@@ -319,6 +412,57 @@ def test_raw_fast_closeout_refuses_non_tmp_cleanup_before_marking(tmp_path: Path
     assert payload["cleanup_preflight"][0]["ok"] is False
     assert unsafe_tmp.exists()
     assert load_pending_wiki_integration_ledger(state)["pending"] == []
+
+
+def test_raw_fast_closeout_compact_cleanup_failure_prints_only_failed_entry(tmp_path: Path) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    raw_rel = "raw/clip/2601/26010121_Unsafe-Compact-Cleanup-Paper.md"
+    title = "Unsafe Compact Cleanup Paper"
+    source = "https://example.test/unsafe-compact-cleanup-paper.pdf"
+    write(root / raw_rel, _structured_raw_fast_note(title, source))
+    unsafe_tmp = root / "raw" / "clip" / "unsafe-compact-bundle"
+    write(unsafe_tmp / "scratch.txt", "must not be deleted")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ops.raw_fast_closeout",
+            "--root",
+            str(root),
+            "--state-dir",
+            str(state),
+            "--workdir",
+            str(ROOT),
+            "--raw-file",
+            raw_rel,
+            "--title",
+            title,
+            "--source-id",
+            source,
+            "--pattern",
+            source,
+            "--tmp",
+            str(unsafe_tmp),
+            "--output-mode",
+            "compact",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "raw_fast_ok: false" in result.stdout
+    assert "stage: cleanup_preflight" in result.stdout
+    assert str(unsafe_tmp) in result.stdout
+    assert "refused_inside_wiki_root" in result.stdout
+    for unrelated_key in ['"pre_verify":', '"control_scan":', '"timings":', '"mark_pending":']:
+        assert unrelated_key not in result.stdout
+    assert unsafe_tmp.exists()
+    assert load_pending_wiki_integration_ledger(state)["pending"] == []
+
+
 def test_raw_fast_closeout_final_verify_only_waives_post_integration_non_raw_hits() -> None:
     from ops import raw_fast_closeout
 
@@ -546,3 +690,28 @@ def test_raw_fast_closeout_session_summary_is_compact_and_actionable(tmp_path: P
     assert "wiki pending=5" in summary["markdown"]
     assert "stdout_tail" not in summary["markdown"]
     assert len(summary["markdown"].splitlines()) <= 8
+
+
+def test_raw_fast_closeout_failure_summary_caps_stream_tail_and_omits_sibling_stages() -> None:
+    output = {
+        "ok": False,
+        "stage": "native_refresh",
+        "raw_fast_ok": False,
+        "pre_verify": {"ok": True, "large_success_payload": "must stay hidden"},
+        "native_refresh": {
+            "ok": False,
+            "returncode": 7,
+            "stderr": "\n".join(f"stderr-line-{index:02d}" for index in range(25)),
+        },
+    }
+
+    summary = raw_fast_closeout.build_raw_fast_failure_summary(output)
+    markdown = summary["markdown"]
+
+    assert summary["stage"] == "native_refresh"
+    assert "returncode: 7" in markdown
+    assert "pre_verify" not in markdown
+    assert "stderr-line-04" not in markdown
+    assert "stderr-line-05" in markdown
+    assert "stderr-line-24" in markdown
+    assert len([line for line in markdown.splitlines() if line.startswith("  stderr-line-")]) == 20

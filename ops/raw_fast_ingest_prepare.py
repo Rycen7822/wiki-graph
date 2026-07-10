@@ -239,6 +239,8 @@ def write_closeout_artifacts(workdir: Path, paths: dict[str, Any]) -> dict[str, 
         sys.executable,
         "-m",
         "ops.raw_fast_closeout",
+        "--output-mode",
+        "compact",
         "--root",
         str(paths["root"]),
     ]

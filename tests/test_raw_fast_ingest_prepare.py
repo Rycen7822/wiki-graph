@@ -302,6 +302,9 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     preview = (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
     assert "ops.raw_fast_note_assemble" in preview
     assert "raw_body_draft.md" in preview
+    closeout_preview = (workdir / "closeout_command.preview.sh").read_text(encoding="utf-8")
+    assert closeout_preview.count("--output-mode") == 1
+    assert "--output-mode compact" in closeout_preview
     closeout_args = json.loads((workdir / "closeout_args.json").read_text(encoding="utf-8"))
     assert closeout_args["ok"] is True
     assert "--resource-status-summary" in closeout_args["argv_tail"]
