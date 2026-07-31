@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -43,7 +44,9 @@ def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_pat
     assert calls[0]["method"] == "POST"
     assert calls[0]["url"] == "http://127.0.0.1:9621/query/data"
     assert "query_vector" not in calls[0]["payload"]
+    assert calls[0]["payload"]["retrieval_goal"] == "focused"
     assert calls[0]["payload"]["section_kind"] == "methodology"
+    assert result["retrieval_goal"] == "focused"
     assert result["response"]["context_blocks"][0]["source_path"] == "alpha.md"
 
 
@@ -94,6 +97,7 @@ def test_wiki_search_cli_help_is_native_only() -> None:
     for marker in LOCAL_SQLITE_CLI_FLAGS:
         assert marker not in result.stdout
     assert "--query-vector" in result.stdout
+    assert "--retrieval-goal" in result.stdout
     assert "--no-record-query-event" in result.stdout
     assert "records query events by default" in result.stdout
     assert "plain query-list JSONL" in result.stdout
@@ -128,9 +132,7 @@ def test_wiki_search_query_suite_rejects_structured_native_rows_before_http(tmp_
         json.dumps(
             {
                 "query": "alpha",
-                "mode": "mix",
-                "top_k": 3,
-                "query_vector": [1.0, 0.0],
+                "retrieval_goal": "coverage",
             }
         )
         + "\n",
@@ -189,6 +191,7 @@ def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monk
         server="http://127.0.0.1:9621",
         neighbor_k=5,
         response_profile="debug",
+        retrieval_goal="coverage",
     )
 
     result = wiki_search.run_query(args, "alpha")
@@ -203,6 +206,7 @@ def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monk
                 "mode": "mix",
                 "top_k": 1,
                 "neighbor_limit": 5,
+                "retrieval_goal": "coverage",
                 "response_profile": "debug",
                 "workspace_id": "native-test",
                 "query_vector": [1.0, 0.0],
@@ -210,4 +214,98 @@ def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monk
             "timeout": 120,
         }
     ]
+    assert result["retrieval_goal"] == "coverage"
     assert result["response"]["context_blocks"][0]["source_path"] == "vector.md"
+
+
+def test_wiki_search_evidence_pack_receives_bounded_goal_metadata_without_vector_or_secret(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        wiki_search,
+        "http_json",
+        lambda *_args, **_kwargs: {"context_blocks": [], "source_paths": [], "trace": {}},
+    )
+
+    def fake_save(state_dir, query, mode, response, *, request_metadata):
+        captured.update(request_metadata)
+        path = state_dir / "evidence.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ok", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(wiki_search, "save_evidence_pack", fake_save)
+    args = SimpleNamespace(
+        backend="native",
+        native_workspace="native-test",
+        query_vector=json.dumps([1.0, 0.0]),
+        mode="mix",
+        retrieval_goal="coverage",
+        top_k=3,
+        section_kind=None,
+        data_only=True,
+        save_evidence_pack=True,
+        state_dir=tmp_path / "state",
+        workdir=tmp_path,
+        server="http://127.0.0.1:9621",
+        neighbor_k=2,
+        response_profile="debug",
+        record_query_event=False,
+        api_key="SHOULD-NOT-APPEAR",
+    )
+
+    result = wiki_search.run_query(args, "alpha")
+
+    assert result["retrieval_goal"] == "coverage"
+    assert captured["retrieval_goal"] == "coverage"
+    assert "query_vector" not in captured
+    assert "api_key" not in captured
+
+
+def test_saved_evidence_pack_bounds_metadata_and_preserves_legacy_schema(tmp_path) -> None:
+    from ops import wiki_native_query_events
+
+    pack = wiki_native_query_events.save_evidence_pack(
+        tmp_path / "state",
+        "answer route query",
+        "mix",
+        {
+            "response": "answer",
+            "references": ["raw/example.md"],
+            "data": {"context_blocks": [{"source_path": "raw/example.md", "text": "context"}]},
+            "trace": {"retrieval_backend": "zvec", "context_block_count": 1},
+        },
+        request_metadata={
+            "retrieval_goal": "coverage",
+            "top_k": 10**1000,
+            "workspace_id": "workspace-" + ("x" * 5000),
+            "record_types": ["section-" + ("y" * 1000) for _ in range(100)],
+            "query_vector": [1.0, 0.0],
+            "api_key": "SHOULD-NOT-APPEAR",
+        },
+    )
+
+    text = pack.read_text(encoding="utf-8")
+    assert "- file_path: `raw/example.md`" in text
+    assert "Retrieval goal: coverage" in text
+    assert "query_vector" not in text
+    assert "SHOULD-NOT-APPEAR" not in text
+    metadata_json = text.split("## Request Metadata\n\n```json\n", 1)[1].split("\n```", 1)[0]
+    assert len(metadata_json.encode("utf-8")) <= 1600
+    assert json.loads(metadata_json)["retrieval_goal"] == "coverage"
+
+    legacy_pack = wiki_native_query_events.save_evidence_pack(
+        tmp_path / "state",
+        "legacy query",
+        "mix",
+        {"response": "answer", "references": []},
+    )
+    assert '"retrieval_goal": "focused"' in legacy_pack.read_text(encoding="utf-8")
+
+    events_db = wiki_native_query_events.init_query_events_db(tmp_path / "state")
+    with sqlite3.connect(events_db) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(query_events)")]
+    assert columns == ["id", "query", "mode", "rewritten_queries", "evidence_pack_path", "created_at"]

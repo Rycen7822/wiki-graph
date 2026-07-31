@@ -22,7 +22,12 @@ from starlette.routing import Route
 from llm_wiki_native.answer import AnswerGenerator, NativeAnswerConfig, NativeAnswerGenerator
 from llm_wiki_native.contracts import DEFAULT_NATIVE_PORT
 from llm_wiki_native.embedding import EmbeddingProvider, NativeEmbedding, NativeEmbeddingConfig
-from llm_wiki_native.query_contract import engine_query_kwargs, query_mode, query_vector, response_max_chars, response_profile
+from llm_wiki_native.query_contract import (
+    engine_query_kwargs,
+    query_vector,
+    response_max_chars,
+    response_profile,
+)
 from llm_wiki_native.retrieval.context import assemble_context
 
 MAX_REQUEST_BODY_BYTES = 1_000_000
@@ -53,7 +58,14 @@ def _query_kwargs(
     embedding_provider: EmbeddingProvider | None = None,
     default_workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    mode = query_mode(payload)
+    kwargs = engine_query_kwargs(
+        payload,
+        normalized_query_vector=[],
+        default_workspace_id=default_workspace_id,
+    )
+    response_max_chars(payload)
+    response_profile(payload)
+    mode = str(kwargs["mode"])
     query = str(payload.get("query", ""))
     if "query_vector" in payload:
         normalized_query_vector = query_vector(payload["query_vector"])
@@ -63,11 +75,8 @@ def _query_kwargs(
         normalized_query_vector = query_vector(embedding_provider.embed_query(query))
     else:
         raise ValueError("query_vector is required when embedding provider is not configured")
-    return engine_query_kwargs(
-        payload,
-        normalized_query_vector=normalized_query_vector,
-        default_workspace_id=default_workspace_id,
-    )
+    kwargs["query_vector"] = normalized_query_vector
+    return kwargs
 
 
 async def _json_payload(request: Request) -> dict[str, Any]:

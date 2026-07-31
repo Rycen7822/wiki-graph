@@ -183,12 +183,6 @@ def _read_query_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _payload_int(payload: dict[str, Any], key: str, default: int) -> int:
-    if key not in payload or payload[key] is None:
-        return default
-    return int(payload[key])
-
-
 def _repo_local_active_pointer_query_check(
     active_pointer_path: Path,
     query_payload_path: Path,
@@ -198,47 +192,43 @@ def _repo_local_active_pointer_query_check(
 ) -> dict[str, Any]:
     check_name = "repo_local_active_pointer_query"
     try:
+        from llm_wiki_native.query_contract import engine_query_kwargs, query_vector
         from llm_wiki_native.runtime import load_engine_from_workspace_pointer
 
         pointer = json.loads(Path(active_pointer_path).read_text(encoding="utf-8"))
         if not isinstance(pointer, dict):
             raise ValueError("repo-local active pointer must be a JSON object")
         payload = _read_query_payload(query_payload_path)
-        query_vector = [float(value) for value in payload["query_vector"]]
-        record_types_payload = payload.get("record_types") or ["entity", "relationship", "chunk", "section"]
-        if not isinstance(record_types_payload, list):
-            raise ValueError("repo-local query payload record_types must be a list")
-        record_types = tuple(str(value) for value in record_types_payload)
-        workspace_id = str(payload.get("workspace_id") or pointer.get("workspace_id") or "")
+        normalized_vector = query_vector(payload.get("query_vector"))
+        query_kwargs = engine_query_kwargs(
+            payload,
+            normalized_query_vector=normalized_vector,
+            default_workspace_id=str(pointer.get("workspace_id") or "") or None,
+        )
         loader_kwargs: dict[str, Any] = {}
         if sqlite_workspace_factory is not None:
             loader_kwargs["sqlite_workspace_factory"] = sqlite_workspace_factory
         if zvec_workspace_factory is not None:
             loader_kwargs["zvec_workspace_factory"] = zvec_workspace_factory
         engine = load_engine_from_workspace_pointer(Path(active_pointer_path), **loader_kwargs)
-        result = engine.query(
-            workspace_id,
-            str(payload.get("query") or ""),
-            query_vector,
-            mode=str(payload.get("mode") or "mix"),
-            top_k=_payload_int(payload, "top_k", 3),
-            record_types=record_types,
-            section_kind=payload.get("section_kind"),
-            neighbor_limit=_payload_int(payload, "neighbor_limit", 5),
-        )
+        result = engine.query(**query_kwargs)
         trace = dict(result.get("trace") or {})
         hit_count = len(result.get("hits") or [])
+        mode = str(query_kwargs["mode"])
+        backend = trace.get("retrieval_backend")
+        backend_ok = backend in ({"zvec", "zvec+lexical"} if mode == "mix" else {"zvec"})
         return {
             "name": check_name,
-            "ok": trace.get("retrieval_backend") == "zvec" and hit_count > 0,
+            "ok": backend_ok and hit_count > 0,
             "active_pointer_path": str(active_pointer_path),
             "query_payload_path": str(query_payload_path),
-            "workspace_id": workspace_id,
+            "workspace_id": query_kwargs["workspace_id"],
             "status": pointer.get("status"),
-            "query_vector_dim": len(query_vector),
-            "mode": str(payload.get("mode") or "mix"),
-            "top_k": _payload_int(payload, "top_k", 3),
-            "record_types": list(record_types),
+            "query_vector_dim": len(normalized_vector),
+            "mode": mode,
+            "retrieval_goal": query_kwargs["retrieval_goal"],
+            "top_k": query_kwargs["top_k"],
+            "record_types": list(query_kwargs["record_types"]),
             "hit_count": hit_count,
             "trace": _sanitize_query_trace(trace),
             "production_uninstall_proven": False,
@@ -266,6 +256,14 @@ def _package_independence_runtime_smoke(
         def get_workspace_status(self, workspace_id: str) -> str:
             return "audited"
 
+        def get_workspace_metadata(self, workspace_id: str) -> dict[str, Any]:
+            return {
+                "workspace_id": workspace_id,
+                "source_manifest_hash": "runtime-smoke-manifest",
+                "schema_version": 1,
+                "status": "audited",
+            }
+
         def get_record(self, workspace_id: str, record_type: str, record_id: str) -> dict[str, Any]:
             return {
                 "workspace_id": workspace_id,
@@ -280,7 +278,16 @@ def _package_independence_runtime_smoke(
     class _Hit:
         doc_id = "chunk:runtime-smoke"
         score = 1.0
-        fields = {"record_type": "chunk", "record_id": "runtime-smoke"}
+        fields = {
+            "record_type": "chunk",
+            "record_id": "runtime-smoke",
+            "source_path": "runtime-smoke.md",
+            "source_id": "runtime-smoke",
+            "source_kind_code": 1,
+            "section_kind_code": 0,
+            "content": "runtime smoke record",
+            "content_hash": "runtime-smoke-content",
+        }
 
     class _Zvec:
         def query_vector(self, query_vector: list[float], top_k: int, filter_expr: str | None) -> list[_Hit]:
@@ -296,6 +303,8 @@ def _package_independence_runtime_smoke(
             [1.0, 0.0],
             mode="naive",
             top_k=1,
+            record_types=("chunk",),
+            neighbor_limit=0,
         )
         trace = dict(result.get("trace") or {})
         checks.append(

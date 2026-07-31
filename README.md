@@ -96,6 +96,73 @@ python3 -m ops.wiki_search "your query" \
   --data-only
 ```
 
+### Relevance-aware retrieval
+
+Set `NATIVE_SERVER` to the native API endpoint. Focused retrieval favors the
+smallest decisive evidence set:
+
+```bash
+python3 -m ops.wiki_search \
+  "Explain the decisive result and its supporting measurements." \
+  --server "$NATIVE_SERVER" \
+  --retrieval-goal focused \
+  --top-k 4 \
+  --response-profile standard \
+  --data-only \
+  --no-record-query-event
+```
+
+Coverage retrieval preserves distinct evidence across sources:
+
+```bash
+python3 -m ops.wiki_search \
+  "Compare the two approaches, including evidence and limitations from each." \
+  --server "$NATIVE_SERVER" \
+  --retrieval-goal coverage \
+  --top-k 6 \
+  --response-profile debug \
+  --data-only \
+  --no-record-query-event
+```
+
+`top_k` is the maximum number of visible context blocks, not the number of
+records initially retrieved. The planner uses a larger internal candidate
+budget before selection; that budget is an implementation detail, not a public
+tuning knob.
+
+Responses using `ranking_contract="relevance-v1"` expose `score` as the
+weighted relevance score used for final ordering. It combines local route rank,
+source rank, normalized query-term coverage, and evidence quality; it is not
+the legacy raw route score. Use `relevance_score_breakdown` and `route_ranks`
+to interpret it. Existing debug hits, coverage gaps, and `score_breakdown`
+remain as additive compatibility fields, but `score_breakdown` must not be used
+to reconstruct the relevance-v1 score.
+
+To collect a candidate quality report, point the variables below at an audited
+workspace, a frozen relevance-v1 suite, its matching baseline, and a new output
+path:
+
+```bash
+python3 -m ops.collect_native_query_report \
+  --quality-contract relevance-v1 \
+  --partition all \
+  --query-suite "$RELEVANCE_QUERY_SUITE" \
+  --workspace-file "$NATIVE_WORKSPACE_FILE" \
+  --runtime-code-root "$WIKI_GRAPH_REPO" \
+  --baseline-report "$RELEVANCE_BASELINE_REPORT" \
+  --server "$NATIVE_SERVER" \
+  --endpoint /query/data \
+  --warmup-runs 1 \
+  --repetitions 5 \
+  --require-gates \
+  --fail-if-output-exists \
+  --output "$RELEVANCE_CANDIDATE_REPORT"
+```
+
+This retrieval-only upgrade uses the existing audited workspace and does not
+require a workspace rebuild, native refresh, or pointer cutover. Those
+operations remain separate workflows for corpus or production-state changes.
+
 Run the production-reference audit:
 
 ```bash

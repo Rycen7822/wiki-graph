@@ -99,6 +99,19 @@ def test_fallback_frontmatter_loader_handles_inline_lists() -> None:
     assert meta["sources"] == ["raw/clip/a.md"]
 
 
+def test_readme_documents_relevance_aware_query_and_report_contracts() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    prose = " ".join(readme.split())
+
+    assert "--retrieval-goal focused" in readme
+    assert "--retrieval-goal coverage" in readme
+    assert "--quality-contract relevance-v1" in readme
+    assert "`top_k` is the maximum number of visible context blocks" in prose
+    assert 'ranking_contract="relevance-v1"' in prose
+    assert "additive compatibility fields" in prose
+    assert "does not require a workspace rebuild, native refresh, or pointer cutover" in prose
+
+
 def test_collect_source_docs_excludes_schema_log_and_includes_meta(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     write(root / "log.md", "# Log\n")

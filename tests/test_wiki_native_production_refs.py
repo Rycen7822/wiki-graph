@@ -117,7 +117,8 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
                 "query": "repo-local active pointer smoke",
                 "query_vector": [1.0, 0.0],
                 "mode": "mix",
-                "top_k": 1,
+                "retrieval_goal": "coverage",
+                "top_k": 2,
                 "neighbor_limit": 0,
                 "record_types": ["chunk"],
             }
@@ -130,6 +131,15 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
             assert workspace_id == "wikigraph-zvec192-active"
             return "audited"
 
+        def get_workspace_metadata(self, workspace_id: str) -> dict:
+            assert workspace_id == "wikigraph-zvec192-active"
+            return {
+                "workspace_id": workspace_id,
+                "source_manifest_hash": "manifest-hash",
+                "schema_version": 1,
+                "status": "audited",
+            }
+
         def get_record(self, workspace_id: str, record_type: str, record_id: str) -> dict[str, str]:
             return {"workspace_id": workspace_id, "record_type": record_type, "record_id": record_id}
 
@@ -137,16 +147,44 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
             assert limit == 0
             return []
 
+        def query_lexical_spans(self, workspace_id: str, query: str, limit: int, **kwargs) -> list[dict]:
+            assert kwargs["normalized_terms"]
+            return [
+                {
+                    "span_id": "span:runtime-smoke",
+                    "source_path": "lexical-smoke.md",
+                    "source_id": "lexical-smoke",
+                    "source_role": "raw",
+                    "span_kind": "table.row",
+                    "heading_path": ["Runtime smoke"],
+                    "start_line": 1,
+                    "end_line": 1,
+                    "text": "repo-local active pointer smoke",
+                    "text_hash": "lexical-smoke-content",
+                    "metadata": {},
+                    "lexical_route": "lexical_fts",
+                }
+            ]
+
     class FakeHit:
         doc_id = "chunk:runtime-smoke"
         score = 1.0
-        fields = {"record_type": "chunk", "record_id": "runtime-smoke"}
+        fields = {
+            "record_type": "chunk",
+            "record_id": "runtime-smoke",
+            "source_path": "runtime-smoke.md",
+            "source_id": "runtime-smoke",
+            "source_kind_code": 1,
+            "section_kind_code": 0,
+            "content": "repo-local active pointer smoke",
+            "content_hash": "runtime-smoke-content",
+        }
 
     class FakeZvec:
         def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None) -> list[FakeHit]:
             assert query == "repo-local active pointer smoke"
             assert query_vector == [1.0, 0.0]
-            assert top_k == 1
+            assert top_k == 40
             assert filter_expr == "record_type_code in (1)"
             return [FakeHit()]
 
@@ -176,17 +214,38 @@ def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_r
     assert active_pointer["workspace_id"] == "wikigraph-zvec192-active"
     assert active_pointer["status"] == "active"
     assert active_pointer["query_vector_dim"] == 2
-    assert active_pointer["hit_count"] == 1
+    assert active_pointer["retrieval_goal"] == "coverage"
+    assert active_pointer["hit_count"] == 2
     assert active_pointer["trace"] == {
         "mode": "mix",
-        "top_k": 1,
+        "top_k": 2,
         "record_types": ["chunk"],
         "section_kind": None,
         "vector_hit_count": 1,
-        "retrieval_backend": "zvec",
+        "retrieval_backend": "zvec+lexical",
     }
     assert "hits" not in active_pointer
     assert "query" not in active_pointer["trace"]
+
+    invalid_payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    invalid_payload["record_types"] = []
+    payload_path.write_text(json.dumps(invalid_payload), encoding="utf-8")
+    invalid_report = audit_native_production_refs.audit_active_production_refs(
+        ROOT,
+        repo_local_active_pointer_path=pointer_path,
+        repo_local_query_payload_path=payload_path,
+        sqlite_workspace_factory=sqlite_factory,
+        zvec_workspace_factory=zvec_factory,
+    )
+    invalid_check = next(
+        row
+        for row in invalid_report["package_independence"]["runtime_smoke"]["checks"]
+        if row["name"] == "repo_local_active_pointer_query"
+    )
+    assert invalid_check["ok"] is False
+    assert "record_types" in invalid_check["message"]
+
+
 def test_audit_native_production_refs_cli_outputs_structured_report(capsys: pytest.CaptureFixture[str]) -> None:
     audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 

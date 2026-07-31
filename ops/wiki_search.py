@@ -4,7 +4,15 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-from llm_wiki_native.contracts import DEFAULT_NEIGHBOR_LIMIT, DEFAULT_QUERY_MODE, DEFAULT_TOP_K, RESPONSE_PROFILES, SUPPORTED_QUERY_MODES
+from llm_wiki_native.contracts import (
+    DEFAULT_NEIGHBOR_LIMIT,
+    DEFAULT_QUERY_MODE,
+    DEFAULT_RETRIEVAL_GOAL,
+    DEFAULT_TOP_K,
+    RESPONSE_PROFILES,
+    SUPPORTED_QUERY_MODES,
+    SUPPORTED_RETRIEVAL_GOALS,
+)
 from llm_wiki_native.query_contract import STRUCTURED_QUERY_SUITE_KEYS
 from ops.wiki_native_lib import (
     add_query_event,
@@ -31,9 +39,11 @@ def http_json(method: str, url: str, payload: dict | None = None, *, timeout: in
 
 def run_native_api_query(args, query: str, *, section_kind: str | None = None) -> dict:
     endpoint = "/query/data" if args.data_only else "/query"
+    retrieval_goal = getattr(args, "retrieval_goal", DEFAULT_RETRIEVAL_GOAL)
     payload = {
         "query": query,
         "mode": args.mode,
+        "retrieval_goal": retrieval_goal,
         "top_k": args.top_k,
         "neighbor_limit": args.neighbor_k,
     }
@@ -51,10 +61,24 @@ def run_native_api_query(args, query: str, *, section_kind: str | None = None) -
     response = http_json("POST", args.server.rstrip("/") + endpoint, payload, timeout=120)
     pack = None
     if args.save_evidence_pack:
-        pack = save_evidence_pack(args.state_dir, query, args.mode, response)
+        pack = save_evidence_pack(
+            args.state_dir,
+            query,
+            args.mode,
+            response,
+            request_metadata={key: value for key, value in payload.items() if key not in {"query", "query_vector"}},
+        )
     if getattr(args, "record_query_event", True):
         add_query_event(args.state_dir, query, args.mode, str(pack) if pack else None)
-    return {"query": query, "mode": args.mode, "section_kind": section_kind, "evidence_pack": str(pack) if pack else None, "backend": "native", "response": response}
+    return {
+        "query": query,
+        "mode": args.mode,
+        "retrieval_goal": retrieval_goal,
+        "section_kind": section_kind,
+        "evidence_pack": str(pack) if pack else None,
+        "backend": "native",
+        "response": response,
+    }
 
 
 def run_query(args, query: str) -> dict:
@@ -70,6 +94,11 @@ def main() -> int:
     parser = common_paths_parser("Query the llm-wiki native service; records query events by default unless --no-record-query-event is set")
     parser.add_argument("query", nargs="?")
     parser.add_argument("--mode", default=DEFAULT_QUERY_MODE, choices=sorted(SUPPORTED_QUERY_MODES))
+    parser.add_argument(
+        "--retrieval-goal",
+        default=DEFAULT_RETRIEVAL_GOAL,
+        choices=sorted(SUPPORTED_RETRIEVAL_GOALS),
+    )
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument(
         "--section-kind",

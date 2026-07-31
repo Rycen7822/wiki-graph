@@ -21,6 +21,13 @@ _COUNT_KEYS = {
     "section": "sections",
 }
 _ZERO_COUNTS = {value: 0 for value in _COUNT_KEYS.values()}
+_MAX_LIKE_RANK_TERMS = 8
+_MAX_LIKE_ANCHOR_TERMS = 4
+_MAX_LIKE_NUMERIC_ANCHORS = 2
+_STRUCTURED_SPAN_INTENT_RE = re.compile(
+    r"\b(?:formula|equation)\b|公式",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +82,25 @@ def _query_terms(query: str) -> list[str]:
 def _fts_query(query: str) -> str:
     terms = _query_terms(query)
     return " ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:8])
+
+
+def _fts_query_terms(terms: tuple[str, ...]) -> str:
+    return " ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
+
+
+def _like_text_predicate(
+    term: str,
+    *,
+    grouped_form: str | None,
+) -> tuple[str, tuple[str, ...]]:
+    variants = [term]
+    if grouped_form is not None:
+        variants.extend((grouped_form, grouped_form.replace(",", "{,}")))
+    patterns = tuple(f"%{variant}%" for variant in dict.fromkeys(variants))
+    return (
+        f"({' OR '.join('text LIKE ?' for _ in patterns)})",
+        patterns,
+    )
 
 
 def _append_in_filter(filters: list[str], params: list[Any], column: str, values: tuple[str, ...]) -> None:
@@ -304,14 +330,14 @@ def _create_lexical_schema(conn: sqlite3.Connection) -> None:
 class SQLiteWorkspace:
 
     def __init__(self, db_path: Path) -> None:
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path).resolve()
         self._read_only = False
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
     @classmethod
     def open_existing(cls, db_path: Path, *, read_only: bool = True) -> "SQLiteWorkspace":
-        path = Path(db_path)
+        path = Path(db_path).resolve()
         if not path.exists():
             raise FileNotFoundError(path)
         workspace = cls.__new__(cls)
@@ -321,15 +347,17 @@ class SQLiteWorkspace:
 
     def _connect(self) -> sqlite3.Connection:
         if self._read_only:
-            conn = sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", timeout=30.0, uri=True)
+            conn = sqlite3.connect(
+                f"{self.db_path.as_uri()}?mode=ro",
+                timeout=5.0,
+                uri=True,
+            )
         else:
             conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        if self._read_only:
-            conn.execute("PRAGMA query_only = ON")
-        else:
+        if not self._read_only:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA busy_timeout = 5000")
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
         return conn
@@ -359,6 +387,24 @@ class SQLiteWorkspace:
         if row is None:
             raise KeyError(workspace_id)
         return str(row["status"])
+
+    def get_workspace_metadata(self, workspace_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT workspace_id, source_manifest_hash, schema_version, status
+                FROM workspace WHERE workspace_id = ?
+                """,
+                (workspace_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(workspace_id)
+        return {
+            "workspace_id": str(row["workspace_id"]),
+            "source_manifest_hash": str(row["source_manifest_hash"]),
+            "schema_version": int(row["schema_version"]),
+            "status": str(row["status"]),
+        }
 
     def put_record(self, record: NativeRecord) -> None:
         self.get_workspace_status(record.workspace_id)
@@ -560,13 +606,23 @@ class SQLiteWorkspace:
         limit: int = 20,
         source_roles: tuple[str, ...] | list[str] | None = None,
         span_kinds: tuple[str, ...] | list[str] | None = None,
+        normalized_terms: tuple[str, ...] | list[str] | None = None,
     ) -> list[dict[str, Any]]:
         self.get_workspace_status(workspace_id)
         if limit <= 0:
             return []
         source_roles = tuple(source_roles or ())
         span_kinds = tuple(span_kinds or ())
-        fts_query = _fts_query(query)
+        if normalized_terms is None:
+            terms: tuple[str, ...] | None = None
+            fts_query = _fts_query(query)
+        else:
+            terms = tuple(
+                term for term in normalized_terms[:32] if isinstance(term, str) and term
+            )
+            if not terms:
+                return []
+            fts_query = _fts_query_terms(terms)
         if fts_query:
             try:
                 hits = self._query_lexical_spans_fts(workspace_id, fts_query, limit=limit, source_roles=source_roles, span_kinds=span_kinds)
@@ -574,7 +630,14 @@ class SQLiteWorkspace:
                 hits = []
             if hits:
                 return hits
-        return self._query_lexical_spans_like(workspace_id, query, limit=limit, source_roles=source_roles, span_kinds=span_kinds)
+        return self._query_lexical_spans_like(
+            workspace_id,
+            query,
+            limit=limit,
+            source_roles=source_roles,
+            span_kinds=span_kinds,
+            normalized_terms=terms,
+        )
 
     def _query_lexical_spans_fts(
         self,
@@ -612,28 +675,127 @@ class SQLiteWorkspace:
         limit: int,
         source_roles: tuple[str, ...],
         span_kinds: tuple[str, ...],
+        normalized_terms: tuple[str, ...] | None,
     ) -> list[dict[str, Any]]:
-        terms = _query_terms(query) or [query.strip()]
+        terms = list(normalized_terms) if normalized_terms is not None else (_query_terms(query) or [query.strip()])[:8]
         filters = ["workspace_id = ?"]
         params: list[Any] = [workspace_id]
         _append_in_filter(filters, params, "source_role", source_roles)
         _append_in_filter(filters, params, "span_kind", span_kinds)
-        like_parts = []
-        for term in terms[:8]:
+        anchor_terms = sorted(
+            terms,
+            key=lambda term: (-len(term), terms.index(term)),
+        )[:_MAX_LIKE_ANCHOR_TERMS]
+        anchor_terms.extend(
+            term
+            for term in terms
+            if any(character.isdigit() for character in term) and term not in anchor_terms
+        )
+        anchor_terms = anchor_terms[: _MAX_LIKE_ANCHOR_TERMS + _MAX_LIKE_NUMERIC_ANCHORS]
+        ranking_terms = list(
+            dict.fromkeys([*terms[:_MAX_LIKE_RANK_TERMS], *anchor_terms])
+        )
+        grouped_numeric_terms = {
+            match.group(0).replace(",", ""): match.group(0)
+            for match in re.finditer(r"\d{1,3}(?:,\d{3})+", query)
+        }
+
+        text_like_parts = []
+        text_score_parts = []
+        text_score_params: list[Any] = []
+        path_score_parts = []
+        path_score_params: list[Any] = []
+        path_like_parts = []
+        path_filter_params: list[Any] = []
+        text_filter_params: list[Any] = []
+        grouping_enabled = normalized_terms is not None
+        structured_span_intent = bool(_STRUCTURED_SPAN_INTENT_RE.search(query))
+        for term in ranking_terms:
             pattern = f"%{term}%"
-            like_parts.append("(text LIKE ? OR source_path LIKE ? OR source_id LIKE ? OR heading_path_json LIKE ? OR metadata_json LIKE ?)")
-            params.extend([pattern, pattern, pattern, pattern, pattern])
-        if like_parts:
-            filters.append("(" + " OR ".join(like_parts) + ")")
-        params.append(limit)
-        sql = f"""
-            SELECT * FROM lexical_span
-            WHERE {' AND '.join(filters)}
-            ORDER BY source_path ASC, start_line ASC, span_id ASC
+            text_predicate, text_patterns = _like_text_predicate(
+                term,
+                grouped_form=grouped_numeric_terms.get(term) if grouping_enabled else None,
+            )
+            match_weight = (
+                len(ranking_terms)
+                if grouping_enabled and term.isascii() and term.isdecimal()
+                else 1
+            )
+            text_score_parts.append(
+                f"CASE WHEN {text_predicate} THEN {match_weight} ELSE 0 END"
+            )
+            text_score_params.extend(text_patterns)
+            if len(term) >= 3 and not term.isdecimal():
+                path_score_parts.append(
+                    f"CASE WHEN source_path LIKE ? THEN "
+                    f"{len(term) if structured_span_intent else 1} ELSE 0 END"
+                )
+                path_score_params.append(pattern)
+                if structured_span_intent:
+                    path_like_parts.append("source_path LIKE ?")
+                    path_filter_params.append(pattern)
+        for term in anchor_terms:
+            text_predicate, text_patterns = _like_text_predicate(
+                term,
+                grouped_form=grouped_numeric_terms.get(term) if grouping_enabled else None,
+            )
+            text_like_parts.append(text_predicate)
+            text_filter_params.extend(text_patterns)
+        eligibility_parts = [*text_like_parts, *path_like_parts]
+        text_sql = f"""
+            SELECT *,
+                   ({' + '.join(text_score_parts)}) AS term_match_count,
+                   ({' + '.join(path_score_parts) if path_score_parts else '0'}) AS source_path_match_score,
+                   CASE WHEN span_kind = 'table.row' THEN {int(structured_span_intent)} ELSE 0 END AS structured_span_match
+            FROM lexical_span
+            WHERE {' AND '.join(filters)} AND ({' OR '.join(eligibility_parts)})
+            ORDER BY structured_span_match DESC,
+                     {int(structured_span_intent)} * source_path_match_score DESC,
+                     term_match_count + source_path_match_score DESC,
+                     term_match_count DESC,
+                     source_path ASC, start_line ASC, span_id ASC
             LIMIT ?
         """
         with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(
+                text_sql,
+                [
+                    *text_score_params,
+                    *path_score_params,
+                    *params,
+                    *text_filter_params,
+                    *path_filter_params,
+                    limit,
+                ],
+            ).fetchall()
+            if len(rows) < limit:
+                all_field_parts = []
+                all_field_params: list[Any] = []
+                for term in terms:
+                    pattern = f"%{term}%"
+                    text_predicate, text_patterns = _like_text_predicate(
+                        term,
+                        grouped_form=(
+                            grouped_numeric_terms.get(term) if grouping_enabled else None
+                        ),
+                    )
+                    all_field_parts.append(
+                        f"({text_predicate} OR source_path LIKE ? OR source_id LIKE ? OR heading_path_json LIKE ? OR metadata_json LIKE ?)"
+                    )
+                    all_field_params.extend([*text_patterns, pattern, pattern, pattern, pattern])
+                fallback_sql = f"""
+                    SELECT * FROM lexical_span
+                    WHERE {' AND '.join(filters)} AND ({' OR '.join(all_field_parts)})
+                    ORDER BY source_path ASC, start_line ASC, span_id ASC
+                    LIMIT ?
+                """
+                fallback_rows = conn.execute(
+                    fallback_sql,
+                    [*params, *all_field_params, limit + len(rows)],
+                ).fetchall()
+                seen_ids = {str(row["span_id"]) for row in rows}
+                rows.extend(row for row in fallback_rows if str(row["span_id"]) not in seen_ids)
+                rows = rows[:limit]
         return [_lexical_span_from_row(row, route="lexical_like") for row in rows]
 
     def count_edges(self, workspace_id: str) -> int:

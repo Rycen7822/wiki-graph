@@ -5,17 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_coverage_plan(hits: list[dict[str, Any]]) -> dict[str, Any]:
+def build_coverage_plan(hits: list[dict[str, Any]], *, trace: dict[str, Any] | None = None) -> dict[str, Any]:
     by_source_role: dict[str, list[str]] = {}
     by_span_kind: dict[str, list[str]] = {}
+    blocks_per_source: dict[str, int] = {}
     must_read: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     for hit in hits:
         record = hit.get("record", {}) if isinstance(hit.get("record"), dict) else {}
         payload = record.get("payload", {}) if isinstance(record.get("payload"), dict) else {}
-        source_path = str(record.get("source_path") or hit.get("record_id") or "")
+        source_path = str(
+            hit.get("source_key") or record.get("source_path") or hit.get("record_id") or ""
+        )
         if not source_path:
             continue
+        blocks_per_source[source_path] = blocks_per_source.get(source_path, 0) + 1
         source_role = str(payload.get("source_role") or _role_from_path(source_path))
         span_kind = str(payload.get("span_kind") or hit.get("record_type") or "unknown")
         by_source_role.setdefault(source_role, [])
@@ -38,11 +42,16 @@ def build_coverage_plan(hits: list[dict[str, Any]]) -> dict[str, Any]:
                     "decision": "must_read" if len(must_read) < 8 else "supporting",
                 }
             )
+    trace = trace or {}
     return {
         "by_source_role": by_source_role,
         "by_span_kind": by_span_kind,
         "must_read": must_read,
         "coverage_gaps": _coverage_gaps(by_source_role),
+        "retrieval_goal": trace.get("retrieval_goal", "focused"),
+        "blocks_per_source": blocks_per_source,
+        "distinct_source_count": len(blocks_per_source),
+        "coverage_fill_pass_used": bool(trace.get("coverage_fill_pass_used", False)),
     }
 
 
