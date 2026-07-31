@@ -61,6 +61,7 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
         "mode": "mix",
         "top_k": 1,
         "record_types": ["entity"],
+        "retrieval_goal": "coverage",
         "response_profile": "compact",
     }
 
@@ -71,7 +72,12 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
     assert body["context_blocks"][0]["source_path"] == "alpha.md"
     assert "neighbors" not in body["context_blocks"][0]
     assert body["coverage_plan"]["must_read"][0]["source_path"] == "alpha.md"
+    assert body["coverage_plan"]["retrieval_goal"] == "coverage"
+    assert body["coverage_plan"]["distinct_source_count"] == 1
     assert body["trace"]["mode"] == "mix"
+    assert body["trace"]["retrieval_goal"] == "coverage"
+    assert "candidate_cards" not in body["trace"]
+    assert "planner_decisions" not in body["trace"]
 
 
 def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monkeypatch) -> None:
@@ -89,6 +95,58 @@ def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monke
 
     assert response.status_code == 400
     assert "record_type" in response.json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"retrieval_goal": "wide"}, "retrieval_goal"),
+        ({"mode": "wide"}, "mode"),
+        ({"record_types": []}, "record_types"),
+        ({"section_kind": "unknown"}, "section_kind"),
+        ({"section_kind": ""}, "section_kind"),
+        ({"top_k": "many"}, "top_k"),
+        ({"top_k": True}, "top_k"),
+        ({"top_k": 1.5}, "top_k"),
+        ({"neighbor_limit": "many"}, "neighbor_limit"),
+        ({"neighbor_limit": True}, "neighbor_limit"),
+        ({"max_chars_per_block": "many"}, "max_chars_per_block"),
+        ({"max_chars_per_block": 12.5}, "max_chars_per_block"),
+        ({"response_profile": "verbose"}, "response_profile"),
+    ],
+)
+def test_native_api_validates_controls_before_embedding(
+    override: dict,
+    message: str,
+) -> None:
+    class Provider:
+        calls = 0
+
+        def embed_query(self, query: str) -> list[float]:
+            self.calls += 1
+            return [1.0, 0.0]
+
+    class Engine:
+        def query(self, **kwargs):
+            raise AssertionError("invalid request must not reach engine")
+
+    provider = Provider()
+    app = create_app(
+        Engine(),
+        embedding_provider=provider,
+        default_workspace_id="native-test",
+    )
+    payload = {"query": "alpha", **override}
+    response = _request(
+        app,
+        "POST",
+        "/query/data",
+        json=payload,
+        raise_app_exceptions=False,
+    )
+    assert response.status_code == 400
+    assert message in response.json()["error"]
+    assert provider.calls == 0
 
 
 def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch) -> None:
@@ -208,9 +266,12 @@ class FakeAnswerGenerator:
 
 def _context() -> dict:
     return {
-        "context_blocks": [{"record_id": "doc:a", "text": "Alpha context"}],
+        "context_blocks": [
+            {"record_id": "doc:a#method", "source_path": "alpha.md", "text": "Alpha method"},
+            {"record_id": "doc:a#result", "source_path": "alpha.md", "text": "Alpha result"},
+        ],
         "source_paths": ["alpha.md"],
-        "trace": {"mode": "mix", "context_block_count": 1},
+        "trace": {"mode": "mix", "context_block_count": 2},
     }
 
 
@@ -228,8 +289,8 @@ def test_answer_response_payload_uses_answer_generator_context() -> None:
     assert payload["mode"] == "mix"
     assert payload["response"] == "answer for alpha"
     assert payload["references"] == ["alpha.md"]
-    assert payload["data"]["context_blocks"][0]["text"] == "Alpha context"
-    assert payload["trace"]["context_block_count"] == 1
+    assert [block["text"] for block in payload["data"]["context_blocks"]] == ["Alpha method", "Alpha result"]
+    assert payload["trace"]["context_block_count"] == 2
     assert answers.calls[0]["mode"] == "mix"
 
 

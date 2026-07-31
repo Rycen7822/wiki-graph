@@ -47,17 +47,32 @@ def init_query_events_db(state_dir: Path) -> Path:
     return db
 
 
-def save_evidence_pack(state_dir: Path, query: str, mode: str, response: dict[str, Any]) -> Path:
+def save_evidence_pack(
+    state_dir: Path,
+    query: str,
+    mode: str,
+    response: dict[str, Any],
+    *,
+    request_metadata: dict[str, Any] | None = None,
+) -> Path:
     _ensure_state_dirs(state_dir)
     slug = slugify(query, 70)
     path = state_dir / "evidence_packs" / f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}.md"
     refs = response.get("references") or []
+    safe_metadata = _bounded_request_metadata(request_metadata or {})
     lines = [
         f"# Evidence Pack: {query}",
         "",
         f"Generated: {_now_stamp()}",
         f"Mode: {mode}",
+        f"Retrieval goal: {safe_metadata.get('retrieval_goal', 'focused')}",
         "Intent: query",
+        "",
+        "## Request Metadata",
+        "",
+        "```json",
+        json.dumps(safe_metadata, ensure_ascii=False, indent=2, sort_keys=True),
+        "```",
         "",
         "## 1. Response",
         "",
@@ -92,6 +107,36 @@ def save_evidence_pack(state_dir: Path, query: str, mode: str, response: dict[st
                 lines.append("```")
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _bounded_request_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "retrieval_goal",
+        "mode",
+        "top_k",
+        "neighbor_limit",
+        "section_kind",
+        "response_profile",
+        "workspace_id",
+        "record_types",
+    )
+    result: dict[str, Any] = {"retrieval_goal": "focused"}
+    for key in allowed:
+        if key not in metadata:
+            continue
+        value = metadata.get(key)
+        if key == "retrieval_goal" and not isinstance(value, str):
+            continue
+        if isinstance(value, str):
+            result[key] = value[:200]
+        elif isinstance(value, (int, float, bool)) or value is None:
+            result[key] = value
+        elif isinstance(value, (list, tuple)):
+            result[key] = [str(item)[:200] for item in value[:20]]
+
+    while len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 1600 and len(result) > 1:
+        result.pop(next(reversed(result)))
+    return result
 
 
 def add_query_event(state_dir: Path, query: str, mode: str, evidence_pack_path: str | None = None) -> None:
