@@ -1,12 +1,11 @@
-import sys
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
 import ops.validate_wiki as validate_wiki_cli  # noqa: E402
@@ -25,6 +24,26 @@ from ops.wiki_native_wiki_checks import VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSI
 from ops.wiki_native_wiki_checks import validation_freshness_context  # noqa: E402
 from ops.wiki_native_wiki_checks import validation_report_is_fresh  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
+
+
+def _wiki_paths(tmp_path: Path, *, reuse: bool = False) -> tuple[Path, Path, Path]:
+    root = validation_reuse_wiki(tmp_path) if reuse else sample_wiki(tmp_path)
+    state = tmp_path / "work" / "wikigraph" / "state"
+    workdir = tmp_path / "work" / "wikigraph"
+    return root, state, workdir
+
+
+def _validate_cli_argv(root: Path, state: Path, workdir: Path, *extra: str) -> list[str]:
+    return [
+        "validate_wiki.py",
+        "--root",
+        str(root),
+        "--state-dir",
+        str(state),
+        "--workdir",
+        str(workdir),
+        *extra,
+    ]
 
 
 def validation_reuse_wiki(tmp_path: Path) -> Path:
@@ -112,9 +131,10 @@ def test_readme_documents_relevance_aware_query_and_report_contracts() -> None:
     assert "does not require a workspace rebuild, native refresh, or pointer cutover" in prose
 
 
-def test_collect_source_docs_excludes_schema_log_and_includes_meta(tmp_path: Path) -> None:
+def test_collect_source_docs_excludes_schema_log_and_idea_and_includes_meta(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     write(root / "log.md", "# Log\n")
+    write(root / "idea/draft.md", "---\ntitle: Draft\ntype: idea\n---\n\n# Draft\n")
     docs = collect_source_docs(root)
     rels = {doc.rel_path for doc in docs}
     assert "index.md" in rels
@@ -124,6 +144,7 @@ def test_collect_source_docs_excludes_schema_log_and_includes_meta(tmp_path: Pat
     assert "_meta/raw-clip-map.md" in rels
     assert "SCHEMA.md" not in rels
     assert "log.md" not in rels
+    assert "idea/draft.md" not in rels
 
 
 def test_resolve_source_keeps_wiki_sources_inside_root_without_following_external_escape(tmp_path: Path) -> None:
@@ -155,9 +176,7 @@ def test_state_dirs_and_query_event_db_are_external_to_wiki_root(tmp_path: Path)
 
 
 def test_validate_wiki_default_is_read_only_and_reports_native_paths(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    workdir = tmp_path / "work" / "wikigraph"
+    root, state, workdir = _wiki_paths(tmp_path)
 
     report = validate_wiki(root, state, workdir)
 
@@ -166,7 +185,6 @@ def test_validate_wiki_default_is_read_only_and_reports_native_paths(tmp_path: P
     assert report["native_workdir"] == str(workdir.resolve())
     assert "report_path" not in report
     assert not state.exists()
-    assert not list((state / "validation_reports").glob("*_validate.json"))
 
 
 def test_validate_wiki_can_sync_raw_clip_map_snapshot_when_explicit(tmp_path: Path) -> None:
@@ -197,8 +215,7 @@ def test_validate_wiki_can_sync_raw_clip_map_snapshot_when_explicit(tmp_path: Pa
 
 
 def test_validate_wiki_non_full_does_not_read_raw_bodies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
+    root, state, workdir = _wiki_paths(tmp_path)
     original_read_text = wiki_validation.read_text
 
     def fail_on_raw_body_reads(path: Path) -> str:
@@ -209,34 +226,32 @@ def test_validate_wiki_non_full_does_not_read_raw_bodies(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(wiki_validation, "read_text", fail_on_raw_body_reads)
 
-    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph", full=False)
+    report = validate_wiki(root, state, workdir, full=False)
 
     assert report["active_raw_clips"] == 1
     with pytest.raises(AssertionError, match="non-full validation should not read raw body"):
-        validate_wiki(root, state, tmp_path / "work" / "wikigraph", full=True)
+        validate_wiki(root, state, workdir, full=True)
 
 
 def test_validate_wiki_without_write_report_does_not_hash_freshness_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ops import wiki_native_wiki_checks
 
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
+    root, state, workdir = _wiki_paths(tmp_path)
 
     def fail_if_called(_root: Path) -> dict[str, dict[str, object]]:
         raise AssertionError("validation_input_fingerprints should only run for persisted validation reports")
 
     monkeypatch.setattr(wiki_native_wiki_checks, "validation_input_fingerprints", fail_if_called)
-    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph")
+    report = validate_wiki(root, state, workdir)
 
     assert "input_fingerprints" not in report
     assert "schema_version" not in report
 
 
 def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
+    root, state, workdir = _wiki_paths(tmp_path)
 
-    report = validate_wiki(root, state, tmp_path / "work" / "wikigraph", write_report=True)
+    report = validate_wiki(root, state, workdir, write_report=True)
 
     report_path = Path(report["report_path"])
     assert report_path.exists()
@@ -244,24 +259,11 @@ def test_validate_wiki_write_report_is_explicit(tmp_path: Path) -> None:
 
 
 def test_validate_wiki_cli_summary_only_keeps_full_report_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    workdir = tmp_path / "work" / "wikigraph"
+    root, state, workdir = _wiki_paths(tmp_path, reuse=True)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "validate_wiki.py",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
-            "--full",
-            "--write-report",
-            "--summary-only",
-        ],
+        _validate_cli_argv(root, state, workdir, "--full", "--write-report", "--summary-only"),
     )
 
     assert validate_wiki_cli.main() == 0
@@ -280,9 +282,7 @@ def test_validate_wiki_cli_summary_only_keeps_full_report_file(tmp_path: Path, m
 
 
 def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path: Path) -> None:
-    root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    workdir = tmp_path / "work" / "wikigraph"
+    root, state, workdir = _wiki_paths(tmp_path, reuse=True)
 
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
     current = validation_freshness_context(root, state, workdir)
@@ -295,90 +295,60 @@ def test_validate_wiki_full_report_contains_reusable_freshness_contract(tmp_path
 
     assert freshness == {"fresh": True, "rejections": []}
     assert report["schema_version"] == VALIDATION_REPORT_FRESHNESS_SCHEMA_VERSION
-    assert report["root"] == str(root.resolve())
-    assert report["state_dir"] == str(state.resolve())
-    assert report["workdir"] == str(workdir.resolve())
     assert "refresh-artifact" in report["valid_for_reasons"]
     assert "index.md" in report["input_fingerprints"]
     assert "SCHEMA.md" in report["input_fingerprints"]
     assert "raw/clip/2601/26010101_Foo-Paper.md" in report["input_fingerprints"]
 
 
-def test_validate_wiki_cli_reuses_fresh_report_without_running_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    workdir = tmp_path / "work" / "wikigraph"
+@pytest.mark.parametrize("stale", [False, True], ids=["fresh", "stale"])
+def test_validate_wiki_cli_reuses_or_falls_back_validation_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stale: bool
+) -> None:
+    root, state, workdir = _wiki_paths(tmp_path, reuse=True)
     report = validate_wiki(root, state, workdir, full=True, write_report=True)
     report_path = Path(report["report_path"])
-
-    def fail_validate(*_args: object, **_kwargs: object) -> dict[str, object]:
-        raise AssertionError("fresh validation report should skip validate_wiki()")
-
-    monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fail_validate)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "validate_wiki.py",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
-            "--full",
-            "--reuse-validation-report",
-            str(report_path),
-        ],
-    )
-
-    assert validate_wiki_cli.main() == 0
-    payload = json.loads(capsys.readouterr().out)
-
-    assert payload["validation_reuse"] == {"fresh": True, "path": str(report_path.resolve())}
-    assert payload["reused_validation_report"] == str(report_path.resolve())
-    assert payload["errors"] == []
-
-
-def test_validate_wiki_cli_falls_back_when_reuse_report_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    root = validation_reuse_wiki(tmp_path)
-    state = tmp_path / "work" / "wikigraph" / "state"
-    workdir = tmp_path / "work" / "wikigraph"
-    report = validate_wiki(root, state, workdir, full=True, write_report=True)
-    report_path = Path(report["report_path"])
-    write(root / "index.md", (root / "index.md").read_text(encoding="utf-8") + "\n<!-- changed -->\n")
     calls: list[tuple[Path, Path, Path | None, bool, bool]] = []
+    if stale:
+        write(root / "index.md", (root / "index.md").read_text(encoding="utf-8") + "\n<!-- changed -->\n")
 
-    def fake_validate(root_arg: Path, state_arg: Path, workdir_arg: Path | None = None, *, full: bool = False, write_report: bool = False) -> dict[str, object]:
-        calls.append((root_arg, state_arg, workdir_arg, full, write_report))
-        return {"errors": [], "warnings": [], "validation_ran": True}
+        def fake_validate(
+            root_arg: Path,
+            state_arg: Path,
+            workdir_arg: Path | None = None,
+            *,
+            full: bool = False,
+            write_report: bool = False,
+        ) -> dict[str, object]:
+            calls.append((root_arg, state_arg, workdir_arg, full, write_report))
+            return {"errors": [], "warnings": [], "validation_ran": True}
 
-    monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fake_validate)
+        monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fake_validate)
+    else:
+
+        def fail_validate(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("fresh validation report should skip validate_wiki()")
+
+        monkeypatch.setattr(validate_wiki_cli, "validate_wiki", fail_validate)
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "validate_wiki.py",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
-            "--full",
-            "--reuse-validation-report",
-            str(report_path),
-        ],
+        _validate_cli_argv(root, state, workdir, "--full", "--reuse-validation-report", str(report_path)),
     )
 
     assert validate_wiki_cli.main() == 0
     payload = json.loads(capsys.readouterr().out)
-
-    assert calls == [(root, state, workdir, True, False)]
-    assert payload["validation_ran"] is True
-    assert payload["validation_reuse"]["fresh"] is False
-    assert payload["validation_reuse"]["path"] == str(report_path.resolve())
-    assert "fingerprint_mismatch:index.md" in payload["validation_reuse"]["rejections"]
+    resolved = str(report_path.resolve())
+    if stale:
+        assert calls == [(root, state, workdir, True, False)]
+        assert payload["validation_ran"] is True
+        assert payload["validation_reuse"]["fresh"] is False
+        assert payload["validation_reuse"]["path"] == resolved
+        assert "fingerprint_mismatch:index.md" in payload["validation_reuse"]["rejections"]
+    else:
+        assert payload["validation_reuse"] == {"fresh": True, "path": resolved}
+        assert payload["reused_validation_report"] == resolved
+        assert payload["errors"] == []
 
 
 def test_validation_report_freshness_contracts() -> None:

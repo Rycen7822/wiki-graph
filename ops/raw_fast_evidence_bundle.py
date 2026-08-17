@@ -2153,7 +2153,7 @@ def arxiv_api_title(workdir: Path) -> str | None:
     match = re.search(r"<entry\b.*?<title[^>]*>(.*?)</title>", text, re.S | re.I)
     if not match:
         return None
-    title = compact_ws(re.sub(r"<[^>]+>", " ", match.group(1)), max_len=300)
+    title = compact_ws(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))), max_len=300)
     return title or None
 
 

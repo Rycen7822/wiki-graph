@@ -40,6 +40,7 @@ FRONTMATTER_METADATA_RE = re.compile(
     r"huggingface_model_links|huggingface_dataset_links|capture_route|captured)\s*:",
     re.IGNORECASE | re.MULTILINE,
 )
+CREATED_LINE_RE = re.compile(r"^created:\s*[\"']?(\d{4}-\d{2}-\d{2})[\"']?\s*$", re.MULTILINE)
 RESOURCE_OR_URL_RE = re.compile(
     r"https?://|\[[^\]]+\]\([^\)]+\)|\b(?:link[-_ ]?health|resource_status|resource status|HEAD\s+\d{3}|PapersWithCode|Hugging Face|GitHub)\b",
     re.IGNORECASE,
@@ -111,6 +112,20 @@ def refresh_frontmatter_timestamps(frontmatter: dict[str, Any], now: dt.datetime
     refreshed["updated"] = now.strftime("%Y-%m-%d %H:%M")
     refreshed["captured"] = now.strftime("%Y-%m-%d %H:%M:%S %Z (%z)")
     return refreshed
+
+
+def read_existing_created(raw_path: Path) -> str | None:
+    try:
+        text = raw_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("---\n"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) != 3:
+        return None
+    match = CREATED_LINE_RE.search(parts[1])
+    return match.group(1) if match else None
 
 
 def validate_body_draft(text: str) -> dict[str, Any]:
@@ -189,6 +204,7 @@ def assemble_raw_note(
     raw_path = root / raw_rel
     if raw_path.exists() and not overwrite_existing:
         return _finalize_report(workdir, output_report, _fail("raw_file", "raw_file_exists", raw_file=raw_rel, raw_path=str(raw_path)))
+    preserved_created = read_existing_created(raw_path) if raw_path.exists() and overwrite_existing else None
 
     try:
         body_text = body_path.read_text(encoding="utf-8")
@@ -199,6 +215,8 @@ def assemble_raw_note(
         return _finalize_report(workdir, output_report, {**body_checks, "body_draft": str(body_path)})
 
     final_frontmatter = refresh_frontmatter_timestamps(frontmatter)
+    if preserved_created:
+        final_frontmatter["created"] = preserved_created
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_text = yamlish(final_frontmatter).rstrip() + "\n\n" + body_text.strip() + "\n"
     raw_path.write_text(raw_text, encoding="utf-8")
@@ -215,6 +233,8 @@ def assemble_raw_note(
         "frontmatter_fields": list(final_frontmatter.keys()),
         "body_checks": body_checks,
     }
+    if preserved_created:
+        payload["preserved_created"] = preserved_created
     if verify:
         verify_result = run_verifier(root, raw_rel, verifier=(verifier or DEFAULT_VERIFIER), frontmatter=final_frontmatter, timeout=verify_timeout)
         payload["verify"] = verify_result

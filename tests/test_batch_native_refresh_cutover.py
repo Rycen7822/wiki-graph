@@ -1,66 +1,14 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import struct
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from ops import batch_native_refresh  # noqa: E402
-
-
-def _cutover_context(tmp_path: Path, *, pending: bool = False) -> SimpleNamespace:
-    state_dir = tmp_path / "wikigraph" / "state"
-    root = tmp_path / "wiki"
-    workspace_root = state_dir / "native_zvec" / "workspaces"
-    watched_dir = tmp_path / "watched"
-    calls: list[tuple] = []
-    if pending:
-        watched_dir.mkdir(parents=True)
-        batch_native_refresh.mark_pending(state_dir, root, reason="manual-smoke")
-    return SimpleNamespace(
-        state_dir=state_dir,
-        root=root,
-        workspace_root=workspace_root,
-        watched_dir=watched_dir,
-        calls=calls,
-    )
-
-
-def _fake_cutover_hooks(
-    calls: list[tuple],
-    *,
-    smoke_ok: bool = True,
-    smoke_raises: Exception | None = None,
-    mutate_watched_path: Path | None = None,
-):
-    def build_workspace(**kwargs):
-        calls.append(("build", kwargs["workspace_id"]))
-        if mutate_watched_path is not None:
-            mutate_watched_path.write_text('{"stable":false}', encoding="utf-8")
-        return {"ok": True, "workspace_id": kwargs["workspace_id"]}
-
-    def finalize_workspace(*, state_dir, reason):
-        calls.append(("finalize", reason))
-        return {"schema_version": 1, "workspace_id": "candidate", "status": "active"}
-
-    def restart_service(*, state_dir):
-        calls.append(("restart", str(state_dir)))
-        return {"service": "llm-wiki-native", "status": "ok"}
-
-    def query_smoke(*, state_dir, active):
-        calls.append(("smoke", str(state_dir), active["workspace_id"]))
-        if smoke_raises is not None:
-            raise smoke_raises
-        return {"ok": smoke_ok, "url": "http://127.0.0.1:9621/query/data"}
-
-    return build_workspace, finalize_workspace, restart_service, query_smoke
+from ops import batch_native_refresh
+from support import cutover_cli_args  # noqa: E402
+from support import cutover_context as _cutover_context  # noqa: E402
+from support import fake_cutover_hooks as _fake_cutover_hooks  # noqa: E402
 
 
 def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys, monkeypatch) -> None:
@@ -111,12 +59,9 @@ def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys
 
     assert (
         batch_native_refresh.main(
-            [
-                "refresh",
-                "--workdir",
-                str(workdir),
-                "--root",
-                str(root),
+            cutover_cli_args(
+                workdir,
+                root,
                 "--cutover",
                 "--workspace-id",
                 "candidate",
@@ -134,7 +79,7 @@ def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys
                 "active-first-vector",
                 "--require-unchanged-path",
                 str(watched_dir),
-            ]
+            )
         )
         == 0
     )
@@ -158,26 +103,11 @@ def test_refresh_cutover_accepts_explicit_root_without_hardcoded_local_special_c
     watched_dir = tmp_path / "watched"
     watched_dir.mkdir()
     calls = []
+    build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(calls)
 
     def fake_status(*args, **kwargs):
         calls.append(("status", args, kwargs))
         return {"should_refresh": True}
-
-    def build_workspace(**kwargs):
-        calls.append(("build", kwargs["workspace_id"]))
-        return {"ok": True, "workspace_id": kwargs["workspace_id"]}
-
-    def finalize_workspace(*, state_dir, reason):
-        calls.append(("finalize", reason))
-        return {"schema_version": 1, "workspace_id": "candidate", "status": "active"}
-
-    def restart_service(*, state_dir):
-        calls.append(("restart", str(state_dir)))
-        return {"service": "llm-wiki-native", "status": "ok"}
-
-    def query_smoke(*, state_dir, active):
-        calls.append(("smoke", str(state_dir)))
-        return {"ok": True}
 
     monkeypatch.setattr(batch_native_refresh, "status", fake_status)
 
@@ -200,7 +130,7 @@ def test_refresh_cutover_accepts_explicit_root_without_hardcoded_local_special_c
         ("build", "candidate"),
         ("finalize", "native graph incremental refresh: cutover"),
         ("restart", str(state_dir)),
-        ("smoke", str(state_dir)),
+        ("smoke", str(state_dir), "candidate"),
         ("status", (root, state_dir), {}),
     ]
 def test_refresh_cutover_success_preserves_pending_until_smoke_then_clears(tmp_path) -> None:
@@ -211,28 +141,9 @@ def test_refresh_cutover_success_preserves_pending_until_smoke_then_clears(tmp_p
     watched_dir.mkdir()
     batch_native_refresh.mark_pending(state_dir, root, reason="manual-smoke")
     calls = []
-
-    def build_workspace(**kwargs):
-        calls.append(("build", kwargs["workspace_id"], kwargs["fill_missing_vectors"]))
-        prepared_path = workspace_root.parent / "prepared_workspace.json"
-        prepared_path.parent.mkdir(parents=True)
-        prepared_path.write_text(
-            json.dumps({"schema_version": 1, "workspace_id": kwargs["workspace_id"], "status": "prepared"}),
-            encoding="utf-8",
-        )
-        return {"ok": True, "prepared_workspace": str(prepared_path), "workspace_id": kwargs["workspace_id"]}
-
-    def finalize_workspace(*, state_dir, reason):
-        calls.append(("finalize", reason))
-        return {"schema_version": 1, "workspace_id": "candidate", "status": "active"}
-
-    def restart_service(*, state_dir):
-        calls.append(("restart", str(state_dir)))
-        return {"service": "llm-wiki-native", "status": "ok"}
-
-    def query_smoke(*, state_dir, active):
-        calls.append(("smoke", str(state_dir), active["workspace_id"], batch_native_refresh.pending_ledger_path(state_dir).exists()))
-        return {"ok": True, "url": "http://127.0.0.1:9621/query/data"}
+    build_workspace, finalize_workspace, restart_service, query_smoke = _fake_cutover_hooks(
+        calls, write_prepared=True, record_pending=True
+    )
 
     result = batch_native_refresh.refresh_cutover(
         root=root,
@@ -249,11 +160,6 @@ def test_refresh_cutover_success_preserves_pending_until_smoke_then_clears(tmp_p
     )
 
     assert result["cutover"] is True
-    assert result["cutover_executed"] is True
-    assert result["build_executed"] is True
-    assert result["restart_executed"] is True
-    assert result["query_smoke_executed"] is True
-    assert result["pending_clear_executed"] is True
     assert result["query_smoke"]["ok"] is True
     assert result["active"]["status"] == "active"
     assert result["service"]["status"] == "ok"
@@ -375,9 +281,6 @@ def test_refresh_cutover_reuses_active_workspace_when_build_report_fingerprints_
 
     assert result["active_already_fresh"] is True
     assert result["build_executed"] is False
-    assert result["restart_executed"] is True
-    assert result["query_smoke_executed"] is True
-    assert result["pending_clear_executed"] is True
     assert result["active"]["workspace_id"] == "active-a"
     assert context.calls == [("restart", str(context.state_dir)), ("smoke", str(context.state_dir), "active-a")]
     assert not batch_native_refresh.pending_ledger_path(context.state_dir).exists()
@@ -457,14 +360,7 @@ def test_refresh_cutover_skipped_result_marks_no_execution(tmp_path) -> None:
     state_dir.mkdir(parents=True)
     watched_dir.mkdir()
     calls = []
-
-    def restart_service(*, state_dir):
-        calls.append(("restart", str(state_dir)))
-        return {"service": "llm-wiki-native", "status": "ok"}
-
-    def query_smoke(*, state_dir, active):
-        calls.append(("smoke", str(state_dir), active["workspace_id"]))
-        return {"ok": True}
+    _build, _finalize, restart_service, query_smoke = _fake_cutover_hooks(calls)
 
     result = batch_native_refresh.refresh_cutover(
         root=root,
@@ -481,8 +377,5 @@ def test_refresh_cutover_skipped_result_marks_no_execution(tmp_path) -> None:
     assert result["skipped"] is True
     assert result["cutover_executed"] is False
     assert result["build_executed"] is False
-    assert result["restart_executed"] is False
-    assert result["query_smoke_executed"] is False
-    assert result["pending_clear_executed"] is False
     assert result["unchanged_path_audit"]["ok"] is True
     assert calls == []

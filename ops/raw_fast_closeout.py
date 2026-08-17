@@ -680,7 +680,7 @@ def _compact_auto_native_refresh(auto: dict[str, Any]) -> dict[str, Any] | None:
 
     compact = {
         key: native.get(key)
-        for key in ["native_refresh", "skipped", "skip_reason", "failure"]
+        for key in ["native_refresh", "skipped", "deferred", "skip_reason", "failure"]
         if key in native
     }
     runs = native.get("runs")
@@ -788,6 +788,8 @@ def run_mark_pending(args: argparse.Namespace) -> dict[str, Any]:
             command.append("--auto-integrate-dry-run")
         if args.integration_command:
             command.extend(["--integration-command", args.integration_command])
+        if getattr(args, "defer_native_refresh", False):
+            command.append("--defer-native-refresh")
     return run_json(command, cwd=args.workdir, timeout=args.integration_timeout + 30)
 
 
@@ -978,6 +980,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auto-integrate", action="store_true", help="Launch wiki integration automatically when threshold says it should run")
     parser.add_argument("--auto-integrate-dry-run", action="store_true")
     parser.add_argument("--integration-command", default=None)
+    parser.add_argument("--defer-native-refresh", action="store_true", help="With --auto-integrate, stop after clear-success and leave the native graph refresh pending in the ledger for a later background refresh-native-after-integration run")
     parser.add_argument("--fast-final-verify", action="store_true", help="After successful pre-verify and cleanup, synthesize the final verifier report from pre-verify plus declared temp-path absence instead of rescanning all raw notes")
     parser.add_argument("--append-log", action="store_true", help="Append an idempotent compact raw-fast entry to root/log.md after successful closeout; no post-log wiki validation is run")
     parser.add_argument("--timeout", type=int, default=120)

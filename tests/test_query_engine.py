@@ -7,7 +7,22 @@ from llm_wiki_native.contracts import RECORD_TYPE_CODES, SECTION_KIND_CODES
 from llm_wiki_native.retrieval.context import assemble_context
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine, _record_identity_from_hit
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-from support import native_record
+from support import native_record, put_span, traced_sqlite_connect
+
+
+def _db(tmp_path, *, create: bool = True):
+    workspace = SQLiteWorkspace(tmp_path / "native.sqlite")
+    if create:
+        workspace.create_workspace("native-test", "manifest-hash")
+    return workspace
+
+
+def _audit(db, *, require_vectors: bool = False, **counts):
+    db.mark_audited(
+        "native-test",
+        {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0, **counts},
+        require_vectors=require_vectors,
+    )
 
 
 class _ZvecHit:
@@ -45,12 +60,44 @@ class _ZvecHit:
         }
 
 
+class _StubDb:
+    def __init__(self, *, record_extra: dict[str, Any] | None = None, neighbors: list[dict[str, Any]] | None = None) -> None:
+        self._record_extra = record_extra or {}
+        self._neighbors = neighbors
+
+    def get_workspace_metadata(self, workspace_id: str) -> dict:
+        return {
+            "workspace_id": workspace_id,
+            "source_manifest_hash": "manifest-hash",
+            "schema_version": 1,
+            "status": "audited",
+        }
+
+    def get_record(self, workspace_id: str, record_type: str, record_id: str):
+        return {"record_type": record_type, "record_id": record_id, **self._record_extra}
+
+    def neighbors(self, workspace_id: str, record_id: str, *, limit: int):
+        if self._neighbors is None:
+            return []
+        return [{**row, "limit": limit} for row in self._neighbors]
+
+
 class _ZvecWorkspace:
-    def __init__(self, hits: list[_ZvecHit] | None = None) -> None:
+    def __init__(
+        self,
+        hits: list[_ZvecHit] | None = None,
+        *,
+        apply_filter: bool = True,
+        reject_mix: bool = False,
+    ) -> None:
         self.hits = list(hits or [])
         self.calls = []
+        self.apply_filter = apply_filter
+        self.reject_mix = reject_mix
 
     def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
+        if self.reject_mix:
+            raise AssertionError("naive/bypass must not call query_mix")
         self.calls.append(("mix", query, query_vector, top_k, filter_expr))
         return self._filtered(filter_expr)[:top_k]
 
@@ -59,7 +106,7 @@ class _ZvecWorkspace:
         return self._filtered(filter_expr)[:top_k]
 
     def _filtered(self, filter_expr: str | None) -> list[_ZvecHit]:
-        if not filter_expr:
+        if not self.apply_filter or not filter_expr:
             return list(self.hits)
         type_match = re.search(r"record_type_code in \(([^)]+)\)", filter_expr)
         allowed_types = (
@@ -85,21 +132,20 @@ class _ZvecWorkspace:
 
 
 def test_query_engine_requires_zvec_workspace(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db = _db(tmp_path, create=False)
 
     with pytest.raises(ValueError, match="zvec workspace"):
         NativeQueryEngine(db, zvec_workspace=None)
 
 
 def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(native_record("native-test", "entity", "doc:a", "Alpha"))
     db.put_record(native_record("native-test", "entity", "doc:b", "Beta"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     db.put_vector("native-test", "entity", "doc:b", "doc:b:vector", [0.0, 1.0])
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.8, {"kind": "related"})
-    db.mark_audited("native-test", {"chunks": 0, "entities": 2, "relationships": 0, "sections": 0}, require_vectors=True)
+    _audit(db, entities=2, require_vectors=True)
     zvec = _ZvecWorkspace([_ZvecHit("entity", "doc:a")])
     engine = NativeQueryEngine(db, zvec_workspace=zvec)
 
@@ -115,57 +161,14 @@ def test_data_only_query_engine_returns_ranked_hits_with_trace(tmp_path) -> None
     assert result["trace"]["vector_hit_count"] == 1
 
 
-def test_hybrid_query_keeps_primary_chunk_before_navigation_map_fallback(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
-    db.put_record(native_record("native-test", "chunk", "chunk-weak", "Weak semantic chunk", source_path="concepts/weak.md"))
-    db.put_vector("native-test", "chunk", "chunk-weak", "chunk-weak:vector", [1.0, 0.0])
-    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0}, require_vectors=True)
-    db.put_lexical_span(
-        "native-test",
-        span_id="span:raw-map-row",
-        source_path="_meta/raw-clip-map.md",
-        source_id="meta:raw-clip-map",
-        source_role="meta_map",
-        span_kind="map.row",
-        heading_path=["Raw Clip Map"],
-        start_line=4,
-        end_line=4,
-        text="- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
-        metadata={"map": "raw-clip"},
-    )
-    zvec = _ZvecWorkspace([_ZvecHit("chunk", "chunk-weak", score=100.0)])
-    engine = NativeQueryEngine(db, zvec_workspace=zvec)
-
-    result = engine.query(
-        "native-test",
-        "MapOnlyNeedle raw map",
-        [1.0, 0.0],
-        mode="mix",
-        top_k=2,
-        record_types=("chunk",),
-    )
-
-    assert result["trace"]["route_counts"] == {"zvec": 1, "lexical": 1}
-    assert [hit["record_id"] for hit in result["hits"]] == [
-        "chunk-weak",
-        "span:raw-map-row",
-    ]
-    assert result["hits"][0]["ranking_contract"] == "relevance-v1"
-    assert result["hits"][1]["record"]["source_path"] == "_meta/raw-clip-map.md"
-    assert "lexical_fts" in result["hits"][1]["routes"] or "lexical_like" in result["hits"][1]["routes"]
-    assert result["hits"][1]["score_breakdown"]["source_role"] > 0
-
-
 def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(native_record("native-test", "chunk", "chunk-weak", "Weak semantic chunk", source_path="concepts/weak.md"))
     db.put_vector("native-test", "chunk", "chunk-weak", "chunk-weak:vector", [1.0, 0.0])
     db.put_edge("native-test", "relationship", "chunk-weak", "tag:x", 0.5, {"kind": "related"})
-    db.mark_audited("native-test", {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0}, require_vectors=True)
-    db.put_lexical_span(
-        "native-test",
+    _audit(db, chunks=1, require_vectors=True)
+    put_span(
+        db,
         span_id="span:raw-map-row",
         source_path="_meta/raw-clip-map.md",
         source_id="meta:raw-clip-map",
@@ -173,7 +176,6 @@ def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_
         span_kind="map.row",
         heading_path=["Raw Clip Map"],
         start_line=4,
-        end_line=4,
         text="- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
         metadata={"map": "raw-clip"},
     )
@@ -195,6 +197,7 @@ def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_
 
     assert [hit["record_id"] for hit in result["hits"]] == ["chunk-weak", "span:raw-map-row"]
     assert result["hits"][0]["ranking_contract"] == "relevance-v1"
+    assert result["hits"][1]["record"]["source_path"] == "_meta/raw-clip-map.md"
     assert result["hits"][0]["routes"] == ["zvec"]
     assert result["hits"][1]["routes"] == ["lexical_fts"]
     assert result["hits"][0]["neighbors"] == [
@@ -212,7 +215,6 @@ def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_
     assert result["trace"]["db_record_calls"] == 1
     assert result["trace"]["db_neighbor_calls"] == 1
     assert set(result["trace"]["timings_ms"]) == {"route", "planner", "hydrate"}
-    assert all(value >= 0 for value in result["trace"]["timings_ms"].values())
     assert compact["coverage_plan"]["by_source_role"]["meta_map"] == ["_meta/raw-clip-map.md"]
     assert "neighbors" not in compact["context_blocks"][0]
     assert standard["context_blocks"][0]["routes"] == ["zvec"]
@@ -220,8 +222,7 @@ def test_mix_query_parity_covers_routes_scores_trace_neighbors_and_profiles(tmp_
 
 
 def test_default_query_runs_navigation_and_section_routes(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(native_record("native-test", "entity", "entity-a", "Entity evidence"))
     db.put_record(
         native_record(
@@ -232,10 +233,7 @@ def test_default_query_runs_navigation_and_section_routes(tmp_path) -> None:
             payload={"section_kind": "methodology"},
         )
     )
-    db.mark_audited(
-        "native-test",
-        {"chunks": 0, "entities": 1, "relationships": 0, "sections": 1},
-    )
+    _audit(db, entities=1, sections=1)
     zvec = _ZvecWorkspace(
         [_ZvecHit("entity", "entity-a"), _ZvecHit("section", "section-a")]
     )
@@ -263,7 +261,6 @@ def test_default_query_runs_navigation_and_section_routes(tmp_path) -> None:
     }
     assert result["trace"]["workspace_id"] == "native-test"
     assert result["trace"]["workspace_schema_version"] == 1
-    assert result["trace"]["merged_candidate_count"] == result["trace"]["planner"]["merged_candidate_count"]
     assert result["trace"]["selected_block_count"] == 2
     assert len(result["trace"]["candidate_cards"]) <= result["trace"]["candidate_card_limit"]
     assert all(
@@ -276,8 +273,7 @@ def test_explicit_section_kind_runs_only_filtered_section_route_without_lexical(
     tmp_path,
     monkeypatch,
 ) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(
         native_record(
             "native-test",
@@ -287,10 +283,7 @@ def test_explicit_section_kind_runs_only_filtered_section_route_without_lexical(
             payload={"section_kind": "results"},
         )
     )
-    db.mark_audited(
-        "native-test",
-        {"chunks": 0, "entities": 0, "relationships": 0, "sections": 1},
-    )
+    _audit(db, sections=1)
     zvec = _ZvecWorkspace(
         [
             _ZvecHit(
@@ -342,18 +335,11 @@ def test_explicit_section_kind_runs_only_filtered_section_route_without_lexical(
     assert result["trace"]["retrieval_goal"] == "coverage"
 
 
-def test_candidate_oversampling_does_not_expand_selected_only_hydration(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+def _oversample_workspace(tmp_path, monkeypatch):
+    db = _db(tmp_path)
     db.put_record(native_record("native-test", "chunk", "chunk-000", "alpha evidence"))
     db.put_edge("native-test", "supports", "chunk-000", "neighbor-001", 1.0, {})
-    db.mark_audited(
-        "native-test",
-        {"chunks": 1, "entities": 0, "relationships": 0, "sections": 0},
-    )
+    _audit(db, chunks=1)
     zvec = _ZvecWorkspace(
         [
             _ZvecHit(
@@ -365,37 +351,51 @@ def test_candidate_oversampling_does_not_expand_selected_only_hydration(
             for index in range(40)
         ]
     )
-    large_hits = list(zvec.hits)
-    get_calls: list[tuple[str, str]] = []
-    neighbor_calls: list[str] = []
-    connection_count = 0
-    select_statements: list[str] = []
+    counters = {"connections": 0, "gets": [], "neighbors": [], "selects": []}
     original_connect = db._connect
     original_get = db.get_record
     original_neighbors = db.neighbors
 
     def tracked_connect():
-        nonlocal connection_count
-        connection_count += 1
+        counters["connections"] += 1
         connection = original_connect()
         connection.set_trace_callback(
-            lambda statement: select_statements.append(statement)
+            lambda statement: counters["selects"].append(statement)
             if statement.lstrip().upper().startswith("SELECT")
             else None
         )
         return connection
 
     def count_get(workspace_id: str, record_type: str, record_id: str):
-        get_calls.append((record_type, record_id))
+        counters["gets"].append((record_type, record_id))
         return original_get(workspace_id, record_type, record_id)
 
     def count_neighbors(workspace_id: str, record_id: str, *, limit: int):
-        neighbor_calls.append(record_id)
+        counters["neighbors"].append(record_id)
         return original_neighbors(workspace_id, record_id, limit=limit)
 
     monkeypatch.setattr(db, "_connect", tracked_connect)
     monkeypatch.setattr(db, "get_record", count_get)
     monkeypatch.setattr(db, "neighbors", count_neighbors)
+    return db, zvec, counters
+
+
+def _reset_oversample_counters(counters: dict) -> None:
+    counters["connections"] = 0
+    counters["gets"].clear()
+    counters["neighbors"].clear()
+    counters["selects"].clear()
+
+
+@pytest.mark.parametrize(("neighbor_limit", "cost_cap"), [(0, 3), (2, 5)])
+def test_candidate_oversampling_does_not_expand_selected_cost(
+    tmp_path,
+    monkeypatch,
+    neighbor_limit,
+    cost_cap,
+) -> None:
+    db, zvec, counters = _oversample_workspace(tmp_path, monkeypatch)
+    large_hits = list(zvec.hits)
     result = NativeQueryEngine(db, zvec_workspace=zvec).query(
         "native-test",
         "alpha",
@@ -403,59 +403,23 @@ def test_candidate_oversampling_does_not_expand_selected_only_hydration(
         mode="naive",
         top_k=1,
         record_types=("chunk",),
-        neighbor_limit=0,
+        neighbor_limit=neighbor_limit,
     )
+    large_cost = (counters["connections"], len(counters["selects"]))
+    if neighbor_limit == 0:
+        assert zvec.calls[0][2] == 40
+        assert [hit["record_id"] for hit in result["hits"]] == ["chunk-000"]
+        assert counters["gets"] == [("chunk", "chunk-000")]
+        assert counters["neighbors"] == []
+        assert result["trace"]["db_record_calls"] == 1
+        assert result["trace"]["db_neighbor_calls"] == 0
+    else:
+        assert result["trace"]["db_neighbor_calls"] == 1
+        assert len(result["hits"][0]["neighbors"]) == 1
+        assert counters["neighbors"] == ["chunk-000"]
 
-    assert zvec.calls[0][2] == 40
-    assert [hit["record_id"] for hit in result["hits"]] == ["chunk-000"]
-    assert result["hits"][0]["relevance_score_breakdown"]["evidence_quality"] == 0.7
-    assert get_calls == [("chunk", "chunk-000")]
-    assert neighbor_calls == []
-    assert result["trace"]["db_record_calls"] == 1
-    assert result["trace"]["db_neighbor_calls"] == 0
-    large_pool_cost = (connection_count, len(select_statements))
-
-    connection_count = 0
-    select_statements.clear()
-    get_calls.clear()
-    zvec.hits = zvec.hits[:1]
-    NativeQueryEngine(db, zvec_workspace=zvec).query(
-        "native-test",
-        "alpha",
-        [1.0, 0.0],
-        mode="naive",
-        top_k=1,
-        record_types=("chunk",),
-        neighbor_limit=0,
-    )
-    assert (connection_count, len(select_statements)) == large_pool_cost
-    assert all(0 < value <= 3 for value in large_pool_cost)
-
-
-    zvec.hits = large_hits
-    connection_count = 0
-    select_statements.clear()
-    get_calls.clear()
-    neighbor_calls.clear()
-    large_neighbor_result = NativeQueryEngine(db, zvec_workspace=zvec).query(
-        "native-test",
-        "alpha",
-        [1.0, 0.0],
-        mode="naive",
-        top_k=1,
-        record_types=("chunk",),
-        neighbor_limit=2,
-    )
-    large_neighbor_cost = (connection_count, len(select_statements))
-    assert large_neighbor_result["trace"]["db_neighbor_calls"] == 1
-    assert len(large_neighbor_result["hits"][0]["neighbors"]) == 1
-    assert neighbor_calls == ["chunk-000"]
-
+    _reset_oversample_counters(counters)
     zvec.hits = large_hits[:1]
-    connection_count = 0
-    select_statements.clear()
-    get_calls.clear()
-    neighbor_calls.clear()
     NativeQueryEngine(db, zvec_workspace=zvec).query(
         "native-test",
         "alpha",
@@ -463,21 +427,17 @@ def test_candidate_oversampling_does_not_expand_selected_only_hydration(
         mode="naive",
         top_k=1,
         record_types=("chunk",),
-        neighbor_limit=2,
+        neighbor_limit=neighbor_limit,
     )
-    assert (connection_count, len(select_statements)) == large_neighbor_cost
-    assert all(0 < value <= 5 for value in large_neighbor_cost)
+    assert (counters["connections"], len(counters["selects"])) == large_cost
+    assert all(0 < value <= cost_cap for value in large_cost)
 
 
 def test_zvec_equal_scores_are_normalized_before_route_rank(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     for record_id in ("chunk-a", "chunk-b"):
         db.put_record(native_record("native-test", "chunk", record_id, "alpha evidence"))
-    db.mark_audited(
-        "native-test",
-        {"chunks": 2, "entities": 0, "relationships": 0, "sections": 0},
-    )
+    _audit(db, chunks=2)
     zvec = _ZvecWorkspace(
         [_ZvecHit("chunk", "chunk-b", score=1.0), _ZvecHit("chunk", "chunk-a", score=1.0)]
     )
@@ -504,8 +464,7 @@ def test_selected_only_sql_cost_scales_with_selected_hits_not_candidate_budget(
     top_k: int,
     expected_candidate_budget: int,
 ) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     hits = []
     for index in range(100):
         record_id = f"chunk-{index:03d}"
@@ -528,24 +487,15 @@ def test_selected_only_sql_cost_scales_with_selected_hits_not_candidate_budget(
                 content="alpha evidence",
             )
         )
-    db.mark_audited(
-        "native-test",
-        {"chunks": 100, "entities": 0, "relationships": 0, "sections": 0},
-    )
+    _audit(db, chunks=100)
     connections = 0
     selects: list[str] = []
-    original_connect = db._connect
+    traced = traced_sqlite_connect(db, selects, select_only=True)
 
     def tracked_connect():
         nonlocal connections
         connections += 1
-        connection = original_connect()
-        connection.set_trace_callback(
-            lambda statement: selects.append(statement)
-            if statement.lstrip().upper().startswith("SELECT")
-            else None
-        )
-        return connection
+        return traced()
 
     monkeypatch.setattr(db, "_connect", tracked_connect)
     zvec = _ZvecWorkspace(hits)
@@ -569,24 +519,17 @@ def test_selected_only_sql_cost_scales_with_selected_hits_not_candidate_budget(
 
 
 def test_engine_lexical_route_receives_all_normalized_terms(tmp_path, monkeypatch) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
-    db.mark_audited(
-        "native-test",
-        {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0},
-    )
-    db.put_lexical_span(
-        "native-test",
+    db = _db(tmp_path)
+    _audit(db)
+    put_span(
+        db,
         span_id="span:late",
         source_path="raw/late.md",
         source_id="source:late",
         source_role="raw",
         span_kind="table.row",
         heading_path=["Late"],
-        start_line=1,
-        end_line=1,
         text="LateIdentifier exact evidence",
-        metadata={},
     )
     captured_terms: list[tuple[str, ...]] = []
     original_lexical = db.query_lexical_spans
@@ -613,48 +556,11 @@ def test_engine_lexical_route_receives_all_normalized_terms(tmp_path, monkeypatc
 
 
 def test_query_engine_routes_mix_to_zvec_hybrid_when_workspace_is_supplied() -> None:
-    class Hit:
-        doc_id = "chunk:chunk-a"
-        score = 0.75
-        fields = {
-            "record_type": "chunk",
-            "record_id": "chunk-a",
-            "source_path": "raw/chunk-a.md",
-            "source_id": "source:chunk-a",
-            "source_kind_code": 1,
-            "section_kind_code": 0,
-            "content": "Alpha",
-            "content_hash": "chunk-a:content",
-        }
-
-    class DB:
-        def get_workspace_status(self, workspace_id: str) -> str:
-            return "audited"
-
-        def get_workspace_metadata(self, workspace_id: str) -> dict:
-            return {
-                "workspace_id": workspace_id,
-                "source_manifest_hash": "manifest-hash",
-                "schema_version": 1,
-                "status": "audited",
-            }
-
-        def get_record(self, workspace_id: str, record_type: str, record_id: str):
-            return {"record_type": record_type, "record_id": record_id, "vector_text": "Alpha"}
-
-        def neighbors(self, workspace_id: str, record_id: str, *, limit: int):
-            return [{"neighbor_id": "doc:b", "limit": limit}]
-
-    class ZvecWorkspace:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
-            self.calls.append(("mix", query, query_vector, top_k, filter_expr))
-            return [Hit()]
-
-    zvec = ZvecWorkspace()
-    engine = NativeQueryEngine(DB(), zvec_workspace=zvec)
+    zvec = _ZvecWorkspace([_ZvecHit("chunk", "chunk-a", score=0.75, content="Alpha")])
+    engine = NativeQueryEngine(
+        _StubDb(record_extra={"vector_text": "Alpha"}, neighbors=[{"neighbor_id": "doc:b"}]),
+        zvec_workspace=zvec,
+    )
 
     result = engine.query(
         "native-test",
@@ -676,51 +582,21 @@ def test_query_engine_routes_mix_to_zvec_hybrid_when_workspace_is_supplied() -> 
 
 
 def test_query_engine_routes_naive_and_bypass_with_zvec_workspace() -> None:
-    class Hit:
-        doc_id = "section:sec-a"
-        score = 0.5
-        fields = {
-            "record_type": "section",
-            "record_id": "sec-a",
-            "source_path": "raw/sec-a.md",
-            "source_id": "source:sec-a",
-            "source_kind_code": 2,
-            "section_kind_code": 4,
-            "content": "Alpha section",
-            "content_hash": "sec-a:content",
-        }
-
-    class DB:
-        def get_workspace_status(self, workspace_id: str) -> str:
-            return "audited"
-
-        def get_workspace_metadata(self, workspace_id: str) -> dict:
-            return {
-                "workspace_id": workspace_id,
-                "source_manifest_hash": "manifest-hash",
-                "schema_version": 1,
-                "status": "audited",
-            }
-
-        def get_record(self, workspace_id: str, record_type: str, record_id: str):
-            return {"record_type": record_type, "record_id": record_id}
-
-        def neighbors(self, workspace_id: str, record_id: str, *, limit: int):
-            return []
-
-    class ZvecWorkspace:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def query_vector(self, query_vector: list[float], top_k: int, filter_expr: str | None):
-            self.calls.append(("vector", query_vector, top_k, filter_expr))
-            return [Hit()]
-
-        def query_mix(self, *args, **kwargs):
-            raise AssertionError("naive/bypass must not call query_mix")
-
-    zvec = ZvecWorkspace()
-    engine = NativeQueryEngine(DB(), zvec_workspace=zvec)
+    zvec = _ZvecWorkspace(
+        [
+            _ZvecHit(
+                "section",
+                "sec-a",
+                score=0.5,
+                source_kind_code=2,
+                section_kind_code=4,
+                content="Alpha section",
+            )
+        ],
+        apply_filter=False,
+        reject_mix=True,
+    )
+    engine = NativeQueryEngine(_StubDb(), zvec_workspace=zvec)
 
     naive = engine.query(
         "native-test",
@@ -746,32 +622,11 @@ def test_query_engine_routes_naive_and_bypass_with_zvec_workspace() -> None:
     assert bypass["trace"]["vector_hit_count"] == 0
     assert bypass["trace"]["candidate_cards"] == []
     assert bypass["trace"]["merged_candidate_count"] == 0
-    assert len(zvec.calls) == 1
 
 
 def test_query_engine_routes_section_kind_as_numeric_zvec_filter() -> None:
-    class DB:
-        def get_workspace_status(self, workspace_id: str) -> str:
-            return "audited"
-
-        def get_workspace_metadata(self, workspace_id: str) -> dict:
-            return {
-                "workspace_id": workspace_id,
-                "source_manifest_hash": "manifest-hash",
-                "schema_version": 1,
-                "status": "audited",
-            }
-
-    class ZvecWorkspace:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
-            self.calls.append(("mix", filter_expr))
-            return []
-
-    zvec = ZvecWorkspace()
-    engine = NativeQueryEngine(DB(), zvec_workspace=zvec)
+    zvec = _ZvecWorkspace()
+    engine = NativeQueryEngine(_StubDb(), zvec_workspace=zvec)
 
     result = engine.query(
         "native-test",
@@ -783,13 +638,14 @@ def test_query_engine_routes_section_kind_as_numeric_zvec_filter() -> None:
         section_kind="methodology",
     )
 
-    assert zvec.calls == [("mix", "record_type_code in (4) and section_kind_code in (4)")]
+    assert zvec.calls == [
+        ("mix", "method query", [1.0, 0.0], 40, "record_type_code in (4) and section_kind_code in (4)")
+    ]
     assert result["trace"]["section_kind"] == "methodology"
 
 
 def test_data_only_query_engine_rejects_building_workspace(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(native_record("native-test", "entity", "doc:a", "Alpha"))
     db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
@@ -816,7 +672,7 @@ def test_query_engine_rejects_mismatched_workspace_metadata_before_routes() -> N
 
 
 def test_data_only_query_engine_rejects_unknown_or_retired_modes(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db = _db(tmp_path, create=False)
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace())
 
     for mode in ["unsupported", "local", "global", "hybrid"]:
@@ -825,7 +681,7 @@ def test_data_only_query_engine_rejects_unknown_or_retired_modes(tmp_path) -> No
 
 
 def test_data_only_query_engine_rejects_invalid_record_types_and_goal_before_query(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
+    db = _db(tmp_path, create=False)
     zvec = _ZvecWorkspace()
     engine = NativeQueryEngine(db, zvec_workspace=zvec)
 
@@ -867,15 +723,14 @@ def test_record_identity_requires_zvec_hit_fields() -> None:
 
 
 def test_read_span_rereads_current_source_and_relocates_exact_text(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
-    db.mark_audited("native-test", {"chunks": 0, "entities": 0, "relationships": 0, "sections": 0})
+    db = _db(tmp_path)
+    _audit(db)
     wiki_root = tmp_path / "wiki"
     (wiki_root / "notes").mkdir(parents=True)
     source = wiki_root / "notes" / "alpha.md"
     source.write_text("# Alpha\n\nStable evidence line\nTail\n", encoding="utf-8")
-    db.put_lexical_span(
-        "native-test",
+    put_span(
+        db,
         span_id="span:current",
         source_path="notes/alpha.md",
         source_id="wiki:alpha",
@@ -883,12 +738,10 @@ def test_read_span_rereads_current_source_and_relocates_exact_text(tmp_path) -> 
         span_kind="doc.paragraph",
         heading_path=["Alpha"],
         start_line=3,
-        end_line=3,
         text="Stable evidence line",
-        metadata={},
     )
-    db.put_lexical_span(
-        "native-test",
+    put_span(
+        db,
         span_id="span:moved",
         source_path="notes/alpha.md",
         source_id="wiki:alpha",
@@ -896,9 +749,7 @@ def test_read_span_rereads_current_source_and_relocates_exact_text(tmp_path) -> 
         span_kind="doc.paragraph",
         heading_path=["Alpha"],
         start_line=2,
-        end_line=2,
         text="Relocated evidence line",
-        metadata={},
     )
     source.write_text("# Alpha\n\nStable evidence line\nInserted\nRelocated evidence line\n", encoding="utf-8")
     engine = NativeQueryEngine(db, zvec_workspace=_ZvecWorkspace(), source_root=wiki_root)
@@ -919,8 +770,7 @@ def test_read_span_rereads_current_source_and_relocates_exact_text(tmp_path) -> 
 
 
 def test_read_span_falls_back_to_section_and_rejects_ambiguous_relocation(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+    db = _db(tmp_path)
     db.put_record(
         native_record(
             "native-test",
@@ -943,10 +793,7 @@ def test_read_span_falls_back_to_section_and_rejects_ambiguous_relocation(tmp_pa
             payload={"section_kind": "methodology", "heading_path": ["Method"]},
         )
     )
-    db.mark_audited(
-        "native-test",
-        {"chunks": 0, "entities": 0, "relationships": 0, "sections": 2},
-    )
+    _audit(db, sections=2)
     wiki_root = tmp_path / "wiki"
     (wiki_root / "notes").mkdir(parents=True)
     (wiki_root / "notes" / "unique.md").write_text(

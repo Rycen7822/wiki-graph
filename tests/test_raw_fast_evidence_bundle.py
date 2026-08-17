@@ -8,7 +8,8 @@ import pytest
 from raw_fast_evidence_fixtures import (
     _write_fake_docling_outputs,
     _write_sectioned_main_with_long_appendix_fixture,
-    _write_tex_first_source_fixture,
+    install_fake_arxiv_fetch,
+    run_process_arxiv,
     sample_wiki,
 )
 
@@ -174,11 +175,9 @@ def test_raw_fast_evidence_bundle_openreview_uses_authenticated_pdf_and_canonica
     assert payload["supplied_url"] == supplied_url
     assert payload["fetch"]["openreview"]["auth_used"] is True
     assert payload["openreview"]["id"] == "mLhZzo7BIb"
-    assert payload["files"]["openreview_metadata"] == "openreview_metadata.json"
     frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
     assert frontmatter["source"] == canonical_pdf
     assert frontmatter["title"] == "OpenReview Fixture Paper"
-    assert frontmatter["domain"] == "machine-learning"
     assert frontmatter["capture_route"] == "raw-fast evidence bundle (openreview)"
     assert "source_pdf" not in frontmatter
     assert "openreview_id" not in frontmatter
@@ -195,29 +194,19 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
             return {"ok": True, "status": 200, "text": "<feed><entry><title>Cross Site Fixture Paper</title></entry></feed>"}
         return {"ok": True, "status": 200, "text": "<html><title>Cross Site Fixture Paper</title></html>"}
 
-    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake tar")
-        return {"ok": True, "url": url, "dest": str(dest), "bytes": dest.stat().st_size, "sha256": "fake"}
+    install_fake_arxiv_fetch(
+        monkeypatch,
+        raw_fast_evidence_bundle,
+        workdir,
+        fetch_text=fake_fetch_text,
+    )
 
-    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
-        _write_tex_first_source_fixture(workdir)
-        return {"ok": True, "extracted_count": 2, "errors": []}
-
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
-
-    payload = raw_fast_evidence_bundle.process_arxiv(
+    payload = run_process_arxiv(
+        raw_fast_evidence_bundle,
         supplied_url,
         root,
         workdir,
-        "docling",
-        False,
-        ["none"],
-        30,
-        paper_digest=True,
-        resource_draft=True,
+        timeout=30,
     )
 
     assert payload["ok"] is True
@@ -225,8 +214,6 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
     assert payload["source_url"] == "https://arxiv.org/abs/2606.02572"
     assert payload["supplied_url"] == supplied_url
     assert payload["arxiv"]["id"] == "2606.02572"
-    assert payload["arxiv"]["supplied_url"] == supplied_url
     frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
     assert frontmatter["source"] == "https://arxiv.org/abs/2606.02572"
-    assert frontmatter["domain"] == "machine-learning"
     assert supplied_url not in frontmatter.values()

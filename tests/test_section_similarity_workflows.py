@@ -1,13 +1,12 @@
-import sys
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
-from support import write  # noqa: E402
+from support import clear_embedding_env, write  # noqa: E402
 from ops.wiki_native_jsonl import jsonl_read  # noqa: E402
 from ops.wiki_native_section_similarity import _section_rank_lists  # noqa: E402
 from ops.wiki_native_section_similarity import _section_rank_lists_scalar  # noqa: E402
@@ -17,6 +16,35 @@ from ops.wiki_native_section_similarity import section_similarity_embedding_text
 from ops.wiki_native_section_similarity import section_similarity_index_summary  # noqa: E402
 from ops.wiki_native_section_similarity import section_similarity_report_summary  # noqa: E402
 from ops.wiki_native_section_similarity import select_section_similarity_edges  # noqa: E402
+
+_KIND_TITLE = {"future": "Future", "limitations": "Limitations", "questions": "Questions"}
+
+
+def _sec(key: str, content: str, kind: str = "future", *, paper: str | None = None, title: str | None = None, **over) -> dict:
+    row = {
+        "section_id": f"raw_section:{key}:{kind}",
+        "source_id": f"raw_clip:{key}",
+        "source_path": f"raw/clip/{key}.md",
+        "paper_title": paper if paper is not None else (key[0].upper() if len(key) > 1 and key[1] == "_" else key[:1].upper() if len(key) == 1 else key.title()),
+        "section_kind": kind,
+        "section_title": title or _KIND_TITLE.get(kind, kind.title()),
+        "content": content,
+    }
+    row.update(over)
+    return row
+
+
+def _graph_argv(root: Path, state: Path, workdir: Path, *extra: str) -> list[str]:
+    return [
+        "build_section_similarity_graph.py",
+        "--root",
+        str(root),
+        "--state-dir",
+        str(state),
+        "--workdir",
+        str(workdir),
+        *extra,
+    ]
 
 
 def test_section_similarity_embedding_text_uses_clean_section_content_without_sidecar_boilerplate() -> None:
@@ -39,11 +67,11 @@ def test_section_similarity_embedding_text_uses_clean_section_content_without_si
 
 def test_build_section_similarity_edges_keeps_sparse_mutual_edges_and_excludes_same_raw_note() -> None:
     sections = [
-        {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
-        {"section_id": "raw_section:b:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "alpha neighbor"},
-        {"section_id": "raw_section:c:future", "source_id": "raw_clip:c", "source_path": "raw/clip/c.md", "paper_title": "C", "section_kind": "future", "section_title": "Future", "content": "orthogonal"},
-        {"section_id": "raw_section:a:limitations", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "limitations", "section_title": "Limitations", "content": "same raw note should be excluded"},
-        {"section_id": "raw_section:d:questions", "source_id": "raw_clip:d", "source_path": "raw/clip/d.md", "paper_title": "D", "section_kind": "questions", "section_title": "Questions", "content": "problem neighbor"},
+        _sec("a", "alpha"),
+        _sec("b", "alpha neighbor"),
+        _sec("c", "orthogonal"),
+        _sec("a", "same raw note should be excluded", "limitations"),
+        _sec("d", "problem neighbor", "questions"),
     ]
     embeddings = {
         "raw_section:a:future": [1.0, 0.0, 0.0],
@@ -73,11 +101,11 @@ def test_build_section_similarity_edges_keeps_sparse_mutual_edges_and_excludes_s
 def test_section_similarity_index_round_trips_full_builder_edges(tmp_path: Path) -> None:
 
     sections = [
-        {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
-        {"section_id": "raw_section:b:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "alpha peer"},
-        {"section_id": "raw_section:c:future", "source_id": "raw_clip:c", "source_path": "raw/clip/c.md", "paper_title": "C", "section_kind": "future", "section_title": "Future", "content": "other peer"},
-        {"section_id": "raw_section:d:questions", "source_id": "raw_clip:d", "source_path": "raw/clip/d.md", "paper_title": "D", "section_kind": "questions", "section_title": "Questions", "content": "question peer"},
-        {"section_id": "raw_section:e:questions", "source_id": "raw_clip:e", "source_path": "raw/clip/e.md", "paper_title": "E", "section_kind": "questions", "section_title": "Questions", "content": "question peer 2"},
+        _sec("a", "alpha"),
+        _sec("b", "alpha peer"),
+        _sec("c", "other peer"),
+        _sec("d", "question peer", "questions"),
+        _sec("e", "question peer 2", "questions"),
     ]
     embeddings = {
         "raw_section:a:future": [1.0, 0.0, 0.0],
@@ -136,10 +164,7 @@ def test_build_section_similarity_graph_writes_section_similarity_index_summary(
     workdir = tmp_path / "workdir"
     state.mkdir(parents=True)
     workdir.mkdir(parents=True)
-    rows = [
-        {"section_id": "raw_section:a:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "alpha"},
-        {"section_id": "raw_section:b:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "alpha peer"},
-    ]
+    rows = [_sec("a", "alpha"), _sec("b", "alpha peer")]
     write(state / "raw_sections.jsonl", "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
     monkeypatch.setattr(
@@ -161,14 +186,10 @@ def test_build_section_similarity_graph_writes_section_similarity_index_summary(
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "build_section_similarity_graph.py",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
+        _graph_argv(
+            root,
+            state,
+            workdir,
             "--same-kind-k",
             "1",
             "--same-kind-min-cosine",
@@ -179,7 +200,7 @@ def test_build_section_similarity_graph_writes_section_similarity_index_summary(
             "1",
             "--sample-edges",
             "1",
-        ],
+        ),
     )
 
     assert build_section_similarity_graph.main() == 0
@@ -205,39 +226,19 @@ def test_build_section_similarity_graph_reports_provider_failure_without_partial
     workdir = tmp_path / "workdir"
     state.mkdir(parents=True)
     workdir.mkdir(parents=True)
-    row = {
-        "section_id": "raw_section:a:future",
-        "source_id": "raw_clip:a",
-        "source_path": "raw/clip/a.md",
-        "paper_title": "A",
-        "section_kind": "future",
-        "section_title": "Future",
-        "content": "alpha content long enough for embedding",
-    }
+    row = _sec("a", "alpha content long enough for embedding")
     write(state / "raw_sections.jsonl", json.dumps(row, ensure_ascii=False) + "\n")
-    for name in [
+    clear_embedding_env(
+        monkeypatch,
         "EMBEDDING_BINDING_HOST",
         "OPENAI_BASE_URL",
         "EMBEDDING_BINDING_API_KEY",
         "OPENAI_API_KEY",
-    ]:
-        monkeypatch.delenv(name, raising=False)
+    )
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "build_section_similarity_graph.py",
-            "--root",
-            str(root),
-            "--state-dir",
-            str(state),
-            "--workdir",
-            str(workdir),
-            "--section-kinds",
-            "future",
-            "--min-content-chars",
-            "1",
-        ],
+        _graph_argv(root, state, workdir, "--section-kinds", "future", "--min-content-chars", "1"),
     )
 
     assert build_section_similarity_graph.main() == 1
@@ -254,13 +255,13 @@ def test_build_section_similarity_graph_reports_provider_failure_without_partial
 
 def test_section_rank_lists_fast_matches_scalar_reference_on_boundary_fixture() -> None:
     sections = [
-        {"section_id": "raw_section:src:future", "source_id": "raw_clip:src", "source_path": "raw/clip/src.md", "paper_title": "Src", "section_kind": "future", "section_title": "Future", "content": "source"},
-        {"section_id": "raw_section:a_target:future", "source_id": "raw_clip:a", "source_path": "raw/clip/a.md", "paper_title": "A", "section_kind": "future", "section_title": "Future", "content": "tie a"},
-        {"section_id": "raw_section:b_target:future", "source_id": "raw_clip:b", "source_path": "raw/clip/b.md", "paper_title": "B", "section_kind": "future", "section_title": "Future", "content": "tie b"},
-        {"section_id": "raw_section:c_below:future", "source_id": "raw_clip:c", "source_path": "raw/clip/c.md", "paper_title": "C", "section_kind": "future", "section_title": "Future", "content": "below threshold"},
-        {"section_id": "raw_section:same_note:future", "source_id": "raw_clip:src", "source_path": "raw/clip/src.md", "paper_title": "Src", "section_kind": "future", "section_title": "Future", "content": "same raw note"},
-        {"section_id": "raw_section:q1:questions", "source_id": "raw_clip:q1", "source_path": "raw/clip/q1.md", "paper_title": "Q1", "section_kind": "questions", "section_title": "Questions", "content": "cross"},
-        {"section_id": "raw_section:q2:questions", "source_id": "raw_clip:q2", "source_path": "raw/clip/q2.md", "paper_title": "Q2", "section_kind": "questions", "section_title": "Questions", "content": "cross lower"},
+        _sec("src", "source"),
+        _sec("a_target", "tie a", paper="A", source_id="raw_clip:a", source_path="raw/clip/a.md"),
+        _sec("b_target", "tie b", paper="B", source_id="raw_clip:b", source_path="raw/clip/b.md"),
+        _sec("c_below", "below threshold", paper="C", source_id="raw_clip:c", source_path="raw/clip/c.md"),
+        _sec("same_note", "same raw note", paper="Src", source_id="raw_clip:src", source_path="raw/clip/src.md"),
+        _sec("q1", "cross", "questions"),
+        _sec("q2", "cross lower", "questions"),
     ]
     embeddings = {
         "raw_section:src:future": [1.0, 0.0, 0.0],
@@ -289,9 +290,9 @@ def test_section_rank_lists_fast_matches_scalar_reference_on_boundary_fixture() 
 
 def test_section_rank_lists_fast_falls_back_to_scalar_for_zero_and_mismatched_vectors() -> None:
     sections = [
-        {"section_id": "raw_section:zero:future", "source_id": "raw_clip:zero", "source_path": "raw/clip/zero.md", "paper_title": "Zero", "section_kind": "future", "section_title": "Future", "content": "zero"},
-        {"section_id": "raw_section:short:future", "source_id": "raw_clip:short", "source_path": "raw/clip/short.md", "paper_title": "Short", "section_kind": "future", "section_title": "Future", "content": "short"},
-        {"section_id": "raw_section:long:future", "source_id": "raw_clip:long", "source_path": "raw/clip/long.md", "paper_title": "Long", "section_kind": "future", "section_title": "Future", "content": "long"},
+        _sec("zero", "zero"),
+        _sec("short", "short"),
+        _sec("long", "long"),
     ]
     embeddings = {
         "raw_section:zero:future": [0.0, 0.0],

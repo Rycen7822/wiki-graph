@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ops.native_runtime_env import env_int
+from ops.native_runtime_env import env_int, load_env_file
 from ops.wiki_native_lib import (
     DEFAULT_STATE_DIR,
     DEFAULT_WIKI_ROOT,
@@ -490,6 +490,7 @@ def main() -> int:
     audit_manifest_parser.add_argument("--limit-edges", type=int, default=None)
 
     args = parser.parse_args()
+    load_env_file(args.workdir.resolve() / ".env")
     try:
         if args.command == "export-manifest":
             print_json(run_export_manifest(args))

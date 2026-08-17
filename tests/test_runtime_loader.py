@@ -6,8 +6,7 @@ from pathlib import Path
 import pytest
 
 from llm_wiki_native import runtime
-from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-from support import native_record
+from support import Hit, seed_audited_entity_db
 
 
 def _write_pointer(tmp_path: Path, *, status: str = "active", workspace_id: str | None = None) -> tuple[Path, Path, Path]:
@@ -65,18 +64,14 @@ def test_load_engine_from_workspace_pointer_opens_active_workspace_read_only(tmp
     }
     assert isinstance(engine.db, DB)
     assert isinstance(engine.zvec_workspace, Zvec)
-    assert getattr(engine, "default_workspace_id") == "native-active"
+    assert engine.default_workspace_id == "native-active"
 
 
 def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_path) -> None:
     pointer_path = tmp_path / "active_workspace.json"
     sqlite_path = tmp_path / "records.sqlite"
     zvec_path = tmp_path / "zvec_records"
-    db = SQLiteWorkspace(sqlite_path)
-    db.create_workspace("native-active", "manifest-hash")
-    db.put_record(native_record("native-active", "entity", "doc:a", "Alpha", source_path="alpha.md"))
-    db.put_vector("native-active", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
-    db.mark_audited("native-active", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
+    db = seed_audited_entity_db(sqlite_path, "native-active")
     pointer_path.write_text(
         json.dumps(
             {
@@ -89,11 +84,6 @@ def test_active_pointer_loads_audited_sqlite_workspace_as_production_shape(tmp_p
         ),
         encoding="utf-8",
     )
-
-    class Hit:
-        doc_id = "entity:doc:a"
-        score = 1.0
-        fields = {"record_type": "entity", "record_id": "doc:a"}
 
     class Zvec:
         def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
@@ -131,4 +121,4 @@ def test_load_engine_from_workspace_pointer_status_policy_for_prepared(tmp_path)
         zvec_workspace_factory=lambda path, *, read_only: Zvec(),
     )
 
-    assert getattr(engine, "default_workspace_id") == "native-prepared"
+    assert engine.default_workspace_id == "native-prepared"

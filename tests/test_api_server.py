@@ -5,7 +5,7 @@ import pytest
 from llm_wiki_native.api.server import _answer_response_payload, _query_kwargs, create_app
 from llm_wiki_native.retrieval.query_engine import NativeQueryEngine
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-from support import native_record, request_asgi as _request
+from support import Hit, request_asgi as _request, seed_audited_entity_db
 
 
 def patch_direct_threadpool(monkeypatch: Any, target: str = "llm_wiki_native.api.server.run_in_threadpool") -> None:
@@ -15,12 +15,20 @@ def patch_direct_threadpool(monkeypatch: Any, target: str = "llm_wiki_native.api
     monkeypatch.setattr(target, direct_threadpool)
 
 
-def _app(tmp_path):
-    class Hit:
-        doc_id = "entity:doc:a"
-        score = 1.0
-        fields = {"record_type": "entity", "record_id": "doc:a"}
+def _query_payload(**over) -> dict:
+    payload = {
+        "workspace_id": "native-test",
+        "query": "alpha",
+        "query_vector": [1.0, 0.0],
+        "mode": "mix",
+        "top_k": 1,
+        "record_types": ["entity"],
+    }
+    payload.update(over)
+    return payload
 
+
+def _app(tmp_path):
     class ZvecWorkspace:
         def query_mix(self, query: str, query_vector: list[float], top_k: int, filter_expr: str | None):
             return [Hit()]
@@ -28,12 +36,7 @@ def _app(tmp_path):
         def query_vector(self, query_vector: list[float], top_k: int, filter_expr: str | None):
             return [Hit()]
 
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
-    db.put_record(native_record("native-test", "entity", "doc:a", "Alpha", source_path="alpha.md"))
-    db.put_vector("native-test", "entity", "doc:a", "doc:a:vector", [1.0, 0.0])
-    db.mark_audited("native-test", {"chunks": 0, "entities": 1, "relationships": 0, "sections": 0}, require_vectors=True)
-    return create_app(NativeQueryEngine(db, zvec_workspace=ZvecWorkspace()))
+    return create_app(NativeQueryEngine(seed_audited_entity_db(tmp_path / "native.sqlite"), zvec_workspace=ZvecWorkspace()))
 
 
 def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:
@@ -54,16 +57,7 @@ def test_native_api_health_reports_native_port_and_ready(tmp_path) -> None:
 def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None:
     patch_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
-    payload = {
-        "workspace_id": "native-test",
-        "query": "alpha",
-        "query_vector": [1.0, 0.0],
-        "mode": "mix",
-        "top_k": 1,
-        "record_types": ["entity"],
-        "retrieval_goal": "coverage",
-        "response_profile": "compact",
-    }
+    payload = _query_payload(retrieval_goal="coverage", response_profile="compact")
 
     data_response = _request(app, "POST", "/query/data", json=payload)
 
@@ -83,13 +77,7 @@ def test_native_api_query_data_and_trace_contract(tmp_path, monkeypatch) -> None
 def test_native_api_returns_structured_400_for_validation_errors(tmp_path, monkeypatch) -> None:
     patch_direct_threadpool(monkeypatch)
     app = _app(tmp_path)
-    payload = {
-        "workspace_id": "native-test",
-        "query": "alpha",
-        "query_vector": [1.0, 0.0],
-        "mode": "mix",
-        "record_types": ["unknown"],
-    }
+    payload = _query_payload(record_types=["unknown"])
 
     response = _request(app, "POST", "/query/data", json=payload, raise_app_exceptions=False)
 
@@ -153,7 +141,9 @@ def test_native_api_requires_bearer_token_when_configured(tmp_path, monkeypatch)
     patch_direct_threadpool(monkeypatch)
     monkeypatch.setenv("LLM_WIKI_NATIVE_API_KEY", "secret-token")
     app = _app(tmp_path)
-    payload = {"workspace_id": "native-test", "query_vector": [1.0, 0.0], "record_types": ["entity"], "top_k": 1}
+    payload = _query_payload()
+    del payload["query"]
+    del payload["mode"]
 
     assert _request(app, "POST", "/query/data", json=payload, raise_app_exceptions=False).status_code == 401
     assert _request(app, "POST", "/query/data", json=payload, headers={"Authorization": "Bearer wrong"}, raise_app_exceptions=False).status_code == 401

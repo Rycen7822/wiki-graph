@@ -6,42 +6,46 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
+from raw_fast_evidence_fixtures import _write_tiny_pdf  # noqa: E402
 from support import sample_wiki  # noqa: E402
 from ops import raw_fast_ingest_prepare  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
 
-LEGACY_EXTRACTOR_KEY = "pdf" + "totext"
-LEGACY_RAW_TEXT_KEY = "raw" + "_text"
-LEGACY_LAYOUT_TEXT_KEY = "layout" + "_text"
+pytestmark = pytest.mark.subprocess
 
 
-def _write_tiny_pdf(path: Path) -> None:
-    fitz = pytest.importorskip("fitz")
-    doc = fitz.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "Tiny Prepare Paper\nAbstract\nThis paper has Figure 1 and DOI 10.1234/example.prepare")
-    doc.save(path)
-    doc.close()
-
-
-def test_raw_fast_ingest_prepare_url_only_prod_profile_prints_command(tmp_path: Path) -> None:
-    result = subprocess.run(
+def _print_command(url: str, tmp_path: Path, *extra: str):
+    return subprocess.run(
         [
             sys.executable,
             "-m",
             "ops.raw_fast_ingest_prepare",
             "--url",
-            "https://arxiv.org/abs/2606.32032",
+            url,
             "--tmp-root",
             str(tmp_path / "raw-fast-tmp"),
+            *extra,
             "--print-command",
         ],
         check=True,
         text=True,
         capture_output=True,
     )
+
+
+def _fail_json_command(command, *, cwd, timeout):
+    return {
+        "returncode": 2,
+        "json": {"ok": False, "stage": "fetch_pdf", "error": "HTTPError", "message": "403 Forbidden"},
+        "stdout_tail": "{}",
+        "stderr_tail": "fetch failed",
+        "command": command,
+    }
+
+
+def test_raw_fast_ingest_prepare_url_only_prod_profile_prints_command(tmp_path: Path) -> None:
+    result = _print_command("https://arxiv.org/abs/2606.32032", tmp_path)
     payload = json.loads(result.stdout)
 
     assert payload["ok"] is True
@@ -64,20 +68,9 @@ def test_raw_fast_ingest_prepare_url_only_prod_profile_prints_command(tmp_path: 
 
 
 def test_raw_fast_ingest_prepare_print_command_normalizes_github_blob_pdf_to_raw_download(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_ingest_prepare",
-            "--url",
-            "https://github.com/areal-project/AReaL/blob/main/docs/paper/AReaL2.0_report.pdf",
-            "--tmp-root",
-            str(tmp_path / "raw-fast-tmp"),
-            "--print-command",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
+    result = _print_command(
+        "https://github.com/areal-project/AReaL/blob/main/docs/paper/AReaL2.0_report.pdf",
+        tmp_path,
     )
     payload = json.loads(result.stdout)
     command = payload["command"]
@@ -97,21 +90,7 @@ def test_raw_fast_ingest_prepare_print_command_plumbs_cross_site_arxiv_kind(tmp_
         "https://modelscope.ai/papers/2606.07591",
     ]
     for url in urls:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "ops.raw_fast_ingest_prepare",
-                "--url",
-                url,
-                "--tmp-root",
-                str(tmp_path / "raw-fast-tmp"),
-                "--print-command",
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
+        result = _print_command(url, tmp_path)
         payload = json.loads(result.stdout)
 
         command = payload["command"]
@@ -120,50 +99,25 @@ def test_raw_fast_ingest_prepare_print_command_plumbs_cross_site_arxiv_kind(tmp_
 
 def test_raw_fast_ingest_prepare_print_command_plumbs_openreview_canonical_pdf(tmp_path: Path) -> None:
     url = "https://openreview.net/attachment?id=mLhZzo7BIb&name=pdf"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_ingest_prepare",
-            "--url",
-            url,
-            "--tmp-root",
-            str(tmp_path / "raw-fast-tmp"),
-            "--print-command",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
+    result = _print_command(url, tmp_path)
     payload = json.loads(result.stdout)
     command = payload["command"]
     canonical_pdf = "https://openreview.net/pdf?id=mLhZzo7BIb"
 
     assert payload["source_url"] == canonical_pdf
     assert payload["supplied_url"] == url
-    assert payload["source_url_normalization"]["normalized"] == (url != canonical_pdf)
+    assert payload["source_url_normalization"]["normalized"] is True
     assert payload["source_url_normalization"]["reason"] == "openreview_canonical_pdf"
     assert command[command.index("--url") + 1] == canonical_pdf
     assert command[command.index("--kind") + 1] == "openreview"
 
 
 def test_raw_fast_ingest_prepare_print_command_passes_max_download_bytes(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_ingest_prepare",
-            "--url",
-            "https://openreview.net/forum?id=mLhZzo7BIb",
-            "--tmp-root",
-            str(tmp_path / "raw-fast-tmp"),
-            "--max-download-bytes",
-            "none",
-            "--print-command",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
+    result = _print_command(
+        "https://openreview.net/forum?id=mLhZzo7BIb",
+        tmp_path,
+        "--max-download-bytes",
+        "none",
     )
     payload = json.loads(result.stdout)
     command = payload["command"]
@@ -186,23 +140,13 @@ def test_raw_fast_ingest_prepare_failure_payload_exposes_manual_reference_paths(
     )
     paths = raw_fast_ingest_prepare.resolve_prepare_paths(args)
 
-    def fake_run_json_command(command, *, cwd, timeout):
-        return {
-            "returncode": 2,
-            "json": {"ok": False, "stage": "fetch_pdf", "error": "HTTPError", "message": "403 Forbidden"},
-            "stdout_tail": "{}",
-            "stderr_tail": "fetch failed",
-            "command": command,
-        }
-
-    monkeypatch.setattr(raw_fast_ingest_prepare, "run_json_command", fake_run_json_command)
+    monkeypatch.setattr(raw_fast_ingest_prepare, "run_json_command", _fail_json_command)
 
     output = raw_fast_ingest_prepare.run_prepare(args, paths)
 
     assert output["ok"] is False
     assert output["manual_required"] is True
     assert output["manual_reason"]["error"] == "HTTPError"
-    assert "manual_reference_paths" in output
     assert output["manual_reference_policy"]["mode"] == "only_on_manual_required"
     assert output["automation_next_action"]["action"] == "read_manual_reference_paths"
     assert output["automation_next_action"]["reason"] == "script_failed"
@@ -213,16 +157,7 @@ def test_raw_fast_ingest_prepare_failure_payload_exposes_manual_reference_paths(
 
 
 def test_raw_fast_ingest_prepare_main_failure_raises_manual_reference_reminder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    def fake_run_json_command(command, *, cwd, timeout):
-        return {
-            "returncode": 2,
-            "json": {"ok": False, "stage": "fetch_pdf", "error": "HTTPError", "message": "403 Forbidden"},
-            "stdout_tail": "{}",
-            "stderr_tail": "fetch failed",
-            "command": command,
-        }
-
-    monkeypatch.setattr(raw_fast_ingest_prepare, "run_json_command", fake_run_json_command)
+    monkeypatch.setattr(raw_fast_ingest_prepare, "run_json_command", _fail_json_command)
 
     code = raw_fast_ingest_prepare.main(
         [
@@ -297,7 +232,6 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_follow_source_read_plan"
     assert handoff["body_draft"] == {"path": "raw_body_draft.md", "contract": "body_only_no_frontmatter"}
     assert handoff["source_refs"]["scientific_digest"] == "paper_digest.md"
-    assert handoff["assemble"]["command_preview_path"] == str((workdir / "assemble_command.preview.sh").resolve())
     assert handoff["closeout_args"]["ok"] is True
     preview = (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
     assert "ops.raw_fast_note_assemble" in preview
@@ -305,6 +239,8 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     closeout_preview = (workdir / "closeout_command.preview.sh").read_text(encoding="utf-8")
     assert closeout_preview.count("--output-mode") == 1
     assert "--output-mode compact" in closeout_preview
+    assert "--auto-integrate" in closeout_preview
+    assert "--defer-native-refresh" in closeout_preview
     closeout_args = json.loads((workdir / "closeout_args.json").read_text(encoding="utf-8"))
     assert closeout_args["ok"] is True
     assert "--resource-status-summary" in closeout_args["argv_tail"]

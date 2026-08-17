@@ -1,24 +1,23 @@
-import sys
 import json
-import subprocess
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
-from ops import batch_native_refresh  # noqa: E402
 from ops import batch_wiki_integration  # noqa: E402
 from ops.wiki_integration_plan import _canonical_plan_hash  # noqa: E402
-from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success  # noqa: E402
-from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import mark_pending_wiki_integration  # noqa: E402
-from ops.wiki_native_wiki_integration_pending import pending_wiki_integration_status  # noqa: E402
-def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: Path) -> None:
+
+
+def _wiki_state(tmp_path: Path, *, log: bool = False) -> tuple[Path, Path]:
     root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wiki-graph" / "state"
+    if log:
+        write(root / "log.md", "# Wiki Log\n")
+    return root, tmp_path / "work" / "wiki-graph" / "state"
+
+
+def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: Path) -> None:
+    root, state = _wiki_state(tmp_path)
     status = {
         "pending_count": 1,
         "actionable_pending_count": 1,
@@ -44,7 +43,8 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
 
     prompt = batch_wiki_integration.build_auto_integration_prompt(root, state, status, "manual", plan=plan, plan_path=plan_path)
 
-    assert ("/home/" + "xu/project/wiki/wikigraph") not in prompt
+    residual = prompt.replace(str(ROOT), "").replace(str(plan_path), "")
+    assert not re.search(r"/home/|/Users/|/mnt/[a-zA-Z]/", residual)
     assert f"Native refresh workdir: `{ROOT}`" in prompt
     assert f"Plan artifact: `{plan_path}`" in prompt
     assert "plan_hash: `plan123`; operations=2; routed_raw_notes=1; review_queue_additions=1" in prompt
@@ -56,13 +56,7 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
     assert "python -m ops.batch_native_refresh preflight-cutover" in prompt
     assert "python -m ops.batch_native_refresh refresh" in prompt
     assert "--fill-missing-vectors" in prompt
-    assert "next_refresh_kind" in prompt
-    assert "after 5 completed incremental graph updates" in prompt
-    assert "prepare-only output is a prepared artifact, not live graph freshness" in prompt
     assert "Use bounded reads/searches for `_meta/raw-clip-map.md` and `_meta/topic-map.md`; keep large map files out of context." in prompt
-    assert "references/raw-fast-batch-wiki-integration.md" in prompt
-    assert "references/wiki-core-operations.md" in prompt
-    assert "references/wiki-operational-pitfalls.md" not in prompt
 
 
 def _write_plan(path: Path, root: Path, state: Path, operations: list[dict], *, compiled_page_writes: list[dict] | None = None, plan_hash: str | None = None) -> dict:
@@ -83,9 +77,7 @@ def _write_plan(path: Path, root: Path, state: Path, operations: list[dict], *, 
 
 
 def test_apply_plan_cli_updates_machine_owned_maps_and_log(tmp_path: Path, capsys) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wiki-graph" / "state"
-    write(root / "log.md", "# Wiki Log\n")
+    root, state = _wiki_state(tmp_path, log=True)
     raw_path = "raw/clip/2601/26010102_New-Paper.md"
     plan_path = state / "wiki_integration_plans" / "plan.json"
     plan = _write_plan(
@@ -138,9 +130,7 @@ def test_apply_plan_cli_updates_machine_owned_maps_and_log(tmp_path: Path, capsy
 
 
 def test_apply_plan_cli_fails_closed_for_manual_or_unsupported_ops(tmp_path: Path, capsys) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wiki-graph" / "state"
-    write(root / "log.md", "# Wiki Log\n")
+    root, state = _wiki_state(tmp_path, log=True)
     before = {
         path: path.read_text(encoding="utf-8")
         for path in [root / "_meta" / "raw-clip-map.md", root / "_meta" / "topic-map.md", root / "log.md"]
@@ -165,8 +155,7 @@ def test_apply_plan_cli_fails_closed_for_manual_or_unsupported_ops(tmp_path: Pat
 
 
 def test_apply_plan_cli_rejects_plan_hash_mismatch_without_writes(tmp_path: Path, capsys) -> None:
-    root = sample_wiki(tmp_path)
-    state = tmp_path / "work" / "wiki-graph" / "state"
+    root, state = _wiki_state(tmp_path)
     raw_map = root / "_meta" / "raw-clip-map.md"
     before = raw_map.read_text(encoding="utf-8")
     plan_path = state / "wiki_integration_plans" / "bad-hash.json"

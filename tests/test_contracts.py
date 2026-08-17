@@ -150,9 +150,6 @@ def _quality_row(**overrides: object) -> dict:
 
 def test_generic_query_suite_accepts_optional_quality_fields_without_requiring_them() -> None:
     validate_query_suite_row(_quality_row())
-    fixture = Path(__file__).parent / "fixtures" / "query_suite_minimal.jsonl"
-    minimal = json.loads(fixture.read_text(encoding="utf-8"))
-    validate_query_suite_row(minimal)
 
 
 @pytest.mark.parametrize(

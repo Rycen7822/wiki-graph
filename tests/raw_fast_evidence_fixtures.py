@@ -1,21 +1,18 @@
-import sys
 import argparse
 import datetime as dt
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
 from ops.wiki_native_wiki_checks import wiki_root_machine_pollution  # noqa: E402
 
-LEGACY_EXTRACTOR_KEY = "pdf" + "totext"
 LEGACY_RAW_TEXT_KEY = "raw" + "_text"
-LEGACY_LAYOUT_TEXT_KEY = "layout" + "_text"
 LEGACY_RAW_TEXT_FILE = "paper." + "raw" + ".txt"
 LEGACY_LAYOUT_TEXT_FILE = "paper." + "layout" + ".txt"
 
@@ -221,3 +218,56 @@ Main paper conclusion names the practical boundary.
 def _write_fake_docling_outputs(workdir: Path, markdown: str = "# Docling Fallback Paper\n\nAbstract\nDocling text is the PDF fallback.\n\n## Method\nFallback method text.") -> None:
     write(workdir / "docling.md", markdown)
     write(workdir / "docling.json", json.dumps({"ok": True, "markdown_chars": len(markdown)}) + "\n")
+
+
+def bundle_cli_argv(url: str, root: Path, workdir: Path, *extra: str, kind: str = "direct-pdf") -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "ops.raw_fast_evidence_bundle",
+        "--url",
+        url,
+        "--kind",
+        kind,
+        "--root",
+        str(root),
+        "--workdir",
+        str(workdir),
+        "--probe",
+        "none",
+        *extra,
+    ]
+
+
+def install_fake_arxiv_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_mod,
+    workdir: Path,
+    *,
+    fetch_text,
+    write_source=_write_tex_first_source_fixture,
+    extracted_count: int = 2,
+    extra: tuple = (),
+) -> None:
+    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes=None) -> dict:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"fake eprint tarball")
+        return {"ok": True, "url": url, "dest": str(dest), "bytes": dest.stat().st_size, "sha256": "fake"}
+
+    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
+        write_source(workdir)
+        return {"ok": True, "extracted_count": extracted_count, "errors": []}
+
+    monkeypatch.setattr(bundle_mod, "fetch_text", fetch_text)
+    monkeypatch.setattr(bundle_mod, "fetch_url_to_file", fake_fetch_url_to_file)
+    monkeypatch.setattr(bundle_mod, "safe_extract_tar", fake_extract_tar)
+    for name, value in extra:
+        monkeypatch.setattr(bundle_mod, name, value)
+
+
+def run_process_arxiv(bundle_mod, url: str, root: Path, workdir: Path, *, probes=None, timeout: int = 5, timed: bool = False, **kwargs):
+    kwargs.setdefault("paper_digest", True)
+    kwargs.setdefault("resource_draft", True)
+    if timed:
+        kwargs["timings"] = bundle_mod.TimingRecorder()
+    return bundle_mod.process_arxiv(url, root, workdir, "docling", False, list(probes or ["none"]), timeout, **kwargs)

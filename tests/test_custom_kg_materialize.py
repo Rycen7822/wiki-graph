@@ -5,28 +5,27 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
-sys.path.insert(0, str(ROOT))
-
 from ops import custom_kg_incremental  # noqa: E402
 from ops import custom_kg_vector_fill  # noqa: E402
 from ops.custom_kg_incremental import build_custom_kg_manifest  # noqa: E402
 from ops.vector_cache import VectorCache  # noqa: E402
+from support import clear_embedding_env, custom_kg_payload as _payload  # noqa: E402
 
 
-def _payload() -> dict:
-    return {
-        "chunks": [{"content": "Doc A content", "source_id": "doc:a", "file_path": "a.md", "chunk_order_index": 0}],
-        "entities": [
-            {"entity_name": "doc:a", "entity_type": "DOC", "description": "Doc A", "source_id": "doc:a", "file_path": "a.md"},
-            {"entity_name": "topic:x", "entity_type": "TOPIC", "description": "Topic X", "source_id": "doc:a", "file_path": "a.md"},
-        ],
-        "relationships": [
-            {"src_id": "doc:a", "tgt_id": "topic:x", "description": "Doc discusses Topic X", "keywords": "DISCUSSES", "source_id": "doc:a", "weight": 1.0, "file_path": "a.md"},
-        ],
-    }
+def _write_embed_env(workdir: Path, *extra: str) -> None:
+    (workdir / ".env").write_text(
+        "\n".join(
+            [
+                "EMBEDDING_BINDING=openai",
+                "EMBEDDING_BINDING_HOST=https://embedding.local/v1",
+                "EMBEDDING_BINDING_API_KEY=secret",
+                "EMBEDDING_MODEL=BAAI/bge-m3",
+                "EMBEDDING_DIM=2",
+                *extra,
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_run_export_manifest_writes_manifest_without_storage_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -85,22 +84,6 @@ def test_manifest_metadata_contract_issues_audit_and_block_export_without_write(
     assert not (state_dir / "custom_kg_manifest.json").exists()
     assert not state_dir.exists()
     assert not workdir.exists()
-
-
-def _seed_manifest_vectors(manifest: dict, cache: VectorCache) -> None:
-    ordinal = 1
-    for collection in ("chunks", "entities", "relationships"):
-        for record in manifest[collection].values():
-            cache.put(
-                record["vector_hash"],
-                record_type=record["record_type"],
-                record_id=record["record_id"],
-                embedding_model=record["embedding_model"],
-                embedding_dim=record["embedding_dim"],
-                embedding_params_version=record["embedding_params_version"],
-                vector=[float(ordinal), float(ordinal + 1)],
-            )
-            ordinal += 1
 
 
 # Prepared shadow/swap internals were removed with the retired live-storage runner.
@@ -163,21 +146,8 @@ def test_fill_missing_manifest_vectors_reports_embedding_profile_metrics(tmp_pat
 
 
 def test_openai_compatible_vector_fill_provider_loads_workdir_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "EMBEDDING_BINDING=openai",
-                "EMBEDDING_BINDING_HOST=https://embedding.local/v1",
-                "EMBEDDING_BINDING_API_KEY=secret",
-                "EMBEDDING_MODEL=BAAI/bge-m3",
-                "EMBEDDING_DIM=2",
-                "EMBEDDING_TIMEOUT=17",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    for name in ("EMBEDDING_BINDING_HOST", "EMBEDDING_BINDING_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
+    _write_embed_env(tmp_path, "EMBEDDING_TIMEOUT=17")
+    clear_embedding_env(monkeypatch, "EMBEDDING_BINDING_HOST", "EMBEDDING_BINDING_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY")
     calls = []
 
     class FakeResponse:
@@ -210,19 +180,19 @@ def test_openai_compatible_vector_fill_provider_loads_workdir_env(tmp_path, monk
     assert json.loads(calls[0]["request"].data.decode("utf-8")) == {"model": "BAAI/bge-m3", "input": ["Doc A content"]}
 
 
-def test_fill_missing_manifest_vectors_reports_redacted_embedding_env(tmp_path) -> None:
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "EMBEDDING_BINDING=openai",
-                "EMBEDDING_BINDING_HOST=https://embedding.local/v1",
-                "EMBEDDING_BINDING_API_KEY=secret",
-                "EMBEDDING_MODEL=BAAI/bge-m3",
-                "EMBEDDING_DIM=2",
-            ]
-        ),
-        encoding="utf-8",
+def test_fill_missing_manifest_vectors_reports_redacted_embedding_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_embedding_env(
+        monkeypatch,
+        "EMBEDDING_BINDING",
+        "EMBEDDING_BINDING_HOST",
+        "EMBEDDING_BINDING_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIM",
+        "EMBEDDING_PARAMS_VERSION",
     )
+    _write_embed_env(tmp_path)
     manifest = {
         "metadata": {},
         "chunks": {

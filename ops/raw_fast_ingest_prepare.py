@@ -249,7 +249,7 @@ def write_closeout_artifacts(workdir: Path, paths: dict[str, Any]) -> dict[str, 
     command.extend(["--workdir", str(Path(__file__).resolve().parents[1])])
     if closeout_args.get("ok"):
         command.extend(closeout_args.get("argv_tail") or [])
-        command.extend(["--allow-non-tmp-cleanup", "--fast-final-verify", "--append-log", "--auto-integrate", "--native-refresh-mode", "status"])
+        command.extend(["--allow-non-tmp-cleanup", "--fast-final-verify", "--append-log", "--auto-integrate", "--defer-native-refresh", "--native-refresh-mode", "status"])
     preview_path.write_text("#!/usr/bin/env bash\nset -euo pipefail\ncd " + shlex.quote(str(Path(__file__).resolve().parents[1])) + "\n" + " ".join(shlex.quote(str(part)) for part in command) + "\n", encoding="utf-8")
     return {"closeout_args": closeout_args, "closeout_args_path": str(args_path.resolve()), "closeout_command_preview_path": str(preview_path.resolve())}
 

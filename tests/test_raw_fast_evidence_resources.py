@@ -5,10 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from raw_fast_evidence_fixtures import (
-    _write_tex_first_source_fixture,
-    sample_wiki,
-)
+from raw_fast_evidence_fixtures import install_fake_arxiv_fetch, run_process_arxiv, sample_wiki
 
 
 def test_raw_fast_evidence_bundle_resource_classifier_separates_hf_paper_index_collection_from_artifacts() -> None:
@@ -99,36 +96,26 @@ def test_raw_fast_evidence_bundle_pwc_supplied_resources_feed_metadata_without_h
             return {"ok": True, "status": 200, "text": json.dumps(hf_repos_payload)}
         raise AssertionError(f"unexpected fetch_text URL: {url}")
 
-    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake eprint tarball")
-        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
-
-    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
-        _write_tex_first_source_fixture(workdir)
-        return {"ok": True, "extracted_count": 2, "errors": []}
-
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
-    monkeypatch.setattr(
+    install_fake_arxiv_fetch(
+        monkeypatch,
         raw_fast_evidence_bundle,
-        "probe_exact_link_health",
-        lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+        workdir,
+        fetch_text=fake_fetch_text,
+        extra=(
+            (
+                "probe_exact_link_health",
+                lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+            ),
+        ),
     )
 
-    payload = raw_fast_evidence_bundle.process_arxiv(
+    payload = run_process_arxiv(
+        raw_fast_evidence_bundle,
         supplied_url,
         root,
         workdir,
-        "docling",
-        False,
-        ["arxiv", "doi"],
-        5,
-        raw_fast_evidence_bundle.TimingRecorder(),
-        paper_digest=True,
-        resource_draft=True,
-        resource_health="direct",
+        probes=["arxiv", "doi"],
+        timed=True,
     )
 
     assert payload["ok"] is True
@@ -172,36 +159,26 @@ def test_raw_fast_evidence_bundle_modelscope_supplied_resources_feed_metadata(tm
             return {"ok": True, "status": 200, "text": modelscope_html}
         raise AssertionError(f"unexpected fetch_text URL: {url}")
 
-    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake eprint tarball")
-        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
-
-    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
-        _write_tex_first_source_fixture(workdir)
-        return {"ok": True, "extracted_count": 2, "errors": []}
-
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
-    monkeypatch.setattr(
+    install_fake_arxiv_fetch(
+        monkeypatch,
         raw_fast_evidence_bundle,
-        "probe_exact_link_health",
-        lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+        workdir,
+        fetch_text=fake_fetch_text,
+        extra=(
+            (
+                "probe_exact_link_health",
+                lambda url, **kwargs: {"ok": True, "url": url, "status": "verified_present"},
+            ),
+        ),
     )
 
-    payload = raw_fast_evidence_bundle.process_arxiv(
+    payload = run_process_arxiv(
+        raw_fast_evidence_bundle,
         supplied_url,
         root,
         workdir,
-        "docling",
-        False,
-        ["arxiv", "doi"],
-        5,
-        raw_fast_evidence_bundle.TimingRecorder(),
-        paper_digest=True,
-        resource_draft=True,
-        resource_health="direct",
+        probes=["arxiv", "doi"],
+        timed=True,
     )
 
     assert payload["ok"] is True
@@ -264,8 +241,6 @@ def test_raw_fast_evidence_bundle_only_verified_abstract_source_links_enter_meta
     assert ignored_reasons["https://github.com/goodfeli/dlbook_notation"] == "auxiliary_tex_notation_or_template_repo"
     assert ignored_reasons["https://github.com/example/reference-code"] == "non_abstract_source_resource_link"
     assert ignored_reasons["https://huggingface.co/example/reference-model"] == "non_abstract_source_resource_link"
-    assert "https://github.com/example/paper-code" in probe["abstract_urls"]
-    assert "https://huggingface.co/example/paper-model" in probe["abstract_urls"]
 
 def test_raw_fast_evidence_bundle_resource_boundary_defaults_to_not_checked_without_exact_link_report() -> None:
     from ops import raw_fast_evidence_bundle

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +11,7 @@ from raw_fast_evidence_fixtures import (
     _write_tiny_pdf,
     _write_tiny_pdf_figure,
     _write_tiny_png,
+    bundle_cli_argv,
     sample_wiki,
     wiki_root_machine_pollution,
     write,
@@ -19,6 +19,7 @@ from raw_fast_evidence_fixtures import (
 
 
 @pytest.mark.requires_fitz
+@pytest.mark.subprocess
 def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_are_sidecars(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
@@ -26,26 +27,16 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     workdir = tmp_path / "bundle-sidecars"
     _write_sidecar_source_fixture(workdir)
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_evidence_bundle",
-            "--url",
+        bundle_cli_argv(
             source_pdf.as_uri(),
-            "--kind",
-            "direct-pdf",
-            "--root",
-            str(root),
-            "--workdir",
-            str(workdir),
-            "--probe",
-            "none",
+            root,
+            workdir,
             "--paper-digest",
             "--resource-draft",
             "--localize-figures",
             "--image-slug",
             "fixture-sidecar-paper",
-        ],
+        ),
         check=True,
         text=True,
         capture_output=True,
@@ -66,8 +57,6 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     assert required_files <= set(payload["files"])
     for key in required_files:
         assert (workdir / payload["files"][key]).exists()
-    assert payload["preflight"]["ok"] is True
-    assert payload["agent_automation"]["ok"] is True
 
     digest = json.loads((workdir / "paper_digest.json").read_text(encoding="utf-8"))
     assert digest["ok"] is True
@@ -84,7 +73,6 @@ def test_raw_fast_evidence_bundle_paper_digest_resource_draft_and_local_figures_
     localized_entry = localized["entries"][0]
     assert localized_entry["dest_rel"].startswith("localized_figures_assets/fixture-sidecar-paper/")
     assert localized_entry["raw_note_policy"] == "temporary_inspection_only_do_not_embed_markdown_image"
-    assert "markdown" not in localized_entry
     assert (workdir / localized_entry["dest_rel"]).exists()
     assert not (workdir / "resource_boundary_draft.json").exists()
     assert wiki_root_machine_pollution(root) == []

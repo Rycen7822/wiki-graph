@@ -110,26 +110,27 @@ def spans_from_native_records(workspace_id: str, manifest: dict[str, Any], raw_s
     return [_dedupe_span_id(span, index).with_hash() for index, span in enumerate(spans)]
 
 
+def _span_kwargs(item: LexicalSpan) -> dict[str, Any]:
+    return {
+        "span_id": item.span_id,
+        "source_path": item.source_path,
+        "source_id": item.source_id,
+        "source_role": item.source_role,
+        "span_kind": item.span_kind,
+        "heading_path": item.heading_path,
+        "start_line": item.start_line,
+        "end_line": item.end_line,
+        "text": item.text,
+        "metadata": item.metadata,
+        "text_hash": item.text_hash,
+    }
+
+
 def materialize_lexical_spans(db: Any, workspace_id: str, spans: Iterable[LexicalSpan]) -> int:
-    count = 0
-    for span in spans:
-        item = span.with_hash()
-        db.put_lexical_span(
-            workspace_id,
-            span_id=item.span_id,
-            source_path=item.source_path,
-            source_id=item.source_id,
-            source_role=item.source_role,
-            span_kind=item.span_kind,
-            heading_path=item.heading_path,
-            start_line=item.start_line,
-            end_line=item.end_line,
-            text=item.text,
-            metadata=item.metadata,
-            text_hash=item.text_hash,
-        )
-        count += 1
-    return count
+    items = [_span_kwargs(span.with_hash()) for span in spans]
+    if not items:
+        return 0
+    return db.put_lexical_spans(workspace_id, items)
 
 
 def _spans_from_markdown(rel_path: str, source_id: str, source_role: str, text: str) -> list[LexicalSpan]:

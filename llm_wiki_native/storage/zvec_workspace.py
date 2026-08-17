@@ -76,6 +76,13 @@ class InsertStats:
 
 
 @dataclass(frozen=True)
+class DeleteStats:
+    attempted: int
+    deleted: int
+    failed: int
+
+
+@dataclass(frozen=True)
 class SmokeResult:
     checked: int
     passed: int
@@ -112,6 +119,50 @@ class ZvecWorkspace:
             attempted=attempted,
             inserted=inserted,
             failed=attempted - inserted,
+        )
+
+    def upsert_records(
+        self,
+        records: Iterable[ZvecRecord],
+        batch_size: int = MAX_ZVEC_WRITE_BATCH_SIZE,
+    ) -> InsertStats:
+        """Upsert docs under their stable zvec_doc_id identity (existing ids are updated, not duplicated)."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        attempted = 0
+        written = 0
+        for batch in _batches(records, batch_size):
+            docs = [zvec_doc_from_record(record) for record in batch]
+            statuses = self.collection.upsert(docs)
+            if not isinstance(statuses, list):
+                statuses = [statuses]
+            attempted += len(docs)
+            written += sum(1 for status in statuses if status.ok())
+        return InsertStats(
+            attempted=attempted,
+            inserted=written,
+            failed=attempted - written,
+        )
+
+    def delete_docs(self, doc_ids: Iterable[str]) -> DeleteStats:
+        """Delete docs by id in a single batch chain; missing ids are not failures."""
+        ids = [str(doc_id) for doc_id in doc_ids]
+        if not ids:
+            return DeleteStats(attempted=0, deleted=0, failed=0)
+
+        attempted = 0
+        deleted = 0
+        for batch in _batches(ids, MAX_ZVEC_WRITE_BATCH_SIZE):
+            statuses = self.collection.delete(batch)
+            if not isinstance(statuses, list):
+                statuses = [statuses]
+            attempted += len(batch)
+            deleted += sum(1 for status in statuses if status.ok())
+        return DeleteStats(
+            attempted=attempted,
+            deleted=deleted,
+            failed=attempted - deleted,
         )
 
     def flush_optimize_close(self) -> None:
@@ -223,10 +274,10 @@ def zvec_doc_from_record(record: ZvecRecord) -> Doc:
     )
 
 
-def _batches(records: Iterable[ZvecRecord], batch_size: int) -> Iterable[list[ZvecRecord]]:
-    batch: list[ZvecRecord] = []
-    for record in records:
-        batch.append(record)
+def _batches(items: Iterable[Any], batch_size: int) -> Iterable[list[Any]]:
+    batch: list[Any] = []
+    for item in items:
+        batch.append(item)
         if len(batch) == batch_size:
             yield batch
             batch = []

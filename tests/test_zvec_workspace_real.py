@@ -90,3 +90,45 @@ def test_real_zvec_workspace_adapter_canonical_smoke(tmp_path: Path) -> None:
 
     assert smoke == module.SmokeResult(checked=2, passed=2, failures=[])
     workspace.flush_optimize_close()
+
+
+def _workspace_ab(tmp_path: Path, name: str):
+    module = _real_zvec_workspace_module()
+    workspace = module.create_workspace_collection(tmp_path / name, embedding_dim=3)
+    records = [
+        _record(module, record_type="chunk", record_id="a", content="content a", embedding=[1.0, 0.0, 0.0]),
+        _record(module, record_type="chunk", record_id="b", content="content b", embedding=[0.0, 1.0, 0.0]),
+    ]
+    return module, workspace, records
+
+
+def test_real_zvec_upsert_updates_existing_doc_and_smoke_passes(tmp_path: Path) -> None:
+    module, workspace, (rec_a, rec_b) = _workspace_ab(tmp_path, "zvec-upsert")
+    stats = workspace.bulk_insert([rec_a, rec_b])
+    assert stats.failed == 0
+
+    updated = _record(module, record_type="chunk", record_id="a", content="content a2", embedding=[0.0, 0.0, 1.0])
+    up = workspace.upsert_records([updated])
+    assert (up.attempted, up.inserted, up.failed) == (1, 1, 0)
+
+    doc_id = module.zvec_doc_id("chunk", "a")
+    fetched = workspace.fetch([doc_id])
+    assert fetched[doc_id].fields["content"] == "content a2"
+    assert workspace.stats()["doc_count"] == 2
+    smoke = workspace.self_nearest_smoke([doc_id, module.zvec_doc_id("chunk", "b")])
+    assert smoke.failures == []
+    workspace.flush_optimize_close()
+
+
+def test_real_zvec_delete_docs_removes_from_fetch_and_query(tmp_path: Path) -> None:
+    module, workspace, records = _workspace_ab(tmp_path, "zvec-delete")
+    workspace.bulk_insert(records)
+    doc_id = module.zvec_doc_id("chunk", "a")
+    stats = workspace.delete_docs([doc_id])
+    assert (stats.attempted, stats.deleted, stats.failed) == (1, 1, 0)
+    assert workspace.fetch([doc_id]).get(doc_id) is None
+    hits = workspace.query_vector([1.0, 0.0, 0.0], top_k=5, filter_expr=None)
+    assert all(hit.fields["record_id"] != "a" for hit in hits)
+    empty = workspace.delete_docs([])
+    assert (empty.attempted, empty.deleted, empty.failed) == (0, 0, 0)
+    workspace.flush_optimize_close()

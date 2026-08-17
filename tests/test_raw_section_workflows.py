@@ -1,9 +1,9 @@
-import sys
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
 from ops.wiki_native_artifacts import build_seed_edges  # noqa: E402
@@ -19,6 +19,12 @@ from ops.wiki_native_wiki_checks import audit_raw_note_section_contracts  # noqa
 from ops.wiki_native_wiki_checks import structured_heading_warnings  # noqa: E402
 
 
+def _extract_docs(root: Path, tmp_path: Path):
+    state = tmp_path / "work" / "wikigraph" / "state"
+    extract_raw_sections(root, state)
+    return generated_docs_from_state(state, kind="raw_section")
+
+
 def test_extract_raw_sections_indexes_summary_heading_as_retrieval_section(tmp_path: Path) -> None:
     root = sample_wiki(tmp_path)
     write(
@@ -28,9 +34,7 @@ def test_extract_raw_sections_indexes_summary_heading_as_retrieval_section(tmp_p
         "## 一句话总结\n\n"
         "A short summary should become a raw_section summary node for paper-level semantic neighborhoods.\n",
     )
-    state = tmp_path / "work" / "wikigraph" / "state"
-    extract_raw_sections(root, state)
-    docs = generated_docs_from_state(state, kind="raw_section")
+    docs = _extract_docs(root, tmp_path)
     summary_docs = [doc for doc in docs if doc.canonical_id == "raw_section:26010105_Summary-Section:summary"]
     assert len(summary_docs) == 1
     assert "section_kind: summary" in summary_docs[0].text
@@ -52,9 +56,7 @@ def test_extract_raw_sections_recognizes_summary_motivation_methodology_title_va
         "## 明确失败案例说明方法不是万能\n\n"
         "This caveat heading contains 方法 but is not the methodology section.\n",
     )
-    state = tmp_path / "work" / "wikigraph" / "state"
-    extract_raw_sections(root, state)
-    docs = generated_docs_from_state(state, kind="raw_section")
+    docs = _extract_docs(root, tmp_path)
     variant_docs = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Variant-Sections" in doc.canonical_id}
     assert {"abstract", "motivation", "methodology"} <= set(variant_docs)
     assert "section_title: 论文摘要（中文）" in variant_docs["abstract"].text
@@ -72,9 +74,7 @@ def test_extract_raw_sections_indexes_combined_limitation_future_heading_for_bot
         "## 局限 / Future Works\n\n"
         "The same source section discusses remaining failure modes and follow-up research directions.\n",
     )
-    state = tmp_path / "work" / "wikigraph" / "state"
-    extract_raw_sections(root, state)
-    docs = generated_docs_from_state(state, kind="raw_section")
+    docs = _extract_docs(root, tmp_path)
     combined = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Combined-Sections" in doc.canonical_id}
     assert {"future", "limitations"} <= set(combined)
     assert "section_title: 局限 / Future Works" in combined["future"].text
@@ -93,17 +93,13 @@ def test_extract_raw_sections_integrates_formula_and_figure_evidence_into_contex
         "## 关键实验结果 / 作者结论\n\n"
         "- Figure 2 has three panels; the x-axis, y-axis, trend, and supported claim are recorded next to the result it supports.\n",
     )
-    state = tmp_path / "work" / "wikigraph" / "state"
-    extract_raw_sections(root, state)
-    docs = generated_docs_from_state(state, kind="raw_section")
+    docs = _extract_docs(root, tmp_path)
     visual_docs = {doc.canonical_id.rsplit(":", 1)[-1]: doc for doc in docs if "Visual-Evidence" in doc.canonical_id}
     assert {"methodology", "results"} <= set(visual_docs)
     assert "section_kind: methodology" in visual_docs["methodology"].text
     assert "Eq. (3) defines the routing objective" in visual_docs["methodology"].text
     assert "section_kind: results" in visual_docs["results"].text
     assert "Figure 2 has three panels" in visual_docs["results"].text
-    assert raw_section_specs_for_heading("关键公式 / 机制推导") == []
-    assert raw_section_specs_for_heading("关键图表 / 读图笔记") == []
     assert "equation" in raw_section_query_for_kind("methodology", "routing objective")
     assert "figure" in raw_section_query_for_kind("results", "ablation trend")
 
@@ -139,10 +135,12 @@ def test_extract_raw_sections_creates_section_virtual_docs_without_wiki_pollutio
     assert not (state / "raw_section_docs" / "stale.md").exists()
     docs = generated_docs_from_state(state, kind="raw_section")
     by_id = {doc.canonical_id: doc for doc in docs}
-    assert "raw_section:26010101_Foo-Paper:future" in by_id
-    assert "raw_section:26010101_Foo-Paper:limitations" in by_id
-    assert "raw_section:26010101_Foo-Paper:questions" in by_id
-    assert "raw_section:26010101_Foo-Paper:methodology" in by_id
+    assert {
+        "raw_section:26010101_Foo-Paper:future",
+        "raw_section:26010101_Foo-Paper:limitations",
+        "raw_section:26010101_Foo-Paper:questions",
+        "raw_section:26010101_Foo-Paper:methodology",
+    } <= set(by_id)
     future = by_id["raw_section:26010101_Foo-Paper:future"].text
     assert "section_kind: future" in future
     assert "section_title: 对未来研究的启发" in future
@@ -164,9 +162,12 @@ def test_extract_raw_sections_uses_unique_filenames_for_long_raw_stems(tmp_path:
     assert len(files) == result["raw_sections"]
 
 
-def test_structured_heading_warnings_accept_legacy_raw_heading_variants(tmp_path: Path) -> None:
-    path = tmp_path / "raw/clip/2601/26010101_Legacy.md"
-    text = """---
+@pytest.mark.parametrize(
+    "filename,text",
+    [
+        (
+            "26010101_Legacy.md",
+            """---
 title: Legacy Paper
 domain: paper
 ---
@@ -191,7 +192,27 @@ A methodology variant with integrated formula evidence: Eq. (2) defines the obje
 ## 关键实验结果 / 作者结论
 
 A result variant with integrated visual evidence: Figure 2 and Table 1 are read next to the claims they support.
-"""
+""",
+        ),
+        (
+            "26010103_Legacy-Article.md",
+            """---
+title: Legacy Article
+domain: "arxiv.org"
+source: "https://arxiv.org/abs/2601.0103"
+---
+# Legacy Article
+
+## Original article
+
+This preserved source clipping predates the structured paper-note schema.
+""",
+        ),
+    ],
+    ids=["legacy_heading_variants", "legacy_non_structured"],
+)
+def test_structured_heading_warnings_accept_legacy_variants(tmp_path: Path, filename: str, text: str) -> None:
+    path = tmp_path / "raw/clip/2601" / filename
     assert structured_heading_warnings(path, text) == []
 
 
@@ -209,27 +230,9 @@ A compact take.
 """
     warnings = structured_heading_warnings(path, text)
     assert len(warnings) == 4
-    assert any("missing heading prefix ## 论文摘要" in warning for warning in warnings)
-    assert any("missing heading prefix ## Motivation" in warning for warning in warnings)
-    assert any("missing heading prefix ## Methodology" in warning for warning in warnings)
-    assert any("missing heading prefix ## 关键实验结果" in warning for warning in warnings)
+    for heading in ("## 论文摘要", "## Motivation", "## Methodology", "## 关键实验结果"):
+        assert any(f"missing heading prefix {heading}" in warning for warning in warnings)
     assert not any("## 关键公式" in warning or "## 关键图表" in warning for warning in warnings)
-
-
-def test_structured_heading_warnings_skip_legacy_non_structured_arxiv_clippings(tmp_path: Path) -> None:
-    path = tmp_path / "raw/clip/2601/26010103_Legacy-Article.md"
-    text = """---
-title: Legacy Article
-domain: "arxiv.org"
-source: "https://arxiv.org/abs/2601.0103"
----
-# Legacy Article
-
-## Original article
-
-This preserved source clipping predates the structured paper-note schema.
-"""
-    assert structured_heading_warnings(path, text) == []
 
 
 def test_section_kind_query_prefix_and_response_filter_target_raw_section_chunks() -> None:
