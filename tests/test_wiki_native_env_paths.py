@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,10 +12,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / "ops"
-SCRIPTS = OPS
-sys.path.insert(0, str(ROOT))
+
+OPERATOR_LOCAL_PATH_RE = re.compile(r"(?:/home/|/Users/|/mnt/[a-zA-Z]/|[A-Za-z]:\\)")
 
 
+@pytest.mark.subprocess
 def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.update(
@@ -50,22 +52,19 @@ def test_native_cli_defaults_are_portable_and_env_backed(tmp_path: Path) -> None
 
 def test_active_sources_do_not_embed_operator_local_paths() -> None:
     scanned = [
-        SCRIPTS / "wiki_native_cli.py",
-        SCRIPTS / "batch_native_refresh.py",
-        SCRIPTS / "raw_fast_closeout.py",
-        SCRIPTS / "raw_fast_evidence_bundle.py",
-        SCRIPTS / "batch_wiki_integration.py",
-        SCRIPTS / "wiki_search.py",
+        OPS / "wiki_native_cli.py",
+        OPS / "batch_native_refresh.py",
+        OPS / "raw_fast_closeout.py",
+        OPS / "raw_fast_evidence_bundle.py",
+        OPS / "batch_wiki_integration.py",
+        OPS / "wiki_search.py",
     ]
-    private_clip_root = Path("/mnt") / "d" / "data" / ("Clip" + "pings")
-    patterns = [str(Path.home()), str(Path.home() / ".local" / "share" / "uv" / "tools"), str(private_clip_root)]
 
     offenders = []
     for path in scanned:
         text = path.read_text(encoding="utf-8")
-        for pattern in patterns:
-            if pattern in text:
-                offenders.append(f"{path.relative_to(ROOT)} contains {pattern}")
+        for match in OPERATOR_LOCAL_PATH_RE.finditer(text):
+            offenders.append(f"{path.relative_to(ROOT)} contains {match.group(0)}")
 
     assert offenders == []
 

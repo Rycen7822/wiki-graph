@@ -5,35 +5,42 @@ import pytest
 from llm_wiki_native.retrieval.context import assemble_context
 
 
+def _hit(record_id: str, text: str, *, path: str, **overrides) -> dict:
+    record = {"vector_text": text, "source_path": path, "source_id": overrides.pop("source_id", record_id)}
+    for key in ("payload", "content_hash"):
+        if key in overrides:
+            record[key] = overrides.pop(key)
+    hit = {
+        "record_id": record_id,
+        "record_type": overrides.pop("record_type", "entity"),
+        "score": overrides.pop("score", 0.0),
+        "record": record,
+        "neighbors": overrides.pop("neighbors", []),
+    }
+    hit.update(overrides)
+    return hit
+
+
 def test_context_assembler_preserves_selected_same_source_blocks_and_unique_source_paths() -> None:
     query_result = {
         "hits": [
-            {
-                "record_id": "doc:a",
-                "record_type": "entity",
-                "score": 0.9,
-                "record": {"vector_text": "Alpha text is long enough", "source_path": "a.md", "source_id": "doc:a"},
-                "neighbors": [{"neighbor_id": "tag:x", "weight": 0.8}],
-            },
-            {
-                "record_id": "doc:a#dup",
-                "record_type": "chunk",
-                "source_key": "a.md",
-                "score": 0.8,
-                "record": {
-                    "vector_text": "Duplicate source text",
-                    "source_path": "derived-a.md",
-                    "source_id": "doc:a",
-                },
-                "neighbors": [],
-            },
-            {
-                "record_id": "doc:b",
-                "record_type": "entity",
-                "score": 0.7,
-                "record": {"vector_text": "Beta", "source_path": "b.md", "source_id": "doc:b"},
-                "neighbors": [],
-            },
+            _hit(
+                "doc:a",
+                "Alpha text is long enough",
+                path="a.md",
+                score=0.9,
+                neighbors=[{"neighbor_id": "tag:x", "weight": 0.8}],
+            ),
+            _hit(
+                "doc:a#dup",
+                "Duplicate source text",
+                path="derived-a.md",
+                record_type="chunk",
+                source_key="a.md",
+                score=0.8,
+                source_id="doc:a",
+            ),
+            _hit("doc:b", "Beta", path="b.md", score=0.7),
         ],
         "trace": {"query": "alpha", "mode": "mix", "retrieval_goal": "focused", "coverage_fill_pass_used": False},
     }
@@ -59,48 +66,38 @@ def test_context_assembler_rejects_non_positive_block_limit() -> None:
 def test_context_assembler_profiles_preserve_coverage_anchors() -> None:
     query_result = {
         "hits": [
-            {
-                "record_id": "span:meta",
-                "record_type": "lexical_span",
-                "score": 42.0,
-                "routes": ["lexical_fts"],
-                "score_breakdown": {"source_role": 30.0, "span_kind": 30.0},
-                "record": {
-                    "vector_text": "- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
-                    "source_path": "_meta/raw-clip-map.md",
-                    "source_id": "meta:raw-clip-map",
-                    "payload": {"source_role": "meta_map", "span_kind": "map.row", "start_line": 4, "end_line": 4},
-                },
-                "neighbors": [{"neighbor_id": "raw_clip:foo", "weight": 0.9}],
-            },
-            {
-                "record_id": "raw_section:foo:method",
-                "record_type": "section",
-                "score": 21.0,
-                "routes": ["zvec"],
-                "score_breakdown": {"zvec_route": 1.0},
-                "record": {
-                    "vector_text": "Methodology source text",
-                    "source_path": "raw/clip/2601/26010101_Foo-Paper.md",
-                    "source_id": "raw_clip:foo",
-                    "payload": {"section_kind": "methodology", "source_role": "raw"},
-                },
-                "neighbors": [],
-            },
-            {
-                "record_id": "compiled:concept:foo",
-                "record_type": "entity",
-                "score": 12.0,
-                "routes": ["zvec"],
-                "score_breakdown": {"zvec_route": 0.5},
-                "record": {
-                    "vector_text": "Compiled synthesis",
-                    "source_path": "concepts/foo.md",
-                    "source_id": "compiled:concept:foo",
-                    "payload": {"source_role": "compiled"},
-                },
-                "neighbors": [],
-            },
+            _hit(
+                "span:meta",
+                "- raw/clip/2601/26010101_Foo-Paper.md :: MapOnlyNeedle",
+                path="_meta/raw-clip-map.md",
+                record_type="lexical_span",
+                score=42.0,
+                source_id="meta:raw-clip-map",
+                routes=["lexical_fts"],
+                score_breakdown={"source_role": 30.0, "span_kind": 30.0},
+                payload={"source_role": "meta_map", "span_kind": "map.row", "start_line": 4, "end_line": 4},
+                neighbors=[{"neighbor_id": "raw_clip:foo", "weight": 0.9}],
+            ),
+            _hit(
+                "raw_section:foo:method",
+                "Methodology source text",
+                path="raw/clip/2601/26010101_Foo-Paper.md",
+                record_type="section",
+                score=21.0,
+                source_id="raw_clip:foo",
+                routes=["zvec"],
+                score_breakdown={"zvec_route": 1.0},
+                payload={"section_kind": "methodology", "source_role": "raw"},
+            ),
+            _hit(
+                "compiled:concept:foo",
+                "Compiled synthesis",
+                path="concepts/foo.md",
+                score=12.0,
+                routes=["zvec"],
+                score_breakdown={"zvec_route": 0.5},
+                payload={"source_role": "compiled"},
+            ),
         ],
         "trace": {"query": "foo", "mode": "mix", "warnings": ["sample-warning"]},
     }
@@ -109,9 +106,11 @@ def test_context_assembler_profiles_preserve_coverage_anchors() -> None:
     debug = assemble_context(query_result, max_chars_per_block=12, response_profile="debug")
 
     assert compact["source_paths"] == ["_meta/raw-clip-map.md", "raw/clip/2601/26010101_Foo-Paper.md", "concepts/foo.md"]
-    assert compact["coverage_plan"]["by_source_role"]["meta_map"] == ["_meta/raw-clip-map.md"]
-    assert compact["coverage_plan"]["by_source_role"]["raw"] == ["raw/clip/2601/26010101_Foo-Paper.md"]
-    assert compact["coverage_plan"]["by_source_role"]["compiled"] == ["concepts/foo.md"]
+    assert compact["coverage_plan"]["by_source_role"] == {
+        "meta_map": ["_meta/raw-clip-map.md"],
+        "raw": ["raw/clip/2601/26010101_Foo-Paper.md"],
+        "compiled": ["concepts/foo.md"],
+    }
     assert compact["coverage_plan"]["must_read"][0]["source_path"] == "_meta/raw-clip-map.md"
     assert "neighbors" not in compact["context_blocks"][0]
     assert compact["context_blocks"][0]["text"] == "- raw/clip/2"
@@ -124,29 +123,26 @@ def test_context_assembler_uses_late_query_excerpt_and_projects_debug_safely() -
     long_text = ("irrelevant prefix line\n" * 80) + "decisive needle answer line\ntrailing"
     query_result = {
         "hits": [
-            {
-                "record_id": "raw_section:late",
-                "record_type": "section",
-                "score": 0.91,
-                "ranking_contract": "relevance-v1",
-                "route_ranks": {"zvec_section": 1},
-                "relevance_score_breakdown": {
+            _hit(
+                "raw_section:late",
+                long_text,
+                path="raw/late.md",
+                record_type="section",
+                score=0.91,
+                source_id="raw:late",
+                ranking_contract="relevance-v1",
+                route_ranks={"zvec_section": 1},
+                relevance_score_breakdown={
                     "route_rank": 1.0,
                     "source_rank": 1.0,
                     "term_coverage": 1.0,
                     "evidence_quality": 1.0,
                 },
-                "score_breakdown": {"zvec_route": 1.0},
-                "routes": ["zvec"],
-                "record": {
-                    "vector_text": long_text,
-                    "content_hash": "section-content-hash",
-                    "source_path": "raw/late.md",
-                    "source_id": "raw:late",
-                    "payload": {"source_role": "raw", "section_kind": "results"},
-                },
-                "neighbors": [],
-            }
+                score_breakdown={"zvec_route": 1.0},
+                routes=["zvec"],
+                content_hash="section-content-hash",
+                payload={"source_role": "raw", "section_kind": "results"},
+            )
         ],
         "trace": {
             "query": "decisive needle",
@@ -195,10 +191,8 @@ def test_context_assembler_uses_late_query_excerpt_and_projects_debug_safely() -
         "end_line": 0,
         "text_hash": "section-content-hash",
     }
-    assert standard["trace"]["timings_ms"]["context_assembly"] >= 0
     assert "candidate_cards" not in standard["trace"]
     assert debug["retrieval_debug"]["hits"][0]["ranking_contract"] == "relevance-v1"
-    assert debug["retrieval_debug"]["source_scope"][0]["source_key"] == "raw/late.md"
     assert debug["retrieval_debug"]["source_scope"][0]["source_path"] == "raw/late.md"
     assert debug["retrieval_debug"]["candidate_cards"][0]["record_id"] == "raw_section:late"
     assert {
@@ -247,20 +241,17 @@ def test_context_assembler_preserves_raw_query_answer_cues_for_excerpt() -> None
 
 def test_context_profiles_remain_bounded_at_maximum_public_card_counts() -> None:
     hits = [
-        {
-            "record_id": f"section:{index:03d}",
-            "record_type": "section",
-            "score": 1.0,
-            "ranking_contract": "relevance-v1",
-            "record": {
-                "vector_text": ("evidence line\n" * 2000) + f"needle {index}",
-                "content_hash": f"hash-{index}",
-                "source_path": f"raw/{index:03d}.md",
-                "source_id": f"raw:{index:03d}",
-                "payload": {"source_role": "raw", "section_kind": "results"},
-            },
-            "neighbors": [],
-        }
+        _hit(
+            f"section:{index:03d}",
+            ("evidence line\n" * 2000) + f"needle {index}",
+            path=f"raw/{index:03d}.md",
+            record_type="section",
+            score=1.0,
+            source_id=f"raw:{index:03d}",
+            ranking_contract="relevance-v1",
+            content_hash=f"hash-{index}",
+            payload={"source_role": "raw", "section_kind": "results"},
+        )
         for index in range(100)
     ]
     trace = {

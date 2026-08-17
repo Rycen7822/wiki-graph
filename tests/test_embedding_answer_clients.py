@@ -9,6 +9,21 @@ from llm_wiki_native.answer import NativeAnswerConfig, NativeAnswerGenerator
 from llm_wiki_native.embedding import NativeEmbedding, NativeEmbeddingConfig
 
 
+def _embed_cfg(**over) -> NativeEmbeddingConfig:
+    values = {"base_url": "https://embedding.local/v1", "model": "embed-small", "api_key": "secret"}
+    values.update(over)
+    return NativeEmbeddingConfig(**values)
+
+
+def _install_urlopen(monkeypatch, payload: dict, calls: list | None = None):
+    def fake(request, timeout):
+        if calls is not None:
+            calls.append({"request": request, "timeout": timeout})
+        return FakeHTTPResponse(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+
+
 class FakeHTTPResponse:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
@@ -26,19 +41,8 @@ class FakeHTTPResponse:
 def test_native_embedding_posts_openai_compatible_request(monkeypatch) -> None:
     calls = []
 
-    def fake_urlopen(request, timeout):
-        calls.append({"request": request, "timeout": timeout})
-        return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    provider = NativeEmbedding(
-        NativeEmbeddingConfig(
-            base_url="https://embedding.local/v1",
-            model="embed-small",
-            api_key="secret",
-            timeout_seconds=12.5,
-        )
-    )
+    _install_urlopen(monkeypatch, {"data": [{"embedding": [0.25, 0.75]}]}, calls)
+    provider = NativeEmbedding(_embed_cfg(timeout_seconds=12.5))
 
     assert provider.embed_query("alpha") == [0.25, 0.75]
 
@@ -54,19 +58,8 @@ def test_native_embedding_cache_modes(monkeypatch) -> None:
     for cache_size, mutate_first, expected_calls in [(4, True, 1), (0, False, 2)]:
         calls = []
 
-        def fake_urlopen(request, timeout):
-            calls.append({"request": request, "timeout": timeout})
-            return FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]})
-
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-        provider = NativeEmbedding(
-            NativeEmbeddingConfig(
-                base_url="https://embedding.local/v1",
-                model="embed-small",
-                api_key="secret",
-                cache_size=cache_size,
-            )
-        )
+        _install_urlopen(monkeypatch, {"data": [{"embedding": [0.25, 0.75]}]}, calls)
+        provider = NativeEmbedding(_embed_cfg(cache_size=cache_size))
 
         first = provider.embed_query("alpha")
         if mutate_first:
@@ -76,18 +69,21 @@ def test_native_embedding_cache_modes(monkeypatch) -> None:
         assert len(calls) == expected_calls
 
 
-def test_native_embedding_config_from_env_requires_endpoint_model_and_key() -> None:
+@pytest.mark.parametrize(
+    "config_cls,prefix,base_url,model",
+    [
+        (NativeEmbeddingConfig, "LLM_WIKI_NATIVE_EMBEDDING", "https://embedding.local/v1", "embed-small"),
+        (NativeAnswerConfig, "LLM_WIKI_NATIVE_ANSWER", "https://chat.local/v1", "chat-small"),
+    ],
+    ids=["embedding", "answer"],
+)
+def test_native_config_from_env_requires_endpoint_model_and_key(config_cls, prefix: str, base_url: str, model: str) -> None:
     with pytest.raises(ValueError, match="BASE_URL"):
-        NativeEmbeddingConfig.from_env({})
+        config_cls.from_env({})
     with pytest.raises(ValueError, match="MODEL"):
-        NativeEmbeddingConfig.from_env({"LLM_WIKI_NATIVE_EMBEDDING_BASE_URL": "https://embedding.local/v1"})
+        config_cls.from_env({f"{prefix}_BASE_URL": base_url})
     with pytest.raises(ValueError, match="API_KEY"):
-        NativeEmbeddingConfig.from_env(
-            {
-                "LLM_WIKI_NATIVE_EMBEDDING_BASE_URL": "https://embedding.local/v1",
-                "LLM_WIKI_NATIVE_EMBEDDING_MODEL": "embed-small",
-            }
-        )
+        config_cls.from_env({f"{prefix}_BASE_URL": base_url, f"{prefix}_MODEL": model})
 
 
 def test_native_embedding_config_from_env_aliases_and_native_precedence() -> None:
@@ -132,37 +128,16 @@ def test_native_embedding_config_from_env_aliases_and_native_precedence() -> Non
 
 
 def test_native_embedding_validates_configured_dimension(monkeypatch) -> None:
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda request, timeout: FakeHTTPResponse({"data": [{"embedding": [0.25, 0.75]}]}),
-    )
-    provider = NativeEmbedding(
-        NativeEmbeddingConfig(
-            base_url="https://embedding.local/v1",
-            model="embed-small",
-            api_key="secret",
-            embedding_dim=3,
-        )
-    )
+    _install_urlopen(monkeypatch, {"data": [{"embedding": [0.25, 0.75]}]})
+    provider = NativeEmbedding(_embed_cfg(embedding_dim=3))
 
     with pytest.raises(ValueError, match="dimension"):
         provider.embed_query("alpha")
 
 
 def test_native_embedding_rejects_bad_embedding_response(monkeypatch) -> None:
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda request, timeout: FakeHTTPResponse({"data": [{"embedding": [float("nan")]}]}),
-    )
-    provider = NativeEmbedding(
-        NativeEmbeddingConfig(
-            base_url="https://embedding.local/v1",
-            model="embed-small",
-            api_key="secret",
-        )
-    )
+    _install_urlopen(monkeypatch, {"data": [{"embedding": [float("nan")]}]})
+    provider = NativeEmbedding(_embed_cfg())
 
     with pytest.raises(ValueError, match="finite"):
         provider.embed_query("alpha")
@@ -171,11 +146,7 @@ def test_native_embedding_rejects_bad_embedding_response(monkeypatch) -> None:
 def test_native_answer_generator_posts_openai_compatible_chat_request(monkeypatch) -> None:
     calls = []
 
-    def fake_urlopen(request, timeout):
-        calls.append({"request": request, "timeout": timeout})
-        return FakeHTTPResponse({"choices": [{"message": {"content": "Alpha answer"}}]})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_urlopen(monkeypatch, {"choices": [{"message": {"content": "Alpha answer"}}]}, calls)
     generator = NativeAnswerGenerator(
         NativeAnswerConfig(
             base_url="https://chat.local/v1",
@@ -203,26 +174,8 @@ def test_native_answer_generator_posts_openai_compatible_chat_request(monkeypatc
     assert answer == {"response": "Alpha answer", "references": ["alpha.md"]}
 
 
-def test_native_answer_config_from_env_requires_endpoint_model_and_key() -> None:
-    with pytest.raises(ValueError, match="BASE_URL"):
-        NativeAnswerConfig.from_env({})
-    with pytest.raises(ValueError, match="MODEL"):
-        NativeAnswerConfig.from_env({"LLM_WIKI_NATIVE_ANSWER_BASE_URL": "https://chat.local/v1"})
-    with pytest.raises(ValueError, match="API_KEY"):
-        NativeAnswerConfig.from_env(
-            {
-                "LLM_WIKI_NATIVE_ANSWER_BASE_URL": "https://chat.local/v1",
-                "LLM_WIKI_NATIVE_ANSWER_MODEL": "chat-small",
-            }
-        )
-
-
 def test_native_answer_generator_rejects_bad_chat_response(monkeypatch) -> None:
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda request, timeout: FakeHTTPResponse({"choices": []}),
-    )
+    _install_urlopen(monkeypatch, {"choices": []})
     generator = NativeAnswerGenerator(
         NativeAnswerConfig(
             base_url="https://chat.local/v1",

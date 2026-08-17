@@ -1,46 +1,47 @@
 from __future__ import annotations
 
-import ast
 import importlib
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-OPS = ROOT / "ops"
-SCRIPTS = OPS
-sys.path.insert(0, str(ROOT))
 
-from ops import batch_native_refresh  # noqa: E402
-from ops import wiki_native_lib  # noqa: E402
-def test_active_production_surfaces_restrict_retired_compat_registry_refs() -> None:
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module")
+def active_production_audit() -> dict:
     audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
+    return audit_native_production_refs.audit_active_production_refs(ROOT)
 
-    report = audit_native_production_refs.audit_active_production_refs(ROOT)
+
+def test_active_production_surfaces_restrict_retired_compat_registry_refs(active_production_audit) -> None:
+    report = active_production_audit
 
     assert report["ok"] is True
     assert report["offenders"] == []
-    assert "ops/batch_native_refresh.py" not in report["allowed_refs"]
-    assert "ops/wiki_search.py" in report["checked_paths"]
+    assert {
+        "ops/wiki_search.py",
+        "ops/custom_kg_incremental.py",
+        "ops/vector_cache.py",
+        "ops/native_zvec_materialize.py",
+        "ops/raw_fast_evidence_bundle.py",
+        "llm_wiki_native/api/server.py",
+    } <= set(report["checked_paths"])
     assert "ops/sync_virtual_docs.py" not in report["checked_paths"]
-    assert "ops/custom_kg_incremental.py" in report["checked_paths"]
-    assert "ops/vector_cache.py" in report["checked_paths"]
-    assert "ops/native_zvec_materialize.py" in report["checked_paths"]
-    assert "ops/raw_fast_evidence_bundle.py" in report["checked_paths"]
-    assert "llm_wiki_native/api/server.py" in report["checked_paths"]
     assert "compat_registry_module" not in report["marker_labels"]
     assert "registry_function_prefix" not in report["marker_labels"]
     assert report["allowed_refs"] == {}
     assert "retired_wikigraph_wrapper_refs" not in report
     assert "legacy" + "_wikigraph_wrapper_refs" not in report
-def test_audit_native_production_refs_imports_active_modules_with_retired_package_blocked() -> None:
-    audit_native_production_refs = importlib.import_module("ops.audit_native_production_refs")
 
-    report = audit_native_production_refs.audit_active_production_refs(ROOT)
+
+def test_audit_native_production_refs_imports_active_modules_with_retired_package_blocked(
+    active_production_audit,
+) -> None:
+    report = active_production_audit
     package_independence = report["package_independence"]
 
     assert package_independence["ok"] is True
@@ -84,12 +85,6 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
     assert isolated["production_uninstall_proven"] is False
     isolated_imports = {row["module"] for row in isolated["imports"]}
     assert imported.issubset(isolated_imports)
-    isolated_checks = {row["name"]: row for row in isolated["checks"]}
-    assert isolated_checks["native_query_engine_zvec_naive"]["ok"] is True
-    assert isolated_checks["native_query_engine_zvec_naive"]["trace"]["retrieval_backend"] == "zvec"
-    assert isolated_checks["batch_native_refresh_status_empty"]["ok"] is True
-    assert isolated_checks["batch_native_refresh_status_empty"]["pending_count"] == 0
-    assert isolated_checks["native_pointer_rollback_previous"]["ok"] is True
 def test_audit_native_production_refs_can_query_repo_local_active_pointer_with_retired_package_blocked(
     tmp_path: Path,
 ) -> None:

@@ -7,6 +7,10 @@ from llm_wiki_native.contracts import SOURCE_KIND_CODES
 from llm_wiki_native.storage.zvec_records import ZvecRecord
 
 
+def _slim_chunk(**extra):
+    return {"content": "Alpha chunk", "content_hash": "chunk-hash", "file_path": "a.md", **extra}
+
+
 def test_materialize_zvec_records_from_manifest_and_sections() -> None:
     manifest = {
         "chunks": {
@@ -89,15 +93,7 @@ def test_materialize_zvec_records_from_manifest_and_sections() -> None:
 
 
 def test_materialize_zvec_records_fails_closed_on_missing_vectors() -> None:
-    manifest = {
-        "chunks": {
-            "chunk-a": {
-                "content": "Alpha chunk",
-                "content_hash": "chunk-hash",
-                "file_path": "a.md",
-            }
-        }
-    }
+    manifest = {"chunks": {"chunk-a": _slim_chunk()}}
 
     with pytest.raises(MissingNativeVectorsError) as exc:
         materialize_zvec_records(
@@ -121,19 +117,9 @@ def test_materialize_zvec_records_fails_closed_on_missing_vectors() -> None:
 
 def test_missing_vector_report_lists_manifest_and_section_gaps() -> None:
     manifest = {
-        "chunks": {
-            "chunk-a": {
-                "content": "Alpha chunk",
-                "content_hash": "chunk-hash",
-                "file_path": "a.md",
-            }
-        },
+        "chunks": {"chunk-a": _slim_chunk()},
         "entities": {
-            "doc:a": {
-                "content": "doc:a\nAlpha",
-                "vector_hash": "entity-vector",
-                "file_path": "a.md",
-            }
+            "doc:a": {"content": "doc:a\nAlpha", "vector_hash": "entity-vector", "file_path": "a.md"},
         },
     }
     sections = [

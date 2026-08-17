@@ -5,55 +5,41 @@ import pytest
 from ops.vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
 
 
-def test_vector_cache_resolves_matching_embedding_contract(tmp_path) -> None:
+def _put(cache, vector_hash="hash-a", **overrides):
+    payload = {
+        "record_type": "entity",
+        "record_id": "doc:a",
+        "embedding_model": "embed-a",
+        "embedding_dim": 3,
+        "embedding_params_version": "v1",
+        "vector": [1.0, 2.0, 3.0],
+    }
+    payload.update(overrides)
+    cache.put(vector_hash, **payload)
+
+
+@pytest.mark.parametrize("mismatch", [False, True], ids=["matching_contract", "contract_mismatch"])
+def test_vector_cache_resolve_respects_embedding_contract(tmp_path, mismatch: bool) -> None:
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    cache.put(
-        "hash-a",
-        record_type="entity",
-        record_id="doc:a",
-        embedding_model="embed-a",
-        embedding_dim=3,
-        embedding_params_version="v1",
-        vector=[1.0, 2.0, 3.0],
-    )
+    _put(cache)
+
+    if mismatch:
+        assert cache.resolve("hash-a", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1") is None
+        assert cache.resolve("hash-a", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1") is None
+        assert cache.resolve("hash-a", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2") is None
+        return
 
     cached = cache.resolve("hash-a", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v1")
-
     assert cached is not None
     assert cached["record_type"] == "entity"
     assert cached["record_id"] == "doc:a"
     assert cached["vector"] == pytest.approx([1.0, 2.0, 3.0])
 
 
-def test_vector_cache_misses_on_embedding_contract_mismatch(tmp_path) -> None:
-    cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    cache.put(
-        "hash-a",
-        record_type="entity",
-        record_id="doc:a",
-        embedding_model="embed-a",
-        embedding_dim=3,
-        embedding_params_version="v1",
-        vector=[1.0, 2.0, 3.0],
-    )
-
-    assert cache.resolve("hash-a", embedding_model="embed-b", embedding_dim=3, embedding_params_version="v1") is None
-    assert cache.resolve("hash-a", embedding_model="embed-a", embedding_dim=4, embedding_params_version="v1") is None
-    assert cache.resolve("hash-a", embedding_model="embed-a", embedding_dim=3, embedding_params_version="v2") is None
-
-
 def test_vector_cache_treats_checksum_corruption_as_miss(tmp_path) -> None:
     path = tmp_path / "vector_cache.sqlite"
     cache = VectorCache(path)
-    cache.put(
-        "hash-a",
-        record_type="entity",
-        record_id="doc:a",
-        embedding_model="embed-a",
-        embedding_dim=3,
-        embedding_params_version="v1",
-        vector=[1.0, 2.0, 3.0],
-    )
+    _put(cache)
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE vector_cache SET vector_blob = ? WHERE vector_hash = ?", (b"corrupt", "hash-a"))
 
@@ -64,28 +50,12 @@ def test_vector_cache_rejects_non_finite_vectors(tmp_path) -> None:
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
 
     with pytest.raises(ValueError, match="finite"):
-        cache.put(
-            "hash-a",
-            record_type="entity",
-            record_id="doc:a",
-            embedding_model="embed-a",
-            embedding_dim=1,
-            embedding_params_version="v1",
-            vector=[float("nan")],
-        )
+        _put(cache, embedding_dim=1, vector=[float("nan")])
 
 
 def test_manifest_vector_resolver_reports_hits_and_misses(tmp_path) -> None:
     cache = VectorCache(tmp_path / "vector_cache.sqlite")
-    cache.put(
-        "hash-hit",
-        record_type="entity",
-        record_id="cached-old-id",
-        embedding_model="embed-a",
-        embedding_dim=2,
-        embedding_params_version="v1",
-        vector=[0.25, 0.75],
-    )
+    _put(cache, "hash-hit", record_id="cached-old-id", embedding_dim=2, vector=[0.25, 0.75])
     manifest = {
         "chunks": {},
         "entities": {
@@ -135,15 +105,7 @@ def test_manifest_vector_resolver_uses_bulk_cache_lookup(tmp_path, monkeypatch) 
     manifest = {"chunks": {}, "entities": {}, "relationships": {}}
     for idx in range(12):
         key = f"chunk-{idx:02d}"
-        cache.put(
-            f"hash-{idx:02d}",
-            record_type="chunk",
-            record_id=key,
-            embedding_model="embed-a",
-            embedding_dim=2,
-            embedding_params_version="v1",
-            vector=[float(idx), float(idx + 1)],
-        )
+        _put(cache, f"hash-{idx:02d}", record_type="chunk", record_id=key, embedding_dim=2, vector=[float(idx), float(idx + 1)])
         manifest["chunks"][key] = {
             "record_type": "chunk",
             "record_id": key,

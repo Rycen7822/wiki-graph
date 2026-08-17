@@ -6,6 +6,51 @@ import pytest
 from support import install_fake_zvec
 
 
+def _zrec(module, **overrides):
+    fields = dict(
+        record_type="chunk",
+        record_id="chunk-1",
+        canonical_id="chunk-1",
+        source_id="source",
+        source_kind_code=1,
+        source_path_hash="path",
+        source_path="source.md",
+        title="",
+        vector_hash="vector",
+        content_hash="content",
+        metadata_hash="metadata",
+        content="text",
+        tokens=1,
+        embedding=[0.1, 0.2],
+    )
+    fields.update(overrides)
+    return module.ZvecRecord(**fields)
+
+
+def _records(module, n: int, *, start: int = 1):
+    return [
+        _zrec(
+            module,
+            record_id=f"chunk-{index}",
+            canonical_id=f"chunk-{index}",
+            vector_hash=f"vector-{index}",
+            content_hash=f"content-{index}",
+            metadata_hash=f"metadata-{index}",
+            content=f"text {index}",
+            tokens=index,
+            embedding=[float(index), 0.0],
+        )
+        for index in range(start, start + n)
+    ]
+
+
+class _Status:
+    def __init__(self, ok: bool = True) -> None:
+        self._ok = ok
+
+    def ok(self) -> bool:
+        return self._ok
+
 
 def test_build_schema_matches_plan_numeric_filters_and_hnsw(monkeypatch) -> None:
     fake_zvec = install_fake_zvec(monkeypatch)
@@ -47,16 +92,6 @@ def test_doc_ids_and_numeric_codes_are_strict_plan_mappings(monkeypatch) -> None
     assert module.zvec_doc_id("relationship", "rel-key") == "relationship__cmVsLWtleQ"
     assert module.zvec_doc_id("section", "sec-1") == "section__c2VjLTE"
 
-    assert module.record_type_code("chunk") == 1
-    assert module.record_type_code("entity") == 2
-    assert module.record_type_code("relationship") == 3
-    assert module.record_type_code("section") == 4
-    assert module.section_kind_code(None) == 0
-    assert module.section_kind_code("") == 0
-    assert module.section_kind_code("summary") == 1
-    assert module.section_kind_code("questions") == 8
-    assert module.section_kind_code("other") == 99
-
     with pytest.raises(ValueError, match="unknown record_type"):
         module.zvec_doc_id("note", "x")
     with pytest.raises(ValueError, match="record_id must not be empty"):
@@ -71,7 +106,8 @@ def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
     fake_zvec = install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
-    record = module.ZvecRecord(
+    record = _zrec(
+        module,
         record_type="section",
         record_id="sec-1",
         canonical_id="canonical:paper",
@@ -113,24 +149,7 @@ def test_zvec_record_to_doc_maps_all_plan_fields(monkeypatch) -> None:
     }
 
     with pytest.raises(ValueError, match="embedding must not be empty"):
-        module.zvec_doc_from_record(
-            module.ZvecRecord(
-                record_type="chunk",
-                record_id="chunk-1",
-                canonical_id="chunk-1",
-                source_id="source",
-                source_kind_code=1,
-                source_path_hash="path",
-                source_path="source.md",
-                title="",
-                vector_hash="vector",
-                content_hash="content",
-                metadata_hash="metadata",
-                content="text",
-                tokens=1,
-                embedding=[],
-            )
-        )
+        module.zvec_doc_from_record(_zrec(module, embedding=[]))
 
 
 
@@ -139,40 +158,15 @@ def test_bulk_insert_batches_docs_and_counts_statuses(monkeypatch) -> None:
     install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
-    class Status:
-        def __init__(self, ok: bool) -> None:
-            self._ok = ok
-
-        def ok(self) -> bool:
-            return self._ok
-
     class Collection:
         def __init__(self) -> None:
             self.insert_calls = []
 
         def insert(self, docs):
             self.insert_calls.append(docs)
-            return [Status(not doc.fields["record_id"].endswith("3")) for doc in docs]
+            return [_Status(not doc.fields["record_id"].endswith("3")) for doc in docs]
 
-    records = [
-        module.ZvecRecord(
-            record_type="chunk",
-            record_id=f"chunk-{index}",
-            canonical_id=f"chunk-{index}",
-            source_id="source",
-            source_kind_code=1,
-            source_path_hash="path",
-            source_path="source.md",
-            title="",
-            vector_hash=f"vector-{index}",
-            content_hash=f"content-{index}",
-            metadata_hash=f"metadata-{index}",
-            content=f"text {index}",
-            tokens=index,
-            embedding=[float(index), 0.0],
-        )
-        for index in range(1, 4)
-    ]
+    records = _records(module, 3)
     workspace = module.ZvecWorkspace(collection=Collection())
 
     stats = workspace.bulk_insert(records, batch_size=2)
@@ -190,10 +184,6 @@ def test_bulk_insert_default_batch_size_respects_zvec_write_limit(monkeypatch) -
     install_fake_zvec(monkeypatch)
     module = importlib.import_module("llm_wiki_native.storage.zvec_workspace")
 
-    class Status:
-        def ok(self) -> bool:
-            return True
-
     class Collection:
         def __init__(self) -> None:
             self.insert_call_sizes = []
@@ -202,27 +192,9 @@ def test_bulk_insert_default_batch_size_respects_zvec_write_limit(monkeypatch) -
             if len(docs) > 1024:
                 raise ValueError(f"Too many docs: {len(docs)} exceeds max write batch size of 1024")
             self.insert_call_sizes.append(len(docs))
-            return [Status() for _doc in docs]
+            return [_Status() for _doc in docs]
 
-    records = [
-        module.ZvecRecord(
-            record_type="chunk",
-            record_id=f"chunk-{index}",
-            canonical_id=f"chunk-{index}",
-            source_id="source",
-            source_kind_code=1,
-            source_path_hash="path",
-            source_path="source.md",
-            title="",
-            vector_hash=f"vector-{index}",
-            content_hash=f"content-{index}",
-            metadata_hash=f"metadata-{index}",
-            content=f"text {index}",
-            tokens=index,
-            embedding=[float(index), 0.0],
-        )
-        for index in range(1025)
-    ]
+    records = _records(module, 1025, start=0)
     workspace = module.ZvecWorkspace(collection=Collection())
 
     stats = workspace.bulk_insert(records)

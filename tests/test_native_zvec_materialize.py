@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from ops import native_zvec_materialize  # noqa: E402
-from support import write_json, write_jsonl, write_vector_cache  # noqa: E402
+from support import clear_embedding_env, dump_workspace_tables, materialize_argv, sample_kg_manifest, write_kg_state  # noqa: E402
+
+pytestmark = [pytest.mark.integration, pytest.mark.requires_zvec]
 
 
 def _sample_state(
@@ -24,65 +26,11 @@ def _sample_state(
     if with_section_embeddings is None:
         with_section_embeddings = with_vectors
     state = tmp_path / "state"
-    write_json(
-        state / "custom_kg_manifest.json",
-        {
-            "metadata": {
-                "embedding_model": "test-embedding",
-                "embedding_dim": 2,
-                "embedding_params_version": "v1",
-            },
-            "chunks": {
-                "chunk-a": {
-                    "record_type": "chunk",
-                    "record_id": "chunk-a",
-                    "content": "Alpha",
-                    "content_hash": "chunk-hash",
-                    "vector_hash": "chunk-hash",
-                    "embedding_model": "test-embedding",
-                    "embedding_dim": 2,
-                    "embedding_params_version": "v1",
-                    "source_id": "doc:a",
-                    "file_path": "a.md",
-                }
-            },
-            "entities": {
-                "doc:a": {
-                    "record_type": "entity",
-                    "record_id": "doc:a",
-                    "content": "doc:a\nAlpha",
-                    "vector_hash": "entity-vector",
-                    "embedding_model": "test-embedding",
-                    "embedding_dim": 2,
-                    "embedding_params_version": "v1",
-                    "metadata_hash": "entity-meta",
-                    "source_logical_id": "doc:a",
-                    "file_path": "a.md",
-                }
-            },
-            "relationships": {
-                "doc:a<SEP>tag:x": {
-                    "record_type": "relationship",
-                    "record_id": "doc:a<SEP>tag:x",
-                    "src_id": "doc:a",
-                    "tgt_id": "tag:x",
-                    "content": "RELATED\tdoc:a\ttag:x\nAlpha tag",
-                    "vector_hash": "rel-vector",
-                    "embedding_model": "test-embedding",
-                    "embedding_dim": 2,
-                    "embedding_params_version": "v1",
-                    "metadata_hash": "rel-meta",
-                    "weight": 0.6,
-                    "source_logical_id": "doc:a",
-                    "file_path": "a.md",
-                }
-            },
-        },
-    )
-    write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
-    write_jsonl(
-        state / "raw_sections.jsonl",
-        [
+    return write_kg_state(
+        state,
+        manifest=sample_kg_manifest(),
+        section_similarity_edges=[{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}],
+        raw_sections=[
             {
                 "section_id": "raw_section:doc-a:method",
                 "source_id": "doc:a",
@@ -94,22 +42,21 @@ def _sample_state(
                 "content": "Method body",
             }
         ],
-    )
-    if with_section_embeddings:
-        write_jsonl(
-            state / "section_embeddings.jsonl",
-            [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}],
-        )
-    if with_manifest_vectors:
-        write_vector_cache(
-            state / "vector_cache.sqlite",
+        section_embeddings=(
+            [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}]
+            if with_section_embeddings
+            else None
+        ),
+        vectors=(
             {
                 "chunk-hash": [1.0, 0.0],
                 "entity-vector": [0.9, 0.1],
                 "rel-vector": [0.0, 1.0],
-            },
-        )
-    return state
+            }
+            if with_manifest_vectors
+            else None
+        ),
+    )
 
 
 def test_build_prepare_only_writes_report_and_prepared_pointer_without_activation(tmp_path, capsys) -> None:
@@ -120,20 +67,7 @@ def test_build_prepare_only_writes_report_and_prepared_pointer_without_activatio
 
     assert (
         native_zvec_materialize.main(
-            [
-                "build",
-                "--root",
-                str(wiki_root),
-                "--state-dir",
-                str(state),
-                "--workspace-root",
-                str(workspace_root),
-                "--workspace-id",
-                "native-test",
-                "--embedding-profile",
-                "conservative",
-                "--prepare-only",
-            ]
+            materialize_argv(wiki_root, state, workspace_root, "--embedding-profile", "conservative", "--prepare-only")
         )
         == 0
     )
@@ -155,23 +89,94 @@ def test_build_prepare_only_writes_report_and_prepared_pointer_without_activatio
     assert json.loads(build_report_path.read_text(encoding="utf-8")) == printed
 
 
+def test_build_report_records_phase_timings(tmp_path, capsys) -> None:
+    state = _sample_state(tmp_path)
+    workspace_root = tmp_path / "native_zvec" / "workspaces"
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+
+    assert (
+        native_zvec_materialize.main(
+            materialize_argv(wiki_root, state, workspace_root, "--embedding-profile", "conservative", "--prepare-only")
+        )
+        == 0
+    )
+
+    printed = json.loads(capsys.readouterr().out)
+    timings = printed["native_report"]["phase_timings"]
+    expected = {
+        "load_artifacts",
+        "materialize_manifest",
+        "materialize_sections",
+        "materialize_edges",
+        "spans_walk",
+        "materialize_spans",
+        "zvec_assembly",
+        "zvec_insert",
+        "zvec_optimize",
+        "zvec_smoke",
+        "audits",
+        "total",
+    }
+    assert expected <= set(timings)
+    for name in expected:
+        assert isinstance(timings[name], (int, float)), name
+        assert timings[name] >= 0, name
+    phases = expected - {"total"}
+    phase_sum = sum(timings[name] for name in phases)
+    # phases overlap across threads: total covers each phase and is bounded by the phase sum
+    assert timings["total"] >= max(timings[name] for name in phases) - 0.01
+    assert timings["total"] <= phase_sum + 0.05
+    assert printed["build_seconds"] >= timings["total"] - 0.01
+
+
+def test_threaded_build_is_deterministic_across_runs(tmp_path, capsys) -> None:
+    state = _sample_state(tmp_path)
+    workspace_root = tmp_path / "native_zvec" / "workspaces"
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "note.md").write_text("# Title\n\nalpha beta gamma\n", encoding="utf-8")
+
+    reports = []
+    for iteration in range(3):
+        for suffix in ("a", "b"):
+            workspace_id = f"native-{iteration}{suffix}"
+            assert (
+                native_zvec_materialize.main(
+                    materialize_argv(
+                        wiki_root,
+                        state,
+                        workspace_root,
+                        "--embedding-profile",
+                        "conservative",
+                        "--prepare-only",
+                        workspace_id=workspace_id,
+                    )
+                )
+                == 0
+            )
+            reports.append((workspace_id, json.loads(capsys.readouterr().out)))
+
+    reference = reports[0][1]
+    for _, report in reports[1:]:
+        assert report["counts"] == reference["counts"]
+        assert report["native_report"]["source_manifest_hash"] == reference["native_report"]["source_manifest_hash"]
+        assert report["sqlite_edge_count"] == reference["sqlite_edge_count"]
+        assert report["native_report"]["lexical_span_count"] == reference["native_report"]["lexical_span_count"]
+        assert report["zvec_doc_count"] == reference["zvec_doc_count"]
+
+    def _dump(workspace_id: str) -> dict[str, list[tuple]]:
+        return dump_workspace_tables(workspace_root / workspace_id / "native.sqlite", mask_workspace_id=True)
+
+    reference_dump = _dump(reports[0][0])
+    for workspace_id, _ in reports[1:]:
+        assert _dump(workspace_id) == reference_dump
+
+
 def test_audit_reads_existing_build_report(tmp_path, capsys) -> None:
     state = _sample_state(tmp_path)
     workspace_root = tmp_path / "native_zvec" / "workspaces"
-    native_zvec_materialize.main(
-        [
-            "build",
-            "--root",
-            str(tmp_path / "wiki"),
-            "--state-dir",
-            str(state),
-            "--workspace-root",
-            str(workspace_root),
-            "--workspace-id",
-            "native-test",
-            "--prepare-only",
-        ]
-    )
+    native_zvec_materialize.main(materialize_argv(tmp_path / "wiki", state, workspace_root, "--prepare-only"))
     capsys.readouterr()
 
     assert (
@@ -235,65 +240,32 @@ def test_build_reuses_existing_candidate_when_state_fingerprints_match(tmp_path,
     assert reused["input_fingerprints"] == first["input_fingerprints"]
 
 
-def test_preflight_reports_missing_state_inputs_without_workspace_writes(tmp_path, capsys) -> None:
-    state = tmp_path / "state"
+@pytest.mark.parametrize(
+    "with_state_files,expected_names",
+    [
+        (False, ["custom_kg_manifest.json", "raw_sections.jsonl", "section_similarity_edges.jsonl"]),
+        (True, ["vector_cache.sqlite", "section_embeddings.jsonl"]),
+    ],
+    ids=["missing_state_inputs", "missing_vector_prerequisites"],
+)
+def test_preflight_reports_missing_inputs_without_workspace_writes(
+    tmp_path, capsys, with_state_files: bool, expected_names: list[str]
+) -> None:
+    state = _sample_state(tmp_path, with_vectors=False) if with_state_files else tmp_path / "state"
     workspace_root = tmp_path / "native_zvec" / "workspaces"
 
     assert (
         native_zvec_materialize.main(
-            [
-                "preflight",
-                "--root",
-                str(tmp_path / "wiki"),
-                "--state-dir",
-                str(state),
-                "--workspace-root",
-                str(workspace_root),
-                "--workspace-id",
-                "native-test",
-            ]
+            materialize_argv(tmp_path / "wiki", state, workspace_root, command="preflight")
         )
         == 1
     )
 
     printed = json.loads(capsys.readouterr().out)
     assert printed["ok"] is False
-    assert printed["command"] == "preflight"
-    assert printed["missing"] == [
-        str(state / "custom_kg_manifest.json"),
-        str(state / "raw_sections.jsonl"),
-        str(state / "section_similarity_edges.jsonl"),
-    ]
-    assert not workspace_root.exists()
-
-
-def test_preflight_reports_missing_vector_prerequisites_without_workspace_writes(tmp_path, capsys) -> None:
-    state = _sample_state(tmp_path, with_vectors=False)
-    workspace_root = tmp_path / "native_zvec" / "workspaces"
-
-    assert (
-        native_zvec_materialize.main(
-            [
-                "preflight",
-                "--root",
-                str(tmp_path / "wiki"),
-                "--state-dir",
-                str(state),
-                "--workspace-root",
-                str(workspace_root),
-                "--workspace-id",
-                "native-test",
-            ]
-        )
-        == 1
-    )
-
-    printed = json.loads(capsys.readouterr().out)
-    assert printed["ok"] is False
-    assert printed["missing"] == [
-        str(state / "vector_cache.sqlite"),
-        str(state / "section_embeddings.jsonl"),
-    ]
+    if not with_state_files:
+        assert printed["command"] == "preflight"
+    assert printed["missing"] == [str(state / name) for name in expected_names]
     assert not workspace_root.exists()
 
 
@@ -351,20 +323,7 @@ def test_build_reports_missing_vectors_as_json_without_prepared_pointer(tmp_path
     wiki_root.mkdir()
 
     assert (
-        native_zvec_materialize.main(
-            [
-                "build",
-                "--root",
-                str(wiki_root),
-                "--state-dir",
-                str(state),
-                "--workspace-root",
-                str(workspace_root),
-                "--workspace-id",
-                "native-test",
-                "--prepare-only",
-            ]
-        )
+        native_zvec_materialize.main(materialize_argv(wiki_root, state, workspace_root, "--prepare-only"))
         == 1
     )
 
@@ -387,29 +346,17 @@ def test_build_reports_vector_fill_failure_as_json_without_prepared_pointer(tmp_
     workspace_root = tmp_path / "native_zvec" / "workspaces"
     wiki_root = tmp_path / "wiki"
     wiki_root.mkdir()
-    for name in [
+    clear_embedding_env(
+        monkeypatch,
         "EMBEDDING_BINDING_HOST",
         "OPENAI_BASE_URL",
         "EMBEDDING_BINDING_API_KEY",
         "OPENAI_API_KEY",
-    ]:
-        monkeypatch.delenv(name, raising=False)
+    )
 
     assert (
         native_zvec_materialize.main(
-            [
-                "build",
-                "--root",
-                str(wiki_root),
-                "--state-dir",
-                str(state),
-                "--workspace-root",
-                str(workspace_root),
-                "--workspace-id",
-                "native-test",
-                "--prepare-only",
-                "--fill-missing-vectors",
-            ]
+            materialize_argv(wiki_root, state, workspace_root, "--prepare-only", "--fill-missing-vectors")
         )
         == 1
     )

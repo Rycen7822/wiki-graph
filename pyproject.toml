@@ -14,8 +14,9 @@ where = ["."]
 include = ["llm_wiki_native*", "ops*"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "--strict-markers"
 markers = [
-  "unit: fast in-process tests with fake dependencies",
   "integration: multi-component integration tests",
   "subprocess: tests that spawn subprocesses",
   "requires_zvec: tests requiring the real zvec package/runtime",

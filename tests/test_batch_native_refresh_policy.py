@@ -1,28 +1,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import struct
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from ops import batch_native_refresh  # noqa: E402
-def _append_native_history(state_dir: Path, reasons: list[str]) -> None:
-    history = batch_native_refresh.active_workspace_history_path(state_dir)
-    history.parent.mkdir(parents=True, exist_ok=True)
-    history.write_text(
-        "".join(
-            json.dumps({"reason": reason, "current": {"workspace_id": f"ws-{idx}"}}) + "\n"
-            for idx, reason in enumerate(reasons)
-        ),
-        encoding="utf-8",
-    )
+from ops import batch_native_refresh
+from support import append_native_history as _append_native_history
 def test_native_refresh_status_reports_five_incremental_full_rebuild_policy(tmp_path) -> None:
     state_dir = tmp_path / "wikigraph" / "state"
     root = tmp_path / "wiki"

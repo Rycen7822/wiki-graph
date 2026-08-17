@@ -27,7 +27,8 @@ Recommended conventions:
 Active production owner:
 
 - `ops.batch_native_refresh` manages pending native refresh state, workspace preparation, and guarded native cutover.
-- `ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki before graph refresh.
+- `ops.batch_wiki_integration` manages raw-fast notes waiting to be integrated into the human wiki, rebuilds and content-validates semantic artifacts, then drives guarded native follow-through.
+- `ops.native_semantic_artifact_refresh` is the machine gate around native cutover; it owns cached artifact rebuild, content-level integrated-path checks, embedding-contract checks, and exact active-SQLite source/section/lexical coverage.
 - `ops.wiki_search` queries the native service/runtime and can save evidence packs.
 - `llm_wiki_native/` contains the native package, API server, zvec/sqlite storage code, retrieval engine, manifest handling, and pointer handling.
 
@@ -56,6 +57,17 @@ python3 -m ops.batch_wiki_integration status \
   --state-dir "$LLM_WIKI_STATE_DIR" \
   --reason threshold
 ```
+
+Retry the automated semantic-artifact gate and guarded native follow-through after a failed post-integration refresh:
+
+```bash
+python3 -m ops.batch_wiki_integration refresh-native-after-integration \
+  --root "$LLM_WIKI_ROOT" \
+  --state-dir "$LLM_WIKI_STATE_DIR" \
+  --workdir "$WIKI_GRAPH_REPO"
+```
+
+The command returns compact `semantic_artifacts`, `active_workspace_coverage`, and pending-state fields. Code 18 blocks cutover; code 19 requeues native refresh after an active-coverage failure. Inspect saved detail only for returned failure codes. Intentional embedding migrations additionally require `--allow-embedding-contract-change`.
 
 Mark native refresh as pending when upstream integration or reviewed changes require a graph refresh:
 
@@ -179,6 +191,12 @@ PYTHONPATH=. python3 -m pytest --collect-only -q tests
 PYTHONPATH=. python3 -m pytest tests -q -rs --durations=20
 python3 -m compileall -q llm_wiki_native ops tests
 git diff --check
+```
+
+The default gate above still runs the full suite. For a faster local loop that skips integration, real-zvec, and external-skill tests:
+
+```bash
+python3 -m pytest tests -q -m "not integration and not requires_zvec and not external_skill"
 ```
 
 For smaller owner-family checks, use the current split test files instead of the retired oversized aggregators:

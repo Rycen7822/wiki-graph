@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
@@ -327,6 +327,49 @@ def _create_lexical_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _validated_lexical_span_values(
+    workspace_id: str,
+    *,
+    span_id: str,
+    source_path: str,
+    source_id: str,
+    source_role: str,
+    span_kind: str,
+    heading_path: list[str] | tuple[str, ...] | None = None,
+    start_line: int = 0,
+    end_line: int = 0,
+    text: str,
+    metadata: dict[str, Any] | None = None,
+    text_hash: str | None = None,
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    if not span_id.strip():
+        raise ValueError("span_id is required")
+    if not source_path.strip():
+        raise ValueError("source_path is required")
+    if not source_role.strip() or not span_kind.strip():
+        raise ValueError("source_role and span_kind are required")
+    if end_line and start_line and end_line < start_line:
+        raise ValueError("end_line must be >= start_line")
+    heading = [str(part) for part in (heading_path or [])]
+    metadata = dict(metadata or {})
+    text = str(text)
+    text_hash = text_hash or _sha256_text(text)
+    return _lexical_span_values(
+        workspace_id,
+        span_id=span_id,
+        source_path=source_path,
+        source_id=source_id,
+        source_role=source_role,
+        span_kind=span_kind,
+        heading=heading,
+        start_line=start_line,
+        end_line=end_line,
+        text=text,
+        text_hash=text_hash,
+        metadata=metadata,
+    )
+
+
 class SQLiteWorkspace:
 
     def __init__(self, db_path: Path) -> None:
@@ -421,6 +464,29 @@ class SQLiteWorkspace:
                 _record_insert_values(record),
             )
 
+    def put_records(self, records: Iterable[NativeRecord]) -> int:
+        """Write many records in a single transaction; same SQL and record_type validation as put_record."""
+        items = list(records)
+        if not items:
+            return 0
+        self.get_workspace_status(items[0].workspace_id)
+        batch = []
+        for record in items:
+            if record.record_type not in RECORD_TYPES:
+                raise ValueError(f"unknown record_type: {record.record_type}")
+            batch.append(_record_insert_values(record))
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO record(
+                  workspace_id, record_type, record_id, vector_text, content_hash,
+                  metadata_hash, vector_hash, source_path, source_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                batch,
+            )
+        return len(items)
+
     def count_records(self, workspace_id: str) -> dict[str, int]:
         self.get_workspace_status(workspace_id)
         counts = dict(_ZERO_COUNTS)
@@ -468,6 +534,35 @@ class SQLiteWorkspace:
                 (workspace_id, record_type, record_id, vector_hash, int(vector_array.size), vector_array.tobytes()),
             )
 
+    def put_vectors(self, workspace_id: str, vectors: Iterable[tuple[str, str, str, list[float]]]) -> int:
+        """Write many vectors in a single transaction; validates vector_hash against stored records like put_vector.
+
+        Unlike put_vector, a vector whose record does not exist raises ValueError rather than KeyError.
+        """
+        items = list(vectors)
+        if not items:
+            return 0
+        with self._connect() as conn:
+            stored_rows = conn.execute(
+                "SELECT record_type, record_id, vector_hash FROM record WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            stored = {(str(row["record_type"]), str(row["record_id"])): str(row["vector_hash"]) for row in stored_rows}
+            batch = []
+            for record_type, record_id, vector_hash, vector in items:
+                if stored.get((record_type, record_id)) != vector_hash:
+                    raise ValueError(f"vector_hash mismatch for {record_id}")
+                vector_array = _as_float32_vector(vector)
+                batch.append((workspace_id, record_type, record_id, vector_hash, int(vector_array.size), vector_array.tobytes()))
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO vector(workspace_id, record_type, record_id, vector_hash, dim, vector_blob)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                batch,
+            )
+        return len(items)
+
     def put_edge(self, workspace_id: str, edge_type: str, src_id: str, tgt_id: str, weight: float, payload: dict[str, Any]) -> None:
         self.get_workspace_status(workspace_id)
         if not edge_type or not src_id or not tgt_id:
@@ -480,6 +575,27 @@ class SQLiteWorkspace:
                 """,
                 _edge_insert_values(workspace_id, edge_type, src_id, tgt_id, weight, payload),
             )
+
+    def put_edges(self, workspace_id: str, edges: Iterable[tuple[str, str, str, float, dict[str, Any]]]) -> int:
+        """Write many edges in a single transaction; same SQL and validation as put_edge."""
+        items = list(edges)
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        batch = []
+        for edge_type, src_id, tgt_id, weight, payload in items:
+            if not edge_type or not src_id or not tgt_id:
+                raise ValueError("edge_type, src_id, and tgt_id are required")
+            batch.append(_edge_insert_values(workspace_id, edge_type, src_id, tgt_id, weight, payload))
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO edge(workspace_id, edge_type, src_id, tgt_id, weight, payload_json)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                batch,
+            )
+        return len(items)
 
     def neighbors(
         self,
@@ -531,31 +647,19 @@ class SQLiteWorkspace:
         text_hash: str | None = None,
     ) -> None:
         self.get_workspace_status(workspace_id)
-        if not span_id.strip():
-            raise ValueError("span_id is required")
-        if not source_path.strip():
-            raise ValueError("source_path is required")
-        if not source_role.strip() or not span_kind.strip():
-            raise ValueError("source_role and span_kind are required")
-        if end_line and start_line and end_line < start_line:
-            raise ValueError("end_line must be >= start_line")
-        heading = [str(part) for part in (heading_path or [])]
-        metadata = dict(metadata or {})
-        text = str(text)
-        text_hash = text_hash or _sha256_text(text)
-        row_values, fts_values = _lexical_span_values(
+        row_values, fts_values = _validated_lexical_span_values(
             workspace_id,
             span_id=span_id,
             source_path=source_path,
             source_id=source_id,
             source_role=source_role,
             span_kind=span_kind,
-            heading=heading,
+            heading_path=heading_path,
             start_line=start_line,
             end_line=end_line,
             text=text,
-            text_hash=text_hash,
             metadata=metadata,
+            text_hash=text_hash,
         )
         with self._connect() as conn:
             conn.execute(
@@ -577,6 +681,108 @@ class SQLiteWorkspace:
                 """,
                 fts_values,
             )
+
+    def put_lexical_spans(self, workspace_id: str, spans: Iterable[Mapping[str, Any]]) -> int:
+        """Write many lexical spans (+ FTS rows) in a single transaction; same validation as put_lexical_span.
+
+        Each span is a kwargs mapping accepted by put_lexical_span.
+        """
+        items = list(spans)
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        row_batch: list[tuple[Any, ...]] = []
+        fts_batch: list[tuple[Any, ...]] = []
+        delete_batch: list[tuple[str, Any]] = []
+        for span in items:
+            row_values, fts_values = _validated_lexical_span_values(workspace_id, **span)
+            row_batch.append(row_values)
+            fts_batch.append(fts_values)
+            delete_batch.append((workspace_id, span["span_id"]))
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO lexical_span(
+                  workspace_id, span_id, source_path, source_id, source_role, span_kind,
+                  heading_path_json, start_line, end_line, text, text_hash, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row_batch,
+            )
+            conn.executemany(
+                "DELETE FROM lexical_span_fts WHERE workspace_id = ? AND span_id = ?",
+                delete_batch,
+            )
+            conn.executemany(
+                """
+                INSERT INTO lexical_span_fts(
+                  workspace_id, span_id, source_path, source_id, source_role, span_kind,
+                  heading_path, text, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                fts_batch,
+            )
+        return len(items)
+
+    def delete_vectors(self, workspace_id: str, keys: Iterable[tuple[str, str]]) -> int:
+        """Delete vector rows by (record_type, record_id) in a single transaction."""
+        items = [(record_type, record_id) for record_type, record_id in keys]
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            cursor = conn.executemany(
+                "DELETE FROM vector WHERE workspace_id = ? AND record_type = ? AND record_id = ?",
+                [(workspace_id, record_type, record_id) for record_type, record_id in items],
+            )
+        return max(cursor.rowcount, 0)
+
+    def delete_records(self, workspace_id: str, keys: Iterable[tuple[str, str]]) -> int:
+        """Delete records by (record_type, record_id) together with their vector rows in a single transaction."""
+        items = [(record_type, record_id) for record_type, record_id in keys]
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM vector WHERE workspace_id = ? AND record_type = ? AND record_id = ?",
+                [(workspace_id, record_type, record_id) for record_type, record_id in items],
+            )
+            cursor = conn.executemany(
+                "DELETE FROM record WHERE workspace_id = ? AND record_type = ? AND record_id = ?",
+                [(workspace_id, record_type, record_id) for record_type, record_id in items],
+            )
+        return max(cursor.rowcount, 0)
+
+    def delete_edges(self, workspace_id: str, keys: Iterable[tuple[str, str, str]]) -> int:
+        """Delete edges by (edge_type, src_id, tgt_id) in a single transaction."""
+        items = [(edge_type, src_id, tgt_id) for edge_type, src_id, tgt_id in keys]
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            cursor = conn.executemany(
+                "DELETE FROM edge WHERE workspace_id = ? AND edge_type = ? AND src_id = ? AND tgt_id = ?",
+                [(workspace_id, edge_type, src_id, tgt_id) for edge_type, src_id, tgt_id in items],
+            )
+        return max(cursor.rowcount, 0)
+
+    def delete_lexical_spans(self, workspace_id: str, span_ids: Iterable[str]) -> int:
+        """Delete lexical spans and their FTS rows by span_id in a single transaction."""
+        items = [str(span_id) for span_id in span_ids]
+        if not items:
+            return 0
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM lexical_span_fts WHERE workspace_id = ? AND span_id = ?",
+                [(workspace_id, span_id) for span_id in items],
+            )
+            cursor = conn.executemany(
+                "DELETE FROM lexical_span WHERE workspace_id = ? AND span_id = ?",
+                [(workspace_id, span_id) for span_id in items],
+            )
+        return max(cursor.rowcount, 0)
 
     def get_lexical_span(self, workspace_id: str, span_id: str) -> dict[str, Any]:
         self.get_workspace_status(workspace_id)
@@ -854,3 +1060,84 @@ class SQLiteWorkspace:
                 raise ValueError(f"workspace vector coverage failed: {vector_audit['missing']}")
         with self._connect() as conn:
             conn.execute("UPDATE workspace SET status = 'audited' WHERE workspace_id = ?", (workspace_id,))
+
+    def update_source_manifest_hash(self, workspace_id: str, source_manifest_hash: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE workspace SET source_manifest_hash = ? WHERE workspace_id = ?",
+                (source_manifest_hash, workspace_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(workspace_id)
+
+    def list_record_index_rows(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Record identity + hash/payload fields for diff planning (read-only)."""
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT record_type, record_id, content_hash, metadata_hash, vector_hash, source_path, source_id, payload_json
+                FROM record WHERE workspace_id = ?
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [
+            {
+                "record_type": str(row["record_type"]),
+                "record_id": str(row["record_id"]),
+                "content_hash": str(row["content_hash"]),
+                "metadata_hash": str(row["metadata_hash"]),
+                "vector_hash": str(row["vector_hash"]),
+                "source_path": row["source_path"],
+                "source_id": row["source_id"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def list_edge_index_rows(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Edge identity + weight/payload fields for diff planning (read-only)."""
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT edge_type, src_id, tgt_id, weight, payload_json FROM edge WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+        return [
+            {
+                "edge_type": str(row["edge_type"]),
+                "src_id": str(row["src_id"]),
+                "tgt_id": str(row["tgt_id"]),
+                "weight": float(row["weight"]),
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def list_lexical_span_index_rows(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Span identity + structural/hash fields for diff planning (read-only; excludes raw text)."""
+        self.get_workspace_status(workspace_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT span_id, source_path, source_id, source_role, span_kind, heading_path_json,
+                       start_line, end_line, text_hash, metadata_json
+                FROM lexical_span WHERE workspace_id = ?
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [
+            {
+                "span_id": str(row["span_id"]),
+                "source_path": str(row["source_path"]),
+                "source_id": str(row["source_id"]),
+                "source_role": str(row["source_role"]),
+                "span_kind": str(row["span_kind"]),
+                "heading_path": json.loads(row["heading_path_json"]),
+                "start_line": int(row["start_line"]),
+                "end_line": int(row["end_line"]),
+                "text_hash": str(row["text_hash"]),
+                "metadata": json.loads(row["metadata_json"]),
+            }
+            for row in rows
+        ]

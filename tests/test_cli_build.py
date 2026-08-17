@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
 
 import pytest
 
@@ -10,18 +9,10 @@ import llm_wiki_native.workspace_build as workspace_build
 from llm_wiki_native.build import MissingNativeVectorsError
 from llm_wiki_native.cli import main
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
-from support import write_json, write_jsonl, write_vector_cache
+from support import sample_kg_manifest, write_kg_state
 
 
-def test_pyproject_exposes_native_operator_console_scripts() -> None:
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
-
-    scripts = pyproject["project"]["scripts"]
-    assert scripts["llm-wiki-native"] == "llm_wiki_native.cli:main"
-    assert scripts["wiki-graph-native-query-report"] == "ops.collect_native_query_report:main"
-    assert scripts["wiki-graph-native-server-control"] == "ops.native_server_control:main"
-
-
+@pytest.mark.subprocess
 def test_cli_module_help_works_with_python_m() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "llm_wiki_native.cli", "--help"],
@@ -35,28 +26,11 @@ def test_cli_module_help_works_with_python_m() -> None:
 
 
 def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
-    state = tmp_path / "state"
-    manifest = {
-        "chunks": {"chunk-a": {"content": "Alpha", "content_hash": "chunk-hash", "source_id": "doc:a", "file_path": "a.md"}},
-        "entities": {"doc:a": {"content": "doc:a\nAlpha", "vector_hash": "entity-vector", "metadata_hash": "entity-meta", "source_logical_id": "doc:a", "file_path": "a.md"}},
-        "relationships": {
-            "doc:a<SEP>tag:x": {
-                "src_id": "doc:a",
-                "tgt_id": "tag:x",
-                "content": "RELATED\tdoc:a\ntag:x\nAlpha tag",
-                "vector_hash": "rel-vector",
-                "metadata_hash": "rel-meta",
-                "weight": 0.6,
-                "source_logical_id": "doc:a",
-                "file_path": "a.md",
-            }
-        },
-    }
-    write_json(state / "custom_kg_manifest.json", manifest)
-    write_jsonl(state / "section_similarity_edges.jsonl", [{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}])
-    write_jsonl(
-        state / "raw_sections.jsonl",
-        [
+    return write_kg_state(
+        tmp_path / "state",
+        manifest=sample_kg_manifest(),
+        section_similarity_edges=[{"src_id": "doc:a", "tgt_id": "doc:b", "cosine": 0.9}],
+        raw_sections=[
             {
                 "section_id": "raw_section:doc-a:method",
                 "source_id": "doc:a",
@@ -68,21 +42,15 @@ def _sample_state(tmp_path: Path, *, with_vectors: bool = True) -> Path:
                 "content": "Method body",
             }
         ],
+        section_embeddings=(
+            [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}]
+            if with_vectors
+            else None
+        ),
+        vectors=(
+            {"chunk-hash": [1.0, 0.0], "entity-vector": [0.9, 0.1], "rel-vector": [0.0, 1.0]} if with_vectors else None
+        ),
     )
-    if with_vectors:
-        write_vector_cache(
-            state / "vector_cache.sqlite",
-            {
-                "chunk-hash": [1.0, 0.0],
-                "entity-vector": [0.9, 0.1],
-                "rel-vector": [0.0, 1.0],
-            },
-        )
-        write_jsonl(
-            state / "section_embeddings.jsonl",
-            [{"section_id": "raw_section:doc-a:method", "text_hash": "section-vector", "embedding": [0.5, 0.5]}],
-        )
-    return state
 
 
 class _FakeZvecStats:

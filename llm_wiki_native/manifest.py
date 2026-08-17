@@ -70,13 +70,17 @@ def materialize_raw_sections(
     section_embeddings_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> int:
     section_embeddings_by_id = section_embeddings_by_id or {}
+    records: list[NativeRecord] = []
+    vectors: list[tuple[str, str, str, list[float]]] = []
     for section in sections:
         section_id = str(section.get("section_id") or "")
         embedding_row = section_embeddings_by_id.get(section_id)
         native = _section_record(workspace_id, section, embedding_row)
-        db.put_record(native)
+        records.append(native)
         if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), list):
-            db.put_vector(workspace_id, "section", native.record_id, native.vector_hash, embedding_row["embedding"])
+            vectors.append(("section", native.record_id, native.vector_hash, embedding_row["embedding"]))
+    db.put_records(records)
+    db.put_vectors(workspace_id, vectors)
     return len(sections)
 
 
@@ -93,11 +97,15 @@ def materialize_manifest(
         ("entities", "entity"),
         ("relationships", "relationship"),
     )
+    records: list[NativeRecord] = []
+    vectors: list[tuple[str, str, str, list[float]]] = []
     for collection_name, record_type in collections:
         for record_id, record in manifest.get(collection_name, {}).items():
             native = _native_record(workspace_id, record_type, str(record_id), record)
-            db.put_record(native)
+            records.append(native)
             vector = vectors_by_hash.get(native.vector_hash)
             if vector is not None:
-                db.put_vector(workspace_id, record_type, native.record_id, native.vector_hash, vector)
+                vectors.append((record_type, native.record_id, native.vector_hash, vector))
+    db.put_records(records)
+    db.put_vectors(workspace_id, vectors)
     return manifest_summary(manifest)

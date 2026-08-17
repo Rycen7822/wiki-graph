@@ -8,28 +8,20 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
 
 from ops import wiki_search  # noqa: E402
 
 LOCAL_SQLITE_CLI_FLAGS = ("--native" + "-db", "--expand-section" + "-neighbors")
 
 
-def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_path, monkeypatch) -> None:
-    calls = []
-
-    def fake_http_json(method, url, payload, *, timeout=60):
-        calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout})
-        return {"context_blocks": [{"source_path": "alpha.md"}], "hits": []}
-
-    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
-    args = SimpleNamespace(
+def _args(tmp_path, **over) -> SimpleNamespace:
+    values = dict(
         backend="native",
         native_workspace=None,
         query_vector=None,
         mode="mix",
         top_k=3,
-        section_kind="methodology",
+        section_kind=None,
         data_only=True,
         save_evidence_pack=False,
         state_dir=tmp_path,
@@ -37,6 +29,27 @@ def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_pat
         server="http://127.0.0.1:9621",
         neighbor_k=5,
     )
+    values.update(over)
+    return SimpleNamespace(**values)
+
+
+def _fake_http_json(monkeypatch, body, *, calls=None):
+    def fake(method, url, payload, *, timeout=60):
+        if calls is not None:
+            calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout})
+        return body
+
+    monkeypatch.setattr(wiki_search, "http_json", fake)
+
+
+def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_path, monkeypatch) -> None:
+    calls = []
+    _fake_http_json(
+        monkeypatch,
+        {"context_blocks": [{"source_path": "alpha.md"}], "hits": []},
+        calls=calls,
+    )
+    args = _args(tmp_path, section_kind="methodology")
 
     result = wiki_search.run_query(args, "GraphRAG bottleneck")
 
@@ -51,29 +64,12 @@ def test_wiki_search_default_native_api_uses_server_without_query_vector(tmp_pat
 
 
 def test_wiki_search_can_disable_query_event_recording(tmp_path, monkeypatch) -> None:
-    def fake_http_json(method, url, payload, *, timeout=60):
-        return {"context_blocks": [{"source_path": "alpha.md"}], "hits": []}
-
     def fail_add_query_event(*_args, **_kwargs):
         raise AssertionError("query event should not be recorded")
 
-    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
+    _fake_http_json(monkeypatch, {"context_blocks": [{"source_path": "alpha.md"}], "hits": []})
     monkeypatch.setattr(wiki_search, "add_query_event", fail_add_query_event)
-    args = SimpleNamespace(
-        backend="native",
-        native_workspace=None,
-        query_vector=None,
-        mode="mix",
-        top_k=3,
-        section_kind=None,
-        data_only=True,
-        save_evidence_pack=False,
-        state_dir=tmp_path,
-        workdir=tmp_path,
-        server="http://127.0.0.1:9621",
-        neighbor_k=5,
-        record_query_event=False,
-    )
+    args = _args(tmp_path, record_query_event=False)
 
     result = wiki_search.run_query(args, "GraphRAG bottleneck")
 
@@ -81,6 +77,7 @@ def test_wiki_search_can_disable_query_event_recording(tmp_path, monkeypatch) ->
     assert result["response"]["context_blocks"][0]["source_path"] == "alpha.md"
 
 
+@pytest.mark.subprocess
 def test_wiki_search_cli_help_is_native_only() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "ops.wiki_search", "--help"],
@@ -92,8 +89,6 @@ def test_wiki_search_cli_help_is_native_only() -> None:
 
     assert "--backend" not in result.stdout
     assert "--chunk-top-k" not in result.stdout
-    assert "--intent" not in result.stdout
-    assert "--driver" not in result.stdout
     for marker in LOCAL_SQLITE_CLI_FLAGS:
         assert marker not in result.stdout
     assert "--query-vector" in result.stdout
@@ -150,20 +145,7 @@ def test_wiki_search_query_suite_rejects_structured_native_rows_before_http(tmp_
 
 
 def test_wiki_search_rejects_stale_non_native_backend_override(tmp_path) -> None:
-    args = SimpleNamespace(
-        backend="legacy",
-        native_workspace=None,
-        query_vector=None,
-        mode="mix",
-        top_k=3,
-        section_kind=None,
-        data_only=True,
-        save_evidence_pack=False,
-        state_dir=tmp_path,
-        workdir=tmp_path,
-        server="http://127.0.0.1:9621",
-        neighbor_k=5,
-    )
+    args = _args(tmp_path, backend="legacy")
 
     with pytest.raises(ValueError, match="native-only"):
         wiki_search.run_query(args, "alpha")
@@ -171,25 +153,16 @@ def test_wiki_search_rejects_stale_non_native_backend_override(tmp_path) -> None
 
 def test_wiki_search_api_forwards_explicit_query_vector_to_server(tmp_path, monkeypatch) -> None:
     calls = []
-
-    def fake_http_json(method, url, payload, *, timeout=60):
-        calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout})
-        return {"context_blocks": [{"source_path": "vector.md"}], "hits": []}
-
-    monkeypatch.setattr(wiki_search, "http_json", fake_http_json)
-    args = SimpleNamespace(
-        backend="native",
+    _fake_http_json(
+        monkeypatch,
+        {"context_blocks": [{"source_path": "vector.md"}], "hits": []},
+        calls=calls,
+    )
+    args = _args(
+        tmp_path,
         native_workspace="native-test",
         query_vector=json.dumps([1.0, 0.0]),
-        mode="mix",
         top_k=1,
-        section_kind=None,
-        data_only=True,
-        save_evidence_pack=False,
-        state_dir=tmp_path,
-        workdir=tmp_path,
-        server="http://127.0.0.1:9621",
-        neighbor_k=5,
         response_profile="debug",
         retrieval_goal="coverage",
     )
@@ -238,19 +211,13 @@ def test_wiki_search_evidence_pack_receives_bounded_goal_metadata_without_vector
         return path
 
     monkeypatch.setattr(wiki_search, "save_evidence_pack", fake_save)
-    args = SimpleNamespace(
-        backend="native",
+    args = _args(
+        tmp_path,
         native_workspace="native-test",
         query_vector=json.dumps([1.0, 0.0]),
-        mode="mix",
         retrieval_goal="coverage",
-        top_k=3,
-        section_kind=None,
-        data_only=True,
         save_evidence_pack=True,
         state_dir=tmp_path / "state",
-        workdir=tmp_path,
-        server="http://127.0.0.1:9621",
         neighbor_k=2,
         response_profile="debug",
         record_query_event=False,

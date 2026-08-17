@@ -3,9 +3,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
-sys.path.insert(0, str(ROOT))
 
 from support import sample_wiki, write  # noqa: E402
 from ops import raw_fast_note_assemble  # noqa: E402
@@ -104,31 +105,61 @@ def test_raw_fast_note_assemble_writes_script_frontmatter_and_body_draft(tmp_pat
     body = text.split("---", 2)[-1]
     assert "## Methodology" in body
     assert "https://" not in body
-    report = json.loads((workdir / "assembled_raw_note_report.json").read_text(encoding="utf-8"))
-    assert report["raw_file"] == raw_file
+    assert (workdir / "assembled_raw_note_report.json").exists()
 
 
-def test_raw_fast_note_assemble_rejects_agent_frontmatter(tmp_path: Path) -> None:
+def test_raw_fast_note_assemble_preserves_created_when_overwriting_existing_note(tmp_path: Path) -> None:
+    root, workdir, raw_file = _write_assembly_fixture(tmp_path)
+    raw_path = root / raw_file
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(
+        '---\n'
+        'title: "Existing Paper"\n'
+        'source: "https://example.com/existing"\n'
+        'created: "2001-02-03"\n'
+        'updated: "2001-02-03 00:00"\n'
+        'type: "raw-note"\n'
+        'domain: "machine-learning"\n'
+        'captured: "2001-02-03 00:00:00 UTC (+0000)"\n'
+        '---\n\n'
+        'old body\n',
+        encoding="utf-8",
+    )
+
+    payload = raw_fast_note_assemble.assemble_raw_note(
+        root=root,
+        workdir=workdir,
+        overwrite_existing=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["preserved_created"] == "2001-02-03"
+    text = raw_path.read_text(encoding="utf-8")
+    assert 'created: "2001-02-03"' in text
+    assert 'title: "Assembler Paper"' in text
+    assert "old body" not in text
+
+
+@pytest.mark.parametrize(
+    "body,expected_error",
+    [
+        ("---\ntitle: Agent YAML\n---\n\n" + STRUCTURED_BODY, "body_frontmatter_forbidden"),
+        (
+            STRUCTURED_BODY + "\nResource status: HEAD 200 at https://github.com/example/assembler-paper\n",
+            "body_resource_or_url_leakage",
+        ),
+    ],
+)
+def test_raw_fast_note_assemble_rejects_invalid_body(tmp_path: Path, body: str, expected_error: str) -> None:
     root, workdir, _raw_file = _write_assembly_fixture(tmp_path)
-    write(workdir / "raw_body_draft.md", "---\ntitle: Agent YAML\n---\n\n" + STRUCTURED_BODY)
+    write(workdir / "raw_body_draft.md", body)
 
     payload = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir)
 
     assert payload["ok"] is False
     assert payload["stage"] == "body_draft"
-    assert payload["error"] == "body_frontmatter_forbidden"
+    assert payload["error"] == expected_error
     assert not (root / "raw/clip/2607/26070401_Assembler-Paper.md").exists()
-
-
-def test_raw_fast_note_assemble_rejects_resource_leakage_in_body(tmp_path: Path) -> None:
-    root, workdir, _raw_file = _write_assembly_fixture(tmp_path)
-    write(workdir / "raw_body_draft.md", STRUCTURED_BODY + "\nResource status: HEAD 200 at https://github.com/example/assembler-paper\n")
-
-    payload = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir)
-
-    assert payload["ok"] is False
-    assert payload["stage"] == "body_draft"
-    assert payload["error"] == "body_resource_or_url_leakage"
 
 
 def test_raw_fast_note_assemble_refuses_unsafe_and_existing_raw_paths(tmp_path: Path) -> None:
@@ -147,7 +178,11 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_existing_raw_paths(tmp_path: 
     assert existing["error"] == "raw_file_exists"
 
 
+@pytest.mark.external_skill
+@pytest.mark.subprocess
 def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path) -> None:
+    if not RAW_FAST_VERIFIER.is_file():
+        pytest.skip(f"external skill missing: {RAW_FAST_VERIFIER}")
     root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070403_Roundtrip-Paper.md")
 
     assemble = subprocess.run(

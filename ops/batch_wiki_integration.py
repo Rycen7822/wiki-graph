@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-from ops import batch_native_refresh
+from ops import batch_native_refresh, native_semantic_artifact_refresh
+from ops.custom_kg_vector_fill import EMBEDDING_PROFILES
 from ops.wiki_native_cli import DEFAULT_STATE_DIR, DEFAULT_WIKI_ROOT, print_json
 from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success
 from ops.wiki_native_wiki_integration_pending import (
@@ -279,6 +280,8 @@ def _native_refresh_failure(
     runs: list[dict[str, Any]],
     guard: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
+    semantic_artifacts: dict[str, Any] | None = None,
+    active_workspace_coverage: dict[str, Any] | None = None,
     exception_type: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -295,7 +298,23 @@ def _native_refresh_failure(
         payload["guard"] = guard
     if config is not None:
         payload["config"] = config
+    if semantic_artifacts is not None:
+        payload["semantic_artifacts"] = semantic_artifacts
+    if active_workspace_coverage is not None:
+        payload["active_workspace_coverage"] = active_workspace_coverage
     return payload
+
+
+NATIVE_EMBEDDING_PROFILE_ENV = "LLM_WIKI_NATIVE_EMBEDDING_PROFILE"
+DEFAULT_NATIVE_EMBEDDING_PROFILE = "conservative"
+
+
+def _resolve_native_embedding_profile(profile: str | None = None) -> str:
+    name = profile or os.environ.get(NATIVE_EMBEDDING_PROFILE_ENV) or DEFAULT_NATIVE_EMBEDDING_PROFILE
+    if name not in EMBEDDING_PROFILES:
+        known = ", ".join(sorted(EMBEDDING_PROFILES))
+        raise ValueError(f"unknown embedding profile {name!r}; expected one of: {known}")
+    return name
 
 
 def run_native_refresh_after_wiki_integration(
@@ -305,8 +324,12 @@ def run_native_refresh_after_wiki_integration(
     workdir: Path | None = None,
     reason: str,
     max_passes: int = 2,
+    allow_embedding_contract_change: bool = False,
+    defer_native_refresh: bool = False,
+    embedding_profile: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     native_workdir = (workdir or DEFAULT_NATIVE_WORKDIR).resolve()
+    resolved_embedding_profile = _resolve_native_embedding_profile(embedding_profile)
     status_before = batch_native_refresh.status(root, state_dir)
     if not status_before.get("should_refresh"):
         return 0, {
@@ -317,18 +340,40 @@ def run_native_refresh_after_wiki_integration(
             "status_before": status_before,
             "status_after": status_before,
         }
+    if defer_native_refresh:
+        return 0, {
+            "native_refresh": True,
+            "skipped": True,
+            "deferred": True,
+            "skip_reason": "defer_native_refresh",
+            "runs": [],
+            "status_before": status_before,
+            "status_after": status_before,
+        }
+
+    try:
+        semantic_artifacts = native_semantic_artifact_refresh.refresh_semantic_artifacts(
+            root,
+            state_dir,
+            workdir=native_workdir,
+            allow_embedding_contract_change=allow_embedding_contract_change,
+        )
+    except native_semantic_artifact_refresh.SemanticArtifactRefreshError as exc:
+        return 18, _native_refresh_failure(
+            reason="semantic-artifact-refresh-failed",
+            message=str(exc),
+            status_before=status_before,
+            status_after=batch_native_refresh.status(root, state_dir),
+            runs=[],
+            semantic_artifacts=exc.report,
+            exception_type=type(exc).__name__,
+        )
 
     runs: list[dict[str, Any]] = []
     for pass_index in range(max_passes):
         current_status = batch_native_refresh.status(root, state_dir)
         if not current_status.get("should_refresh"):
-            return 0, {
-                "native_refresh": True,
-                "skipped": False,
-                "runs": runs,
-                "status_before": status_before,
-                "status_after": current_status,
-            }
+            break
         workspace_id = f"native-{time.strftime('%Y%m%d%H%M%S')}-{pass_index + 1}"
         args, workspace_root, required_unchanged_paths, config_summary = _native_refresh_cutover_args(
             root=root,
@@ -355,6 +400,7 @@ def run_native_refresh_after_wiki_integration(
                 runs=runs,
                 guard=guard,
                 config=config_summary,
+                semantic_artifacts=semantic_artifacts,
             )
         try:
             refresh_result = batch_native_refresh.refresh_cutover(
@@ -362,7 +408,7 @@ def run_native_refresh_after_wiki_integration(
                 state_dir=state_dir,
                 workspace_root=workspace_root,
                 workspace_id=workspace_id,
-                embedding_profile="conservative",
+                embedding_profile=resolved_embedding_profile,
                 build_workspace=batch_native_refresh.build_prepared_workspace,
                 finalize_workspace=batch_native_refresh.finalize_prepared_workspace_for_state,
                 restart_service=batch_native_refresh.restart_service_from_args(args),
@@ -380,6 +426,7 @@ def run_native_refresh_after_wiki_integration(
                 runs=runs,
                 guard=guard,
                 config=config_summary,
+                semantic_artifacts=semantic_artifacts,
                 exception_type=type(exc).__name__,
             )
         runs.append(refresh_result)
@@ -392,13 +439,50 @@ def run_native_refresh_after_wiki_integration(
             status_before=status_before,
             status_after=final_status,
             runs=runs,
+            semantic_artifacts=semantic_artifacts,
+        )
+    try:
+        active_workspace_coverage = native_semantic_artifact_refresh.validate_active_workspace_coverage(
+            root,
+            state_dir,
+            integrated_paths=list(semantic_artifacts.get("integrated_paths") or []),
+        )
+    except Exception as exc:  # pragma: no cover - defensive conversion for unattended runs
+        active_workspace_coverage = {
+            "ok": False,
+            "covered_path_count": 0,
+            "failures": [
+                {
+                    "code": "active-workspace-coverage-validator-error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:1200],
+                }
+            ],
+        }
+    if not active_workspace_coverage.get("ok"):
+        batch_native_refresh.mark_pending(
+            state_dir,
+            root,
+            reason=f"wiki-integration:post-cutover-semantic-coverage:{reason}",
+        )
+        return 19, _native_refresh_failure(
+            reason="active-workspace-semantic-coverage-failed",
+            message="active workspace does not cover every just-integrated raw source",
+            status_before=status_before,
+            status_after=batch_native_refresh.status(root, state_dir),
+            runs=runs,
+            semantic_artifacts=semantic_artifacts,
+            active_workspace_coverage=active_workspace_coverage,
         )
     return 0, {
         "native_refresh": True,
         "skipped": False,
         "runs": runs,
+        "embedding_profile": resolved_embedding_profile,
         "status_before": status_before,
         "status_after": final_status,
+        "semantic_artifacts": semantic_artifacts,
+        "active_workspace_coverage": active_workspace_coverage,
     }
 
 
@@ -410,6 +494,7 @@ def run_integrate_local(
     plan_path: Path,
     workdir: Path | None = None,
     dry_run: bool = False,
+    defer_native_refresh: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     plan = load_wiki_integration_plan(plan_path)
     apply_result = apply_wiki_integration_plan(root, state_dir, plan, reason=reason, dry_run=dry_run)
@@ -444,6 +529,7 @@ def run_integrate_local(
         state_dir,
         workdir=workdir or DEFAULT_NATIVE_WORKDIR,
         reason=reason,
+        defer_native_refresh=defer_native_refresh,
     )
     result = {
         "local_runner": True,
@@ -468,6 +554,7 @@ def run_auto_integration(
     integration_command: str | None = None,
     timeout: int = 7200,
     runner: str = "local",
+    defer_native_refresh: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     pre_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
     plan = build_wiki_integration_plan(root, state_dir, reason=reason, threshold=threshold)
@@ -506,6 +593,7 @@ def run_auto_integration(
             reason=reason,
             plan_path=plan_path,
             workdir=DEFAULT_NATIVE_WORKDIR,
+            defer_native_refresh=defer_native_refresh,
         )
         result = {**base, "ran": True, "runner_returncode": local_code, "local_result": local_result}
         if local_code != 0:
@@ -548,6 +636,7 @@ def run_auto_integration(
         state_dir,
         workdir=DEFAULT_NATIVE_WORKDIR,
         reason=reason,
+        defer_native_refresh=defer_native_refresh,
     )
     result["native_refresh"] = native_refresh
     if native_code != 0:
@@ -579,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
     mark_parser.add_argument("--integration-command", default=None, help="Optional command template for auto integration; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to local deterministic integration.")
     mark_parser.add_argument("--auto-integrate-runner", choices=["local", "hermes"], default="local", help="Runner for --auto-integrate when --integration-command is not set")
     mark_parser.add_argument("--auto-integrate-timeout", type=int, default=7200)
+    mark_parser.add_argument("--defer-native-refresh", action="store_true", help="With --auto-integrate, stop after clear-success and leave the native graph refresh pending in the ledger for a later refresh-native-after-integration run")
 
     auto_parser = sub.add_parser("auto-integrate", help="Launch the configured wiki-integration runner when pending raw-fast notes require integration")
     add_common_paths(auto_parser)
@@ -588,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
     auto_parser.add_argument("--integration-command", default=None, help="Optional command template; placeholders: {prompt_path}, {root}, {state_dir}, {ledger_path}, {reason}. Defaults to local deterministic integration.")
     auto_parser.add_argument("--runner", choices=["local", "hermes"], default="local", help="Runner to use when --integration-command is not set")
     auto_parser.add_argument("--timeout", type=int, default=7200)
+    auto_parser.add_argument("--defer-native-refresh", action="store_true", help="Stop after clear-success and leave the native graph refresh pending in the ledger for a later refresh-native-after-integration run")
 
     should_parser = sub.add_parser("should-integrate", help="Return whether batch wiki integration should run for this reason")
     add_common_paths(should_parser)
@@ -607,11 +698,32 @@ def main(argv: list[str] | None = None) -> int:
     local_parser.add_argument("--reason", default="threshold", choices=["threshold", "pre-query", "query", "manual", "integrate", "wiki-query"])
     local_parser.add_argument("--threshold", type=int, default=None)
     local_parser.add_argument("--dry-run", action="store_true")
+    local_parser.add_argument("--defer-native-refresh", action="store_true", help="Stop after clear-success and leave the native graph refresh pending in the ledger for a later refresh-native-after-integration run")
 
     clear_parser = sub.add_parser("clear-success", help="Clear pending wiki-integration ledger after successful batch integration and validation")
     add_common_paths(clear_parser)
     clear_parser.add_argument("--reason", default="external-success")
     clear_parser.add_argument("--integrated-path", action="append", default=[])
+
+    native_retry_parser = sub.add_parser(
+        "refresh-native-after-integration",
+        help="Rebuild semantic artifacts and retry guarded native refresh after wiki integration",
+    )
+    add_common_paths(native_retry_parser)
+    native_retry_parser.add_argument("--workdir", type=Path, default=DEFAULT_NATIVE_WORKDIR)
+    native_retry_parser.add_argument("--reason", default="semantic-artifact-retry")
+    native_retry_parser.add_argument("--max-passes", type=int, default=2)
+    native_retry_parser.add_argument(
+        "--embedding-profile",
+        choices=sorted(EMBEDDING_PROFILES),
+        default=None,
+        help=f"Embedding vector-fill profile (default: env {NATIVE_EMBEDDING_PROFILE_ENV} or conservative)",
+    )
+    native_retry_parser.add_argument(
+        "--allow-embedding-contract-change",
+        action="store_true",
+        help="Explicitly allow an intentional embedding-model/dimension migration",
+    )
 
     args = parser.parse_args(argv)
     root = args.root.resolve()
@@ -644,6 +756,7 @@ def main(argv: list[str] | None = None) -> int:
                 integration_command=args.integration_command,
                 timeout=args.auto_integrate_timeout,
                 runner=args.auto_integrate_runner,
+                defer_native_refresh=args.defer_native_refresh,
             )
             print_json({"marked": entry, "status_after_mark": status, "auto_integrate": auto_result})
             return code
@@ -659,6 +772,7 @@ def main(argv: list[str] | None = None) -> int:
             integration_command=args.integration_command,
             timeout=args.timeout,
             runner=args.runner,
+            defer_native_refresh=args.defer_native_refresh,
         )
         print_json(result)
         return code
@@ -681,12 +795,24 @@ def main(argv: list[str] | None = None) -> int:
         if plan_path is None:
             plan = build_wiki_integration_plan(root, state_dir, reason=args.reason, threshold=args.threshold)
             plan_path = write_wiki_integration_plan_report(state_dir, plan)
-        code, result = run_integrate_local(root, state_dir, reason=args.reason, plan_path=plan_path, dry_run=args.dry_run)
+        code, result = run_integrate_local(root, state_dir, reason=args.reason, plan_path=plan_path, dry_run=args.dry_run, defer_native_refresh=args.defer_native_refresh)
         print_json(result)
         return code
     if args.command == "clear-success":
         print_json(clear_pending_wiki_integration_after_success(root, state_dir, integrated_paths=args.integrated_path, reason=args.reason))
         return 0
+    if args.command == "refresh-native-after-integration":
+        code, result = run_native_refresh_after_wiki_integration(
+            root,
+            state_dir,
+            workdir=args.workdir,
+            reason=args.reason,
+            max_passes=args.max_passes,
+            allow_embedding_contract_change=args.allow_embedding_contract_change,
+            embedding_profile=args.embedding_profile,
+        )
+        print_json(result)
+        return code
     return 2
 
 

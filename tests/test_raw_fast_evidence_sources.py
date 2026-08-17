@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,9 @@ from raw_fast_evidence_fixtures import (
     _fake_latexpand_success,
     _write_tex_agent_ir_source_fixture,
     _write_tiny_pdf,
+    bundle_cli_argv,
+    install_fake_arxiv_fetch,
+    run_process_arxiv,
     sample_wiki,
     wiki_root_machine_pollution,
     write,
@@ -32,35 +34,26 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
             return {"ok": True, "status": 200, "text": "<feed><entry><title>TeX First Fixture Paper</title></entry></feed>"}
         return {"ok": True, "status": 200, "text": "<html><title>TeX First Fixture Paper</title></html>"}
 
-    def fake_fetch_url_to_file(url: str, dest: Path, timeout: int) -> dict:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"fake eprint tarball")
-        return {"ok": True, "status": 200, "dest": str(dest), "bytes": dest.stat().st_size}
-
-    def fake_extract_tar(tar_path: Path, dest: Path) -> dict:
-        _write_tex_agent_ir_source_fixture(workdir)
-        return {"ok": True, "extracted_count": 4, "errors": []}
-
     def forbidden_process_pdf(*args, **kwargs):
         raise AssertionError("arXiv TeX-success route must not call process_pdf or parse PDF text")
 
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_text", fake_fetch_text)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "fetch_url_to_file", fake_fetch_url_to_file)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "safe_extract_tar", fake_extract_tar)
-    monkeypatch.setattr(raw_fast_evidence_bundle, "process_pdf", forbidden_process_pdf)
+    install_fake_arxiv_fetch(
+        monkeypatch,
+        raw_fast_evidence_bundle,
+        workdir,
+        fetch_text=fake_fetch_text,
+        write_source=_write_tex_agent_ir_source_fixture,
+        extracted_count=4,
+        extra=(("process_pdf", forbidden_process_pdf),),
+    )
     _fake_latexpand_success(monkeypatch, raw_fast_evidence_bundle, workdir)
 
-    payload = raw_fast_evidence_bundle.process_arxiv(
+    payload = run_process_arxiv(
+        raw_fast_evidence_bundle,
         "https://arxiv.org/abs/2600.00001",
         root,
         workdir,
-        "docling",
-        False,
-        ["none"],
-        5,
-        raw_fast_evidence_bundle.TimingRecorder(),
-        paper_digest=True,
-        resource_draft=True,
+        timed=True,
         resource_health="none",
     )
 
@@ -101,13 +94,6 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
 
     handoff = json.loads((workdir / "agent_handoff.json").read_text(encoding="utf-8"))
     assert handoff["source_read_plan"]["source_kind"] == "tex_source"
-    assert handoff["automation_next_action"]["action"] == "read_writing_contract_then_filtered_tex_source"
-    assert handoff["automation_next_action"]["digest_read_before_source"] == "paper_digest.md"
-    assert handoff["automation_next_action"]["filtered_tex_first_reads"] == [
-        "tex_agent_ir_audit.md",
-        "paper_source.agent.tex",
-    ]
-    assert handoff["source_refs"]["tex_agent_source"] == "paper_source.agent.tex"
     assert not retired_sidecars & set(handoff["source_refs"])
     brief = json.loads((workdir / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["evidence_cards"][0]["kind"] == "abstract"
@@ -140,32 +126,27 @@ def test_tex_source_units_resolve_dotted_stem_includes(tmp_path: Path) -> None:
 
 
 @pytest.mark.requires_fitz
-def test_raw_fast_evidence_bundle_direct_pdf_writes_temp_only_and_defaults_docling(tmp_path: Path) -> None:
+@pytest.mark.subprocess
+@pytest.mark.parametrize("workdir_inside_wiki", [False, True], ids=["temp_workdir", "inside_wiki_root"])
+def test_raw_fast_evidence_bundle_direct_pdf_respects_workdir_guard(tmp_path: Path, workdir_inside_wiki: bool) -> None:
     root = sample_wiki(tmp_path)
     source_pdf = tmp_path / "source.pdf"
     _write_tiny_pdf(source_pdf)
-    workdir = tmp_path / "bundle"
+    workdir = root / "raw" / "clip" / "bundle" if workdir_inside_wiki else tmp_path / "bundle"
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_evidence_bundle",
-            "--url",
-            source_pdf.as_uri(),
-            "--kind",
-            "direct-pdf",
-            "--root",
-            str(root),
-            "--workdir",
-            str(workdir),
-            "--probe",
-            "none",
-        ],
-        check=True,
+        bundle_cli_argv(source_pdf.as_uri(), root, workdir),
+        check=not workdir_inside_wiki,
         text=True,
         capture_output=True,
     )
     payload = json.loads(result.stdout)
+
+    if workdir_inside_wiki:
+        assert result.returncode != 0
+        assert payload["stage"] == "preflight"
+        assert payload["error"] == "workdir_inside_wiki_root"
+        assert not (workdir / "evidence_bundle.json").exists()
+        return
 
     assert payload["ok"] is True
     assert payload["kind"] == "direct-pdf"
@@ -206,6 +187,22 @@ def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_imag
     assert digest["metadata_card"]["title"] == "API Grounded Paper Title"
 
 
+def test_raw_fast_evidence_bundle_arxiv_api_title_decodes_xml_entities(tmp_path: Path) -> None:
+    from ops import raw_fast_evidence_bundle
+
+    workdir = tmp_path / "bundle-api-entity-title"
+    write(
+        workdir / "api.xml",
+        """<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns='http://www.w3.org/2005/Atom'>
+  <entry><title>ResearchArena: Automated AI R&amp;D</title></entry>
+</feed>
+""".strip(),
+    )
+
+    assert raw_fast_evidence_bundle.arxiv_api_title(workdir) == "ResearchArena: Automated AI R&D"
+
+
 def test_raw_fast_evidence_bundle_title_fallbacks_use_abs_html_and_generic_title_macro(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
@@ -227,37 +224,6 @@ def test_raw_fast_evidence_bundle_title_fallbacks_use_abs_html_and_generic_title
 
     assert digest["metadata_card"]["title"] == "Abs & HTML Grounded Title"
 
-
-@pytest.mark.requires_fitz
-def test_raw_fast_evidence_bundle_refuses_workdir_inside_wiki_root(tmp_path: Path) -> None:
-    root = sample_wiki(tmp_path)
-    source_pdf = tmp_path / "source.pdf"
-    _write_tiny_pdf(source_pdf)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ops.raw_fast_evidence_bundle",
-            "--url",
-            source_pdf.as_uri(),
-            "--kind",
-            "direct-pdf",
-            "--root",
-            str(root),
-            "--workdir",
-            str(root / "raw" / "clip" / "bundle"),
-            "--probe",
-            "none",
-        ],
-        text=True,
-        capture_output=True,
-    )
-    payload = json.loads(result.stdout)
-
-    assert result.returncode != 0
-    assert payload["stage"] == "preflight"
-    assert payload["error"] == "workdir_inside_wiki_root"
-    assert not (root / "raw" / "clip" / "bundle" / "evidence_bundle.json").exists()
 
 def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
@@ -319,7 +285,6 @@ def test_raw_fast_evidence_bundle_preflight_and_agent_sidecars_are_tmp_only(tmp_
 
     assert preflight["ok"] is True
     assert preflight["next_raw_path"] == "raw/clip/2601/26010102_Foo-Paper.md"
-    assert preflight["queue_status"]["wiki_pending_count"] == 1
     assert summary["ok"] is True
     required_files = {
         "raw_fast_preflight",

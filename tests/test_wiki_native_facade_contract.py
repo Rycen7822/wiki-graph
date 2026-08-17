@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import importlib
-import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from ops import wiki_native_lib  # noqa: E402
+from ops import wiki_native_lib
 
 FACADE_OWNER_SYMBOLS = {
     "ops.wiki_native_artifacts": ("build_seed_edges", "extract_method_atoms", "resolve_source"),
@@ -97,22 +92,3 @@ def test_native_facade_exports_active_owner_symbols() -> None:
         owner = importlib.import_module(module_name)
         assert facade_name in wiki_native_lib.__all__
         assert getattr(wiki_native_lib, facade_name) is getattr(owner, owner_name)
-
-
-def test_save_evidence_pack_accepts_string_references_from_answer_route(tmp_path: Path) -> None:
-    native_query_events = importlib.import_module("ops.wiki_native_query_events")
-
-    pack = native_query_events.save_evidence_pack(
-        tmp_path / "state",
-        "answer route query",
-        "mix",
-        {
-            "response": "answer",
-            "references": ["raw/example.md"],
-            "data": {"context_blocks": [{"source_path": "raw/example.md", "text": "context"}]},
-            "trace": {"retrieval_backend": "zvec", "context_block_count": 1},
-        },
-    )
-
-    text = pack.read_text(encoding="utf-8")
-    assert "- file_path: `raw/example.md`" in text

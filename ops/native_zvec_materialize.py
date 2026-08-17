@@ -7,10 +7,13 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import time
 from typing import Any
 
 from llm_wiki_native.build import MissingNativeVectorsError  # noqa: E402
-from llm_wiki_native.workspace_build import build_workspace_from_state  # noqa: E402
+from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace  # noqa: E402
+from llm_wiki_native.workspace_build import apply_incremental_workspace_from_state, build_workspace_from_state  # noqa: E402
 from llm_wiki_native.pointers import finalize_prepared_workspace, rollback_active_workspace  # noqa: E402
 
 
@@ -20,6 +23,10 @@ class VectorFillFailedError(RuntimeError):
         self.before_missing = before_missing
         self.vector_cache_path = vector_cache_path
         self.exception_type = exception_type
+
+
+class IncrementalSourceError(ValueError):
+    """Raised when an --incremental-from source workspace is missing, unaudited, or fails integrity checks."""
 
 
 REQUIRED_STATE_INPUTS = (
@@ -122,13 +129,17 @@ def _sqlite_record_count(counts: dict[str, Any]) -> int:
 
 def _build_ok(native_report: dict[str, Any]) -> bool:
     zvec = native_report.get("zvec") or {}
-    insert_stats = zvec.get("insert_stats") or {}
-    return bool(
-        native_report.get("audit", {}).get("ok")
-        and native_report.get("vector_audit", {}).get("ok")
-        and int(insert_stats.get("failed", 0)) == 0
-        and int(insert_stats.get("inserted", -1)) == int(zvec.get("record_count", -2))
-    )
+    base_ok = bool(native_report.get("audit", {}).get("ok") and native_report.get("vector_audit", {}).get("ok"))
+    insert_stats = zvec.get("insert_stats")
+    if insert_stats is not None:
+        return bool(
+            base_ok
+            and int(insert_stats.get("failed", 0)) == 0
+            and int(insert_stats.get("inserted", -1)) == int(zvec.get("record_count", -2))
+        )
+    upsert_stats = zvec.get("upsert_stats") or {}
+    delete_stats = zvec.get("delete_stats") or {}
+    return bool(base_ok and int(upsert_stats.get("failed", 0)) == 0 and int(delete_stats.get("failed", 0)) == 0)
 
 
 def _manifest_record_count(manifest: dict[str, Any]) -> int:
@@ -224,7 +235,31 @@ def fill_missing_manifest_vectors_for_state(
     }
 
 
+def _incremental_source_integrity(source_dir: Path, source_workspace_id: str) -> dict[str, Any]:
+    """Pre-copy integrity gate: the source workspace must be audited and consistent with its build report."""
+    report_path = source_dir / "build_report.json"
+    if not report_path.exists():
+        raise IncrementalSourceError(f"incremental source workspace missing build_report.json: {source_dir}")
+    report = _read_json(report_path)
+    sqlite_path = source_dir / "native.sqlite"
+    if not sqlite_path.exists():
+        raise IncrementalSourceError(f"incremental source workspace missing native.sqlite: {source_dir}")
+    db = SQLiteWorkspace.open_existing(sqlite_path, read_only=True)
+    status = db.get_workspace_status(source_workspace_id)
+    if status != "audited":
+        raise IncrementalSourceError(f"incremental source workspace {source_workspace_id} is not audited (status={status})")
+    expected = report.get("counts") or {}
+    audit = db.audit_counts(source_workspace_id, expected)
+    if not audit["ok"]:
+        raise IncrementalSourceError(f"incremental source workspace {source_workspace_id} failed counts audit: {audit['issues']}")
+    vector_audit = db.audit_vector_coverage(source_workspace_id)
+    if not vector_audit["ok"]:
+        raise IncrementalSourceError(f"incremental source workspace {source_workspace_id} failed vector coverage: {vector_audit.get('missing')}")
+    return {"workspace_id": source_workspace_id, "counts": expected, "vector_coverage_ok": True}
+
+
 def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
+    build_started = time.perf_counter()
     root = args.root.resolve()
     state_dir = args.state_dir.resolve()
     workspace_root = args.workspace_root.resolve()
@@ -232,6 +267,9 @@ def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
     sqlite_path = candidate_dir / "native.sqlite"
     zvec_path = candidate_dir / "zvec_records"
     prepared_path = prepared_workspace_path(workspace_root) if args.prepare_only else None
+    incremental_from = getattr(args, "incremental_from", None)
+    if incremental_from and bool(getattr(args, "reuse_unchanged_workspace", False)):
+        raise IncrementalSourceError("--incremental-from and --reuse-unchanged-workspace are mutually exclusive")
     input_fingerprints = state_input_fingerprints(state_dir)
     if bool(getattr(args, "reuse_unchanged_workspace", False)):
         reusable_report = reusable_build_report(workspace_root, args.workspace_id, input_fingerprints)
@@ -244,23 +282,48 @@ def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
                 "input_fingerprints": input_fingerprints,
             }
     vector_fill_report = None
+    vector_fill_seconds: float | None = None
     if bool(getattr(args, "fill_missing_vectors", False)):
+        fill_started = time.perf_counter()
         vector_fill_report = fill_missing_manifest_vectors_for_state(
             state_dir,
             workdir=state_dir.parent,
             embedding_profile=args.embedding_profile,
             embed_texts_func=embed_texts_func,
         )
+        vector_fill_seconds = round(time.perf_counter() - fill_started, 3)
         input_fingerprints = state_input_fingerprints(state_dir)
-    native_report = build_workspace_from_state(
-        state_dir,
-        sqlite_path,
-        args.workspace_id,
-        zvec_path=zvec_path,
-        prepared_workspace_path=prepared_path,
-        source_root=root,
-    )
+    source_integrity = None
+    if incremental_from:
+        source_dir = workspace_dir(workspace_root, incremental_from)
+        if not source_dir.exists():
+            raise IncrementalSourceError(f"incremental source workspace not found: {source_dir}")
+        if candidate_dir.exists():
+            raise IncrementalSourceError(f"workspace dir already exists: {candidate_dir}")
+        source_integrity = _incremental_source_integrity(source_dir, incremental_from)
+        shutil.copytree(source_dir, candidate_dir)
+        native_report = apply_incremental_workspace_from_state(
+            state_dir,
+            sqlite_path,
+            args.workspace_id,
+            zvec_path=zvec_path,
+            prepared_workspace_path=prepared_path,
+            source_root=root,
+        )
+    else:
+        native_report = build_workspace_from_state(
+            state_dir,
+            sqlite_path,
+            args.workspace_id,
+            zvec_path=zvec_path,
+            prepared_workspace_path=prepared_path,
+            source_root=root,
+        )
     zvec = native_report["zvec"]
+    if incremental_from:
+        zvec_doc_count = int(zvec["record_count"])
+    else:
+        zvec_doc_count = int(zvec["insert_stats"]["inserted"])
     report = {
         "ok": _build_ok(native_report),
         "command": "build",
@@ -278,7 +341,7 @@ def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
         "counts": native_report["counts"],
         "sqlite_record_count": _sqlite_record_count(native_report["counts"]),
         "sqlite_edge_count": int(native_report["edge_count"]),
-        "zvec_doc_count": int(zvec["insert_stats"]["inserted"]),
+        "zvec_doc_count": zvec_doc_count,
         "self_nearest_top1_ok": bool(zvec.get("self_nearest_top1_ok")),
         "vector_coverage": {
             "ok": bool(native_report["vector_audit"]["ok"]),
@@ -287,9 +350,15 @@ def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
         "native_report": native_report,
         "input_fingerprints": input_fingerprints,
         "reused_existing_workspace": False,
+        "build_seconds": round(time.perf_counter() - build_started, 3),
     }
+    if incremental_from:
+        report["incremental_from"] = incremental_from
+        report["delta"] = native_report["delta"]
+        report["source_integrity"] = source_integrity
     if vector_fill_report is not None:
         report["vector_fill"] = vector_fill_report
+        report["vector_fill_seconds"] = vector_fill_seconds
     _write_json_atomic(Path(report["build_report"]), report)
     return report
 
@@ -334,6 +403,12 @@ def main(argv: list[str] | None = None) -> int:
     build_parser.add_argument("--embedding-profile", default="conservative")
     build_parser.add_argument("--fill-missing-vectors", action="store_true")
     build_parser.add_argument("--reuse-unchanged-workspace", action="store_true", help="Reuse an existing ok build report for the same workspace_id when state input fingerprints match")
+    build_parser.add_argument(
+        "--incremental-from",
+        default=None,
+        metavar="WORKSPACE_ID",
+        help="Opt-in incremental build: copy the given audited workspace and apply only the state delta (mutually exclusive with --reuse-unchanged-workspace)",
+    )
     build_parser.add_argument("--prepare-only", action="store_true")
 
     preflight_parser = sub.add_parser("preflight", help="Check native zvec staging inputs without workspace writes")
@@ -357,6 +432,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "build":
         try:
             print_json(build(args))
+        except IncrementalSourceError as exc:
+            print_json(
+                {
+                    "ok": False,
+                    "command": "build",
+                    "error": "incremental_source_invalid",
+                    "message": str(exc),
+                    "workspace_root": str(args.workspace_root.resolve()),
+                    "workspace_id": args.workspace_id,
+                    "incremental_from": args.incremental_from,
+                }
+            )
+            return 1
         except VectorFillFailedError as exc:
             print_json(
                 {

@@ -1,9 +1,16 @@
+import pytest
+
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace
 
 
-def test_graph_index_returns_deterministic_undirected_neighbors(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+@pytest.fixture
+def db(tmp_path):
+    workspace = SQLiteWorkspace(tmp_path / "native.sqlite")
+    workspace.create_workspace("native-test", "manifest-hash")
+    return workspace
+
+
+def test_graph_index_returns_deterministic_undirected_neighbors(db) -> None:
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.7, {"source": "manifest"})
     db.put_edge("native-test", "section_similarity", "doc:a", "doc:b", 0.9, {"source": "section-sim"})
     db.put_edge("native-test", "relationship", "doc:a", "tag:y", 0.7, {"source": "manifest"})
@@ -18,9 +25,7 @@ def test_graph_index_returns_deterministic_undirected_neighbors(tmp_path) -> Non
     ]
 
 
-def test_graph_index_filters_edge_types_and_limits_results(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+def test_graph_index_filters_edge_types_and_limits_results(db) -> None:
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.7, {})
     db.put_edge("native-test", "section_similarity", "doc:a", "doc:b", 0.9, {})
 
@@ -29,9 +34,7 @@ def test_graph_index_filters_edge_types_and_limits_results(tmp_path) -> None:
     assert [(item["neighbor_id"], item["edge_type"]) for item in results] == [("tag:x", "relationship")]
 
 
-def test_graph_index_preserves_reverse_directed_edges(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+def test_graph_index_preserves_reverse_directed_edges(db) -> None:
     db.put_edge("native-test", "relationship", "doc:a", "tag:x", 0.7, {"source": "forward"})
     db.put_edge("native-test", "relationship", "tag:x", "doc:a", 0.8, {"source": "reverse"})
 
@@ -47,9 +50,7 @@ def test_graph_index_preserves_reverse_directed_edges(tmp_path) -> None:
     ]
 
 
-def test_graph_index_does_not_duplicate_self_loop_neighbors(tmp_path) -> None:
-    db = SQLiteWorkspace(tmp_path / "native.sqlite")
-    db.create_workspace("native-test", "manifest-hash")
+def test_graph_index_does_not_duplicate_self_loop_neighbors(db) -> None:
     db.put_edge("native-test", "self", "doc:a", "doc:a", 1.0, {"source": "loop"})
 
     results = db.neighbors("native-test", "doc:a")

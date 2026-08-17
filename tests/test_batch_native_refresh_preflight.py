@@ -1,90 +1,52 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from ops import batch_native_refresh  # noqa: E402
-
-
-def _cutover_context(tmp_path: Path, *, pending: bool = False) -> SimpleNamespace:
-    state_dir = tmp_path / "wikigraph" / "state"
-    root = tmp_path / "wiki"
-    workspace_root = state_dir / "native_zvec" / "workspaces"
-    watched_dir = tmp_path / "watched"
-    calls: list[tuple] = []
-    if pending:
-        watched_dir.mkdir(parents=True)
-        batch_native_refresh.mark_pending(state_dir, root, reason="manual-smoke")
-    return SimpleNamespace(
-        state_dir=state_dir,
-        root=root,
-        workspace_root=workspace_root,
-        watched_dir=watched_dir,
-        calls=calls,
-    )
+from ops import batch_native_refresh
+from support import cutover_cli_args  # noqa: E402
+from support import cutover_context as _cutover_context  # noqa: E402
+from support import fake_cutover_hooks as _fake_cutover_hooks  # noqa: E402
 
 
-def _fake_cutover_hooks(
-    calls: list[tuple],
-    *,
-    smoke_ok: bool = True,
-    smoke_raises: Exception | None = None,
-    mutate_watched_path: Path | None = None,
-):
-    def build_workspace(**kwargs):
-        calls.append(("build", kwargs["workspace_id"]))
-        if mutate_watched_path is not None:
-            mutate_watched_path.write_text('{"stable":false}', encoding="utf-8")
-        return {"ok": True, "workspace_id": kwargs["workspace_id"]}
+def _fail_before(calls: list, recorded, message: str):
+    def hook(*args, **kwargs):
+        calls.append(recorded(args, kwargs))
+        raise AssertionError(message)
 
-    def finalize_workspace(*, state_dir, reason):
-        calls.append(("finalize", reason))
-        return {"schema_version": 1, "workspace_id": "candidate", "status": "active"}
-
-    def restart_service(*, state_dir):
-        calls.append(("restart", str(state_dir)))
-        return {"service": "llm-wiki-native", "status": "ok"}
-
-    def query_smoke(*, state_dir, active):
-        calls.append(("smoke", str(state_dir), active["workspace_id"]))
-        if smoke_raises is not None:
-            raise smoke_raises
-        return {"ok": smoke_ok, "url": "http://127.0.0.1:9621/query/data"}
-
-    return build_workspace, finalize_workspace, restart_service, query_smoke
+    return hook
 
 
 def test_refresh_cutover_cli_rejects_invalid_cutover_options_before_calls(tmp_path, monkeypatch) -> None:
     context = _cutover_context(tmp_path, pending=True)
     calls = context.calls
 
-    def fake_status(*args, **kwargs):
-        calls.append(("status", args, kwargs))
-        raise AssertionError("invalid cutover options must fail before status")
-
-    def fail_build_prepared_workspace(**kwargs):
-        calls.append(("build", kwargs["workspace_id"]))
-        raise AssertionError("invalid cutover options must fail before build")
-
-    def fail_finalize_workspace(*, state_dir, reason):
-        calls.append(("finalize", reason))
-        raise AssertionError("invalid cutover options must fail before finalize")
-
-    def fail_restart_service_from_args(args):
-        calls.append(("restart_args", args.restart_command))
-        raise AssertionError("invalid cutover options must fail before restart hook construction")
-
-    monkeypatch.setattr(batch_native_refresh, "status", fake_status)
-    monkeypatch.setattr(batch_native_refresh, "build_prepared_workspace", fail_build_prepared_workspace)
-    monkeypatch.setattr(batch_native_refresh, "finalize_prepared_workspace_for_state", fail_finalize_workspace)
-    monkeypatch.setattr(batch_native_refresh, "restart_service_from_args", fail_restart_service_from_args)
+    monkeypatch.setattr(
+        batch_native_refresh,
+        "status",
+        _fail_before(calls, lambda args, kwargs: ("status", args, kwargs), "invalid cutover options must fail before status"),
+    )
+    monkeypatch.setattr(
+        batch_native_refresh,
+        "build_prepared_workspace",
+        _fail_before(calls, lambda _args, kwargs: ("build", kwargs["workspace_id"]), "invalid cutover options must fail before build"),
+    )
+    monkeypatch.setattr(
+        batch_native_refresh,
+        "finalize_prepared_workspace_for_state",
+        _fail_before(calls, lambda _args, kwargs: ("finalize", kwargs["reason"]), "invalid cutover options must fail before finalize"),
+    )
+    monkeypatch.setattr(
+        batch_native_refresh,
+        "restart_service_from_args",
+        _fail_before(
+            calls,
+            lambda args, _kwargs: ("restart_args", args[0].restart_command),
+            "invalid cutover options must fail before restart hook construction",
+        ),
+    )
 
     args = [
         "refresh",
@@ -112,69 +74,40 @@ def test_refresh_cutover_cli_rejects_invalid_cutover_options_before_calls(tmp_pa
     assert calls == []
 
 
-def test_preflight_cutover_reports_missing_smoke_pair_without_status_or_build(tmp_path, capsys) -> None:
+@pytest.mark.parametrize(
+    "include_smoke_query,expected_code,expected_ok",
+    [(False, 1, False), (True, 0, True)],
+    ids=["missing_smoke_query", "valid_guard"],
+)
+def test_preflight_cutover_validates_smoke_pair_without_pending_status(
+    tmp_path, capsys, include_smoke_query: bool, expected_code: int, expected_ok: bool
+) -> None:
     workdir = tmp_path / "wikigraph"
     state_dir = workdir / "state"
     state_dir.mkdir(parents=True)
     root = tmp_path / "wiki"
     watched_dir = tmp_path / "watched"
     watched_dir.mkdir()
+    extra = [
+        "--restart-command",
+        "svc restart llm-wiki-native",
+        "--smoke-url",
+        "http://127.0.0.1:9621/query/data",
+    ]
+    if include_smoke_query:
+        extra.extend(["--smoke-query", "native cutover smoke"])
+    extra.extend(["--require-unchanged-path", str(watched_dir)])
+    argv = cutover_cli_args(workdir, root, *extra, command="preflight-cutover")
 
-    code = batch_native_refresh.main(
-        [
-            "preflight-cutover",
-            "--workdir",
-            str(workdir),
-            "--root",
-            str(root),
-            "--restart-command",
-            "svc restart llm-wiki-native",
-            "--smoke-url",
-            "http://127.0.0.1:9621/query/data",
-            "--require-unchanged-path",
-            str(watched_dir),
-        ]
-    )
+    code = batch_native_refresh.main(argv)
     payload = json.loads(capsys.readouterr().out)
 
-    assert code == 1
-    assert payload["ok"] is False
-    assert "missing_smoke_query" in payload["errors"]
-    assert "missing_restart_command" not in payload["errors"]
-    assert payload["path_errors"] == []
-    assert not batch_native_refresh.pending_ledger_path(state_dir).exists()
-
-
-def test_preflight_cutover_accepts_valid_guard_shape_without_pending_status(tmp_path, capsys) -> None:
-    workdir = tmp_path / "wikigraph"
-    state_dir = workdir / "state"
-    state_dir.mkdir(parents=True)
-    root = tmp_path / "wiki"
-    watched_dir = tmp_path / "watched"
-    watched_dir.mkdir()
-
-    code = batch_native_refresh.main(
-        [
-            "preflight-cutover",
-            "--workdir",
-            str(workdir),
-            "--root",
-            str(root),
-            "--restart-command",
-            "svc restart llm-wiki-native",
-            "--smoke-url",
-            "http://127.0.0.1:9621/query/data",
-            "--smoke-query",
-            "native cutover smoke",
-            "--require-unchanged-path",
-            str(watched_dir),
-        ]
-    )
-    payload = json.loads(capsys.readouterr().out)
-
-    assert code == 0
-    assert payload["ok"] is True
-    assert payload["errors"] == []
+    assert code == expected_code
+    assert payload["ok"] is expected_ok
+    if include_smoke_query:
+        assert payload["errors"] == []
+    else:
+        assert "missing_smoke_query" in payload["errors"]
     assert not batch_native_refresh.pending_ledger_path(state_dir).exists()
 
 
