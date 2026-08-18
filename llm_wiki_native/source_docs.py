@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,7 +178,15 @@ def raw_clip_files(root: Path) -> list[Path]:
     raw_clip = root / "raw" / "clip"
     if not raw_clip.exists():
         return []
-    return sorted(path for path in raw_clip.rglob("*.md") if path.is_file())
+    # os.walk classifies entries from dirent without a per-file stat(); the
+    # previous rglob+is_file() issued one stat() per file (~2ms each on the
+    # WSL 9p/drvfs mount), turning a ~0.04s walk into ~3s at 1.4k files.
+    return sorted(
+        Path(dirpath) / name
+        for dirpath, _dirnames, filenames in os.walk(raw_clip)
+        for name in filenames
+        if name.endswith(".md")
+    )
 
 
 def collect_source_docs(root: Path) -> list[WikiDoc]:
