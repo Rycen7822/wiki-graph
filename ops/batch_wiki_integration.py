@@ -557,33 +557,44 @@ def run_auto_integration(
     defer_native_refresh: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     pre_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
-    plan = build_wiki_integration_plan(root, state_dir, reason=reason, threshold=threshold)
-    plan_path = write_wiki_integration_plan_report(state_dir, plan)
-    prompt = build_auto_integration_prompt(root, state_dir, pre_status, reason, plan=plan, plan_path=plan_path)
-    prompt_path = write_auto_integration_prompt(state_dir, prompt)
     effective_runner = "external" if integration_command else runner
-    if effective_runner == "local":
-        command = ["integrate-local", "--plan", str(plan_path)]
-    else:
-        command = build_runner_command(integration_command, prompt, prompt_path, root, state_dir, reason)
-    redacted_command = ["<prompt>" if part == prompt else part for part in command]
     base: dict[str, Any] = {
         "dry_run": dry_run,
         "would_run": bool(pre_status.get("should_integrate")) and not bool(pre_status.get("should_review")),
         "ran": False,
         "runner": effective_runner,
         "pre_status": pre_status,
-        "prompt_path": str(prompt_path),
-        "plan_path": str(plan_path),
-        "plan_hash": plan.get("plan_hash"),
-        "plan_operations": len(plan.get("operations") or []),
-        "prompt_chars": len(prompt),
-        "command": redacted_command,
+        "prompt_path": None,
+        "plan_path": None,
+        "plan_hash": None,
+        "plan_operations": 0,
+        "prompt_chars": 0,
+        "command": [],
     }
     if pre_status.get("should_review"):
         return 11, {**base, "skipped": True, "skip_reason": "manual_review_required"}
     if not pre_status.get("should_integrate"):
         return 0, {**base, "skipped": True, "skip_reason": "integration_not_required"}
+
+    plan = build_wiki_integration_plan(root, state_dir, reason=reason, threshold=threshold)
+    plan_path = write_wiki_integration_plan_report(state_dir, plan)
+    prompt = build_auto_integration_prompt(root, state_dir, pre_status, reason, plan=plan, plan_path=plan_path)
+    prompt_path = write_auto_integration_prompt(state_dir, prompt)
+    if effective_runner == "local":
+        command = ["integrate-local", "--plan", str(plan_path)]
+    else:
+        command = build_runner_command(integration_command, prompt, prompt_path, root, state_dir, reason)
+    redacted_command = ["<prompt>" if part == prompt else part for part in command]
+    base.update(
+        {
+            "prompt_path": str(prompt_path),
+            "plan_path": str(plan_path),
+            "plan_hash": plan.get("plan_hash"),
+            "plan_operations": len(plan.get("operations") or []),
+            "prompt_chars": len(prompt),
+            "command": redacted_command,
+        }
+    )
     if dry_run:
         return 0, {**base, "skipped": False}
     if effective_runner == "local":
