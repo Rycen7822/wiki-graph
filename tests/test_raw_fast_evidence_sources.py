@@ -30,8 +30,6 @@ def test_raw_fast_evidence_bundle_arxiv_uses_tex_source_without_pdf_text_artifac
     workdir = tmp_path / "tex-first-arxiv"
 
     def fake_fetch_text(url: str, timeout: int) -> dict:
-        if "export.arxiv.org" in url:
-            return {"ok": True, "status": 200, "text": "<feed><entry><title>TeX First Fixture Paper</title></entry></feed>"}
         return {"ok": True, "status": 200, "text": "<html><title>TeX First Fixture Paper</title></html>"}
 
     def forbidden_process_pdf(*args, **kwargs):
@@ -168,39 +166,28 @@ def test_raw_fast_evidence_bundle_direct_pdf_respects_workdir_guard(tmp_path: Pa
     assert wiki_root_machine_pollution(root) == []
 
 @pytest.mark.requires_fitz
-def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_api_title_over_image_tex_title(tmp_path: Path) -> None:
+def test_raw_fast_evidence_bundle_paper_digest_prefers_arxiv_abs_title_over_image_tex_title(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
-    workdir = tmp_path / "bundle-api-title"
-    write(
-        workdir / "api.xml",
-        """<?xml version='1.0' encoding='UTF-8'?>
-<feed xmlns='http://www.w3.org/2005/Atom'>
-  <entry><title>API Grounded Paper Title</title></entry>
-</feed>
-""".strip(),
-    )
-    write(workdir / "source" / "main.tex", r"\title{<!-- image -->}\begin{document}\begin{abstract}API title should win.\end{abstract}\end{document}")
+    workdir = tmp_path / "bundle-abs-title"
+    write(workdir / "abs.html", '<meta name="citation_title" content="Abs Grounded Paper Title">')
+    write(workdir / "source" / "main.tex", r"\title{<!-- image -->}\begin{document}\begin{abstract}Abs title should win.\end{abstract}\end{document}")
 
     digest = raw_fast_evidence_bundle.build_paper_digest(workdir, "<!-- image -->", "https://arxiv.org/abs/2600.00000")
 
-    assert digest["metadata_card"]["title"] == "API Grounded Paper Title"
+    assert digest["metadata_card"]["title"] == "Abs Grounded Paper Title"
 
 
-def test_raw_fast_evidence_bundle_arxiv_api_title_decodes_xml_entities(tmp_path: Path) -> None:
+def test_raw_fast_evidence_bundle_arxiv_abs_categories_extracts_subjects(tmp_path: Path) -> None:
     from ops import raw_fast_evidence_bundle
 
-    workdir = tmp_path / "bundle-api-entity-title"
+    workdir = tmp_path / "bundle-abs-categories"
     write(
-        workdir / "api.xml",
-        """<?xml version='1.0' encoding='UTF-8'?>
-<feed xmlns='http://www.w3.org/2005/Atom'>
-  <entry><title>ResearchArena: Automated AI R&amp;D</title></entry>
-</feed>
-""".strip(),
+        workdir / "abs.html",
+        '<td class="tablecell subjects"><span class="primary-subject">Machine Learning (cs.LG)</span>; Artificial Intelligence (cs.AI); Computation and Language (cs.CL)</td>',
     )
 
-    assert raw_fast_evidence_bundle.arxiv_api_title(workdir) == "ResearchArena: Automated AI R&D"
+    assert raw_fast_evidence_bundle.arxiv_abs_categories(workdir) == ["cs.LG", "cs.AI", "cs.CL"]
 
 
 def test_raw_fast_evidence_bundle_title_fallbacks_use_abs_html_and_generic_title_macro(tmp_path: Path) -> None:

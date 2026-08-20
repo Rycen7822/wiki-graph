@@ -23,8 +23,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ops.wiki_native_cli import DEFAULT_WIKI_ROOT
 
@@ -33,6 +34,7 @@ TEXT_EXTENSIONS = {".txt", ".json", ".md", ".html", ".htm", ".js", ".toml", ".ya
 DEFAULT_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DOWNLOAD_BYTES_ENV_VARS = ("LLM_WIKI_RAW_FAST_MAX_DOWNLOAD_BYTES", "RAW_FAST_MAX_DOWNLOAD_BYTES")
 DEFAULT_MAX_TEXT_BYTES = 8 * 1024 * 1024
+SUPPLIED_RESOURCE_DISCOVERY_TIMEOUT = 8
 RAW_BODY_DRAFT_FILE = "raw_body_draft.md"
 TEX_AGENT_SOURCE_FILE = "paper_source.agent.tex"
 ASSEMBLED_RAW_NOTE_REPORT_FILE = "assembled_raw_note_report.json"
@@ -365,7 +367,7 @@ def fetch_pdf_source_to_file(url: str, dest: Path, timeout: int, max_bytes: int 
     return fetch_url_to_file(url, dest, timeout, max_bytes=max_bytes)
 
 
-def fetch_text(url: str, timeout: int, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) -> dict[str, Any]:
+def fetch_text(url: str, timeout: float, max_bytes: int = DEFAULT_MAX_TEXT_BYTES) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     try:
         if parsed.scheme == "file":
@@ -856,13 +858,16 @@ def classify_source_exposed_resources(
     for candidate in extra_candidates or []:
         add_candidate(candidate)
     health_enabled = health_mode == "direct"
-    for candidate in candidates[:RESOURCE_HEALTH_MAX_CANDIDATES]:
-        if not health_enabled:
+    probed = candidates[:RESOURCE_HEALTH_MAX_CANDIDATES]
+    if health_enabled and probed:
+        with ThreadPoolExecutor(max_workers=len(probed)) as executor:
+            health_results = executor.map(lambda candidate: probe_exact_link_health(candidate["url"], timeout=timeout), probed)
+            for candidate, health in zip(probed, health_results):
+                candidate["health"] = health
+                candidate["status"] = "verified_present" if health.get("ok") else "probe_failed"
+    else:
+        for candidate in probed:
             candidate["health"] = {"skipped": True, "reason": "resource_health_disabled"}
-            continue
-        health = probe_exact_link_health(candidate["url"], timeout=timeout)
-        candidate["health"] = health
-        candidate["status"] = "verified_present" if health.get("ok") else "probe_failed"
     for candidate in candidates[RESOURCE_HEALTH_MAX_CANDIDATES:]:
         candidate["health"] = {"skipped": True, "reason": "candidate_limit"}
     # Resource link health is script-owned: verified exact links may enter metadata;
@@ -926,7 +931,7 @@ def metadata_resource_links(resource_probe: dict[str, Any] | None) -> dict[str, 
     return links
 
 
-def _fetch_json(url: str, timeout: int) -> dict[str, Any]:
+def _fetch_json(url: str, timeout: float) -> dict[str, Any]:
     fetched = fetch_text(url, timeout)
     result = {key: fetched.get(key) for key in ["ok", "url", "status", "content_type", "bytes", "error", "message"] if key in fetched}
     if not fetched.get("ok"):
@@ -963,6 +968,10 @@ def _hf_repo_url(repo_id: str | None, kind: str) -> str | None:
     return None
 
 
+def _remaining_timeout(deadline: float) -> float:
+    return max(deadline - time.monotonic(), 0.1)
+
+
 def collect_paperswithcode_resources(arxiv_id: str, timeout: int) -> dict[str, Any]:
     endpoints = [
         f"https://paperswithcode.co/api/v1/papers/{arxiv_id}?include_resources=true",
@@ -970,8 +979,12 @@ def collect_paperswithcode_resources(arxiv_id: str, timeout: int) -> dict[str, A
     ]
     fetches: list[dict[str, Any]] = []
     data: dict[str, Any] | None = None
+    deadline = time.monotonic() + timeout
     for endpoint in endpoints:
-        fetched = _fetch_json(endpoint, timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        fetched = _fetch_json(endpoint, remaining)
         fetches.append({key: fetched.get(key) for key in ["ok", "url", "status", "error", "message"] if key in fetched})
         if fetched.get("ok") and isinstance(fetched.get("data"), dict):
             data = fetched["data"]
@@ -1012,8 +1025,9 @@ def collect_paperswithcode_resources(arxiv_id: str, timeout: int) -> dict[str, A
 
 
 def collect_huggingface_paper_resources(arxiv_id: str, timeout: int) -> dict[str, Any]:
-    paper = _fetch_json(f"https://huggingface.co/api/papers/{arxiv_id}", timeout)
-    repos = _fetch_json(f"https://huggingface.co/api/arxiv/{arxiv_id}/repos", timeout)
+    deadline = time.monotonic() + timeout
+    paper = _fetch_json(f"https://huggingface.co/api/papers/{arxiv_id}", _remaining_timeout(deadline))
+    repos = _fetch_json(f"https://huggingface.co/api/arxiv/{arxiv_id}/repos", _remaining_timeout(deadline))
     fetches = [
         {"name": "paper", **{key: paper.get(key) for key in ["ok", "url", "status", "error", "message"] if key in paper}},
         {"name": "arxiv_repos", **{key: repos.get(key) for key in ["ok", "url", "status", "error", "message"] if key in repos}},
@@ -1173,21 +1187,26 @@ def collect_modelscope_paper_resources(supplied_url: str, arxiv_id: str, timeout
 
 def collect_supplied_page_resources(supplied_url: str, arxiv_id: str, timeout: int) -> dict[str, Any]:
     host = _url_host(supplied_url)
-    platform_results: list[dict[str, Any]] = []
-    platforms_checked: list[str] = []
+    collectors: list[tuple[str, Callable[[], dict[str, Any]]]] = []
     if host == "paperswithcode.co":
-        platforms_checked.append("paperswithcode")
-        platform_results.append(collect_paperswithcode_resources(arxiv_id, timeout))
-        platforms_checked.append("huggingface")
-        platform_results.append(collect_huggingface_paper_resources(arxiv_id, timeout))
+        collectors = [
+            ("paperswithcode", lambda: collect_paperswithcode_resources(arxiv_id, timeout)),
+            ("huggingface", lambda: collect_huggingface_paper_resources(arxiv_id, timeout)),
+        ]
     elif host == "huggingface.co":
-        platforms_checked.append("huggingface")
-        platform_results.append(collect_huggingface_paper_resources(arxiv_id, timeout))
+        collectors = [("huggingface", lambda: collect_huggingface_paper_resources(arxiv_id, timeout))]
     elif host == MODELSCOPE_HOST:
-        platforms_checked.append("modelscope")
-        platform_results.append(collect_modelscope_paper_resources(supplied_url, arxiv_id, timeout))
+        collectors = [("modelscope", lambda: collect_modelscope_paper_resources(supplied_url, arxiv_id, timeout))]
     else:
         return {"ok": True, "skipped": True, "reason": "unsupported_supplied_resource_host", "source_url": supplied_url, "arxiv_id": arxiv_id, "platforms_checked": [], "candidates": [], "warnings": []}
+
+    platforms_checked = [name for name, _ in collectors]
+    if len(collectors) == 1:
+        platform_results = [fn() for _, fn in collectors]
+    else:
+        with ThreadPoolExecutor(max_workers=len(collectors)) as executor:
+            futures = [executor.submit(fn) for _, fn in collectors]
+            platform_results = [future.result() for future in futures]
 
     candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -2145,18 +2164,6 @@ def placeholder_title(text: str | None) -> bool:
     return bool(re.fullmatch(r"(?:<!--\s*)?(?:image|figure|img|formula-not-decoded)(?:\s*-->)?", value)) or value.startswith("<!-- image")
 
 
-def arxiv_api_title(workdir: Path) -> str | None:
-    api_path = workdir / "api.xml"
-    if not api_path.exists():
-        return None
-    text = api_path.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r"<entry\b.*?<title[^>]*>(.*?)</title>", text, re.S | re.I)
-    if not match:
-        return None
-    title = compact_ws(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))), max_len=300)
-    return title or None
-
-
 def arxiv_abs_title(workdir: Path) -> str | None:
     abs_path = workdir / "abs.html"
     if not abs_path.exists():
@@ -2180,12 +2187,16 @@ def arxiv_abs_title(workdir: Path) -> str | None:
     return None
 
 
-def arxiv_api_categories(workdir: Path) -> list[str]:
-    api_path = workdir / "api.xml"
-    if not api_path.exists():
+def arxiv_abs_categories(workdir: Path) -> list[str]:
+    abs_path = workdir / "abs.html"
+    if not abs_path.exists():
         return []
-    text = api_path.read_text(encoding="utf-8", errors="replace")
-    return [compact_ws(match, max_len=80) for match in re.findall(r"<category\b[^>]*\bterm=['\"]([^'\"]+)['\"]", text, re.I)]
+    text = abs_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"<td\b[^>]*\bclass=[\"']tablecell subjects[\"'][^>]*>(.*?)</td>", text, re.S | re.I)
+    if not match:
+        return []
+    cell = match.group(1)
+    return [compact_ws(cat, max_len=80) for cat in re.findall(r"\b([a-z][a-z-]*\.[A-Z]{2})\b", cell)]
 
 
 def domain_from_arxiv_categories(categories: list[str]) -> str:
@@ -2273,10 +2284,9 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
     if docling_path.exists():
         text_candidates.append(read_text(docling_path, limit=100_000))
     combined_text = "\n".join(text_candidates)
-    api_title = arxiv_api_title(workdir)
     abs_title = arxiv_abs_title(workdir)
     tex_title = tex_title_from_text(tex_text) if tex_text else None
-    metadata_title = next((candidate for candidate in [api_title, abs_title, tex_title, title] if candidate and not placeholder_title(candidate)), title or "Untitled Paper")
+    metadata_title = next((candidate for candidate in [abs_title, tex_title, title] if candidate and not placeholder_title(candidate)), title or "Untitled Paper")
     section_cards = extract_tex_section_cards(tex_text) if tex_text else section_inventory(combined_text)
     equation_cards = extract_tex_equation_cards(tex_text) if tex_text else []
     table_cards = extract_tex_table_cards(tex_text) if tex_text else []
@@ -2293,7 +2303,7 @@ def build_paper_digest(workdir: Path, title: str, source_url: str, resource_prob
         warnings.append("no_tex_equation_cards_detected")
     if not figure_cards:
         warnings.append("no_figure_cards_detected")
-    source_priority = [name for name, present in [("arxiv_api", (workdir / "api.xml").exists()), ("tex_source", bool(tex_text)), ("docling", docling_path.exists() and not tex_text)] if present]
+    source_priority = [name for name, present in [("arxiv_abs", (workdir / "abs.html").exists()), ("tex_source", bool(tex_text)), ("docling", docling_path.exists() and not tex_text)] if present]
     return {
         "ok": True,
         "source_priority": source_priority,
@@ -2545,25 +2555,50 @@ def _duplicate_bucket(rel: str) -> str:
     return "compiled"
 
 
+_DUP_SCAN_HEAD_BYTES = 16 * 1024
+_DUP_SCAN_WORKERS = 8
+
+
+def _read_head_text(path: Path, max_bytes: int = _DUP_SCAN_HEAD_BYTES) -> str | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(max_bytes).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def scan_duplicate_hits(root: Path, title: str, url: str, kind: str, *, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
     terms = _duplicate_terms(title, url, kind)
     buckets: dict[str, list[dict[str, Any]]] = {"raw": [], "compiled": [], "meta": [], "log": []}
     if not root.exists():
         return buckets
-    lowered_terms = [(term, term.lower()) for term in terms]
-    for path in sorted(root.rglob("*.md")):
-        if sum(len(items) for items in buckets.values()) >= limit:
-            break
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")[:1_000_000]
-        except OSError:
-            continue
-        lower = text.lower()
-        matched = [term for term, lowered in lowered_terms if lowered and lowered in lower]
+    lowered_terms = [(term, term.lower()) for term in terms if term]
+    if not lowered_terms:
+        return buckets
+
+    def _check(path: Path) -> tuple[str, dict[str, Any]] | None:
+        head = _read_head_text(path)
+        if head is None:
+            return None
+        lower = head.lower()
+        matched = [term for term, lowered in lowered_terms if lowered in lower]
         if not matched:
-            continue
+            return None
         rel = path.relative_to(root).as_posix()
-        buckets[_duplicate_bucket(rel)].append({"path": rel, "matched_terms": matched[:5]})
+        return _duplicate_bucket(rel), {"path": rel, "matched_terms": matched[:5]}
+
+    total = 0
+    with ThreadPoolExecutor(max_workers=_DUP_SCAN_WORKERS) as executor:
+        futures = [executor.submit(_check, path) for path in sorted(root.rglob("*.md"))]
+        for future in futures:
+            result = future.result()
+            if result is None:
+                continue
+            if total >= limit:
+                break
+            bucket, item = result
+            buckets[bucket].append(item)
+            total += 1
     return buckets
 
 
@@ -3587,13 +3622,10 @@ def process_arxiv(
             resource_health=resource_health,
             max_download_bytes=max_download_bytes,
         )
-    api_url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode({"id_list": arxiv_id})
     abs_url = f"https://arxiv.org/abs/{arxiv_id}"
     pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
     eprint_url = f"https://arxiv.org/e-print/{arxiv_id}"
-    api = timings.record("arxiv_api", fetch_text, api_url, timeout)
     abs_page = timings.record("arxiv_abs_page", fetch_text, abs_url, timeout)
-    write_text(workdir / "api.xml", api.get("text") or "")
     write_text(workdir / "abs.html", abs_page.get("text") or "")
     if max_download_bytes == DEFAULT_MAX_DOWNLOAD_BYTES:
         eprint = timings.record("arxiv_eprint_fetch", fetch_url_to_file, eprint_url, workdir / "eprint.tar", timeout)
@@ -3605,11 +3637,11 @@ def process_arxiv(
     tex_figures = figure_table_inventory(tex_text)
     tex_selection = select_main_tex_source(workdir)
     write_json(workdir / "source_inventory.json", {"eprint": eprint, "source_extract": source_extract, "tex_files": tex_files[:200], "figure_table_items": tex_figures, "tex_selection": tex_selection})
-    supplied_page_resources = timings.record("supplied_page_resources", collect_supplied_page_resources, supplied_url, arxiv_id, min(timeout, 12))
+    supplied_page_resources = timings.record("supplied_page_resources", collect_supplied_page_resources, supplied_url, arxiv_id, min(timeout, SUPPLIED_RESOURCE_DISCOVERY_TIMEOUT))
     supplied_resource_candidates = supplied_page_resources.get("candidates") if isinstance(supplied_page_resources.get("candidates"), list) else []
     write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
     if tex_selection.get("ok"):
-        files: dict[str, str] = {"api": "api.xml", "abs_html": "abs.html", "source_inventory": "source_inventory.json", "supplied_page_resources": "supplied_page_resources.json"}
+        files: dict[str, str] = {"abs_html": "abs.html", "source_inventory": "source_inventory.json", "supplied_page_resources": "supplied_page_resources.json"}
         main_tex = str(tex_selection["main_tex"])
         source_read_plan = build_source_read_plan(workdir, source_kind="tex_source", main_rel=main_tex, fallback_used=False)
         write_json(workdir / "tex_read_plan.json", source_read_plan)
@@ -3621,8 +3653,8 @@ def process_arxiv(
         files["section_inventory"] = "section_inventory.json"
         files["figure_table_inventory"] = "figure_table_inventory.json"
         main_tex_text = read_text(workdir / main_tex, limit=200_000)
-        title = arxiv_api_title(workdir) or arxiv_abs_title(workdir) or tex_title_from_text(main_tex_text) or tex_title_from_text(tex_text) or title_from_text(_plain_tex_prose(main_tex_text))
-        arxiv_categories = arxiv_api_categories(workdir)
+        title = arxiv_abs_title(workdir) or tex_title_from_text(main_tex_text) or tex_title_from_text(tex_text) or title_from_text(_plain_tex_prose(main_tex_text))
+        arxiv_categories = arxiv_abs_categories(workdir)
         links = {"ok": True, "links": []}
         resource_probe = timings.record("resource_probe", build_resource_probe, tex_text, links, probes, health_mode=resource_health, timeout=min(timeout, 12), extra_candidates=supplied_resource_candidates)
         write_json(workdir / "resource_probe.json", resource_probe)
@@ -3669,7 +3701,7 @@ def process_arxiv(
             "next_raw_path": preflight["next_raw_path"],
             "preflight": preflight,
             "warnings": [],
-            "arxiv": {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection},
+            "arxiv": {"id": arxiv_id, "supplied_url": supplied_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection},
         }
         payload["agent_automation"] = timings.record(
             "agent_automation_sidecars",
@@ -3706,8 +3738,7 @@ def process_arxiv(
         max_download_bytes=max_download_bytes,
     )
     payload["supplied_url"] = supplied_url
-    payload["arxiv"] = {"id": arxiv_id, "supplied_url": supplied_url, "api_url": api_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "api_ok": api.get("ok"), "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection}
-    payload.setdefault("files", {})["api"] = "api.xml"
+    payload["arxiv"] = {"id": arxiv_id, "supplied_url": supplied_url, "abs_url": abs_url, "pdf_url": pdf_url, "eprint_url": eprint_url, "abs_ok": abs_page.get("ok"), "eprint_ok": eprint.get("ok"), "source_extract": source_extract, "tex_files": tex_files[:200], "tex_selection": tex_selection}
     payload.setdefault("files", {})["abs_html"] = "abs.html"
     payload.setdefault("files", {})["source_inventory"] = "source_inventory.json"
     attach_timings(payload, timings)
