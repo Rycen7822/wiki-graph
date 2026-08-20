@@ -190,8 +190,6 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
     supplied_url = "https://huggingface.co/papers/2606.02572"
 
     def fake_fetch_text(url: str, timeout: int) -> dict:
-        if "export.arxiv.org" in url:
-            return {"ok": True, "status": 200, "text": "<feed><entry><title>Cross Site Fixture Paper</title></entry></feed>"}
         return {"ok": True, "status": 200, "text": "<html><title>Cross Site Fixture Paper</title></html>"}
 
     install_fake_arxiv_fetch(

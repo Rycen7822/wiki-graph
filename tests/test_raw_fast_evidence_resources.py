@@ -84,8 +84,6 @@ def test_raw_fast_evidence_bundle_pwc_supplied_resources_feed_metadata_without_h
     }
 
     def fake_fetch_text(url: str, timeout: int) -> dict:
-        if "export.arxiv.org" in url:
-            return {"ok": True, "status": 200, "text": "<feed><entry><title>GEAR Fixture Paper</title></entry></feed>"}
         if url == "https://arxiv.org/abs/2606.32039":
             return {"ok": True, "status": 200, "text": "<html><title>GEAR Fixture Paper</title></html>"}
         if "paperswithcode.co/api/v1/papers/2606.32039" in url:
@@ -151,8 +149,6 @@ def test_raw_fast_evidence_bundle_modelscope_supplied_resources_feed_metadata(tm
     '''
 
     def fake_fetch_text(url: str, timeout: int) -> dict:
-        if "export.arxiv.org" in url:
-            return {"ok": True, "status": 200, "text": "<feed><entry><title>ResearchClawBench Fixture Paper</title></entry></feed>"}
         if url == "https://arxiv.org/abs/2606.07591":
             return {"ok": True, "status": 200, "text": "<html><title>ResearchClawBench Fixture Paper</title></html>"}
         if url == supplied_url:
