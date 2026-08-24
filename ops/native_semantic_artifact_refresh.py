@@ -12,6 +12,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
+import multiprocessing
 import os
 import sqlite3
 import subprocess
@@ -21,6 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_native.section_embedding_store import sidecar_path
 from llm_wiki_native.source_docs import collect_source_docs
 from ops.custom_kg_incremental import manifest_path
 from ops.native_runtime_env import env_int, load_env_file
@@ -40,6 +42,58 @@ SERIAL_STAGES = (
     ("custom_kg_manifest", "ops.custom_kg_incremental", "export-manifest"),
 )
 REPORT_VERSION = 1
+
+# Shared-walk handoff for the default in-process extract path. Set immediately
+# before the fork pool is created so workers inherit the parsed docs copy-on-write
+# instead of re-walking the corpus.
+_SHARED_EXTRACT_DOCS: list | None = None
+
+
+def _run_extract_stage_in_process(stage: str, root: Path, state_dir: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    docs = _SHARED_EXTRACT_DOCS
+    if stage == "method_atoms":
+        from ops.wiki_native_artifacts import extract_method_atoms
+
+        payload = extract_method_atoms(root, state_dir, docs=docs)
+    elif stage == "raw_sections":
+        from ops.wiki_native_raw_section_extract import extract_raw_sections
+
+        payload = extract_raw_sections(root, state_dir, docs=docs)
+    elif stage == "seed_edges":
+        from ops.wiki_native_artifacts import build_seed_edges
+
+        payload = build_seed_edges(root, state_dir, docs=docs)
+    else:
+        raise RuntimeError(f"unknown in-process extract stage: {stage}")
+    return {
+        "stage": stage,
+        "exit_code": 0,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "result": _compact_stage_payload(payload),
+        "runner": "in_process_shared_walk",
+    }
+
+
+def _run_parallel_extract_stages(root: Path, state_dir: Path, docs: list) -> dict[str, dict[str, Any]]:
+    global _SHARED_EXTRACT_DOCS
+    _SHARED_EXTRACT_DOCS = docs
+    try:
+        try:
+            ctx = multiprocessing.get_context("fork")
+        except ValueError:  # non-POSIX fallback: serial in-process, still shares the walk
+            return {stage: _run_extract_stage_in_process(stage, root, state_dir) for stage, _ in PARALLEL_STAGES}
+        results: dict[str, dict[str, Any]] = {}
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(PARALLEL_STAGES), mp_context=ctx) as executor:
+            futures = {
+                stage: executor.submit(_run_extract_stage_in_process, stage, root, state_dir)
+                for stage, _module in PARALLEL_STAGES
+            }
+            for stage, _module in PARALLEL_STAGES:
+                results[stage] = futures[stage].result()
+        return results
+    finally:
+        _SHARED_EXTRACT_DOCS = None
 
 
 class SemanticArtifactRefreshError(RuntimeError):
@@ -193,7 +247,7 @@ def _artifact_paths(state_dir: Path) -> dict[str, Path]:
         "raw_sections": state_dir / "raw_sections.jsonl",
         "method_atoms": state_dir / "method_atoms.jsonl",
         "seed_edges": state_dir / "seed_edges.jsonl",
-        "section_embeddings": state_dir / "section_embeddings.jsonl",
+        "section_embeddings": sidecar_path(state_dir) if sidecar_path(state_dir).exists() else state_dir / "section_embeddings.jsonl",
         "section_similarity_edges": state_dir / "section_similarity_edges.candidates.jsonl",
         "custom_kg_manifest": manifest_path(state_dir),
     }
@@ -206,10 +260,12 @@ def validate_semantic_artifacts(
     integrated_paths: list[str],
     runtime_contract: dict[str, Any],
     allow_embedding_contract_change: bool = False,
+    docs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     normalized_paths = _integration_paths(state_dir, integrated_paths)
-    docs = {str(doc.rel_path).replace("\\", "/"): doc for doc in collect_source_docs(root)}
+    if docs is None:
+        docs = {str(doc.rel_path).replace("\\", "/"): doc for doc in collect_source_docs(root)}
     actual_sections = {
         str(row.get("section_id")): row
         for row in _jsonl_rows(state_dir / "raw_sections.jsonl")
@@ -453,18 +509,26 @@ def refresh_semantic_artifacts(
         "stages": [],
     }
     try:
-        parallel_commands = [
-            (stage, [sys.executable, "-m", module, *common])
-            for stage, module in PARALLEL_STAGES
-        ]
-        parallel_results: dict[str, dict[str, Any]] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_commands)) as executor:
-            futures = {
-                stage: executor.submit(stage_runner, stage, command, workdir, env, timeout)
-                for stage, command in parallel_commands
-            }
-            for stage, _command in parallel_commands:
-                parallel_results[stage] = futures[stage].result()
+        shared_docs: dict[str, Any] | None = None
+        if stage_runner is run_stage_subprocess:
+            # Default path: walk the corpus once and run the three deterministic
+            # extract stages in-process (fork pool) over the shared docs.
+            shared_doc_list = collect_source_docs(root)
+            shared_docs = {str(doc.rel_path).replace("\\", "/"): doc for doc in shared_doc_list}
+            parallel_results = _run_parallel_extract_stages(root, state_dir, shared_doc_list)
+        else:
+            parallel_commands = [
+                (stage, [sys.executable, "-m", module, *common])
+                for stage, module in PARALLEL_STAGES
+            ]
+            parallel_results = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_commands)) as executor:
+                futures = {
+                    stage: executor.submit(stage_runner, stage, command, workdir, env, timeout)
+                    for stage, command in parallel_commands
+                }
+                for stage, _command in parallel_commands:
+                    parallel_results[stage] = futures[stage].result()
         report["stages"].extend(parallel_results[stage] for stage, _module in PARALLEL_STAGES)
 
         for spec in SERIAL_STAGES:
@@ -479,6 +543,7 @@ def refresh_semantic_artifacts(
                 integrated_paths=paths,
                 runtime_contract=runtime_contract,
                 allow_embedding_contract_change=allow_embedding_contract_change,
+                docs=shared_docs,
             )
         except Exception as exc:  # pragma: no cover - defensive conversion for unattended runs
             validation = {

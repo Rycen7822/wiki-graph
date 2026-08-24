@@ -12,8 +12,13 @@ import json
 import os
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+
+from llm_wiki_native.section_embedding_store import jsonl_path, load_rows, sidecar_path, upsert_rows
 
 from ops.native_runtime_env import load_env_file, redact_summary
 from ops.wiki_native_lib import (
@@ -73,6 +78,7 @@ def embedding_config(workdir: Path) -> dict[str, Any]:
     dim = int(dim_raw) if dim_raw.isdigit() else None
     timeout = int(os.environ.get("EMBEDDING_TIMEOUT", "120") or "120")
     batch = int(os.environ.get("EMBEDDING_BATCH_NUM", "10") or "10")
+    max_async = int(os.environ.get("EMBEDDING_FUNC_MAX_ASYNC", "1") or "1")
     return {
         "model": model,
         "host": host,
@@ -80,6 +86,7 @@ def embedding_config(workdir: Path) -> dict[str, Any]:
         "embedding_dim": dim,
         "timeout": timeout,
         "batch_size": batch,
+        "max_async": max(1, max_async),
         "env": redact_summary({
             "EMBEDDING_BINDING": env_values.get("EMBEDDING_BINDING", ""),
             "EMBEDDING_BINDING_HOST": env_values.get("EMBEDDING_BINDING_HOST", ""),
@@ -127,7 +134,9 @@ def openai_compatible_embed(texts: list[str], config: dict[str, Any], max_attemp
 
 def load_cached_embeddings(path: Path, model: str) -> dict[str, dict[str, Any]]:
     cached: dict[str, dict[str, Any]] = {}
-    for row in jsonl_read(path):
+    sidecar = load_rows(path.parent)
+    source_rows = sidecar if sidecar is not None else jsonl_read(jsonl_path(path.parent))
+    for row in source_rows:
         if row.get("embedding_model") == model and row.get("section_id") and row.get("text_hash"):
             cached[str(row["section_id"])] = row
     return cached
@@ -145,16 +154,27 @@ def build_embedding_rows(sections: list[dict[str, Any]], config: dict[str, Any],
         text_hash = sha256_text(text)
         section_id = str(section["section_id"])
         cached_row = cached.get(section_id)
-        if cached_row and cached_row.get("text_hash") == text_hash and isinstance(cached_row.get("embedding"), list):
+        if cached_row and cached_row.get("text_hash") == text_hash and isinstance(cached_row.get("embedding"), (list, np.ndarray)):
             rows.append(cached_row)
             cache_hits += 1
         else:
             pending.append((section, text, text_hash))
     batch_size = max(1, int(config.get("batch_size") or 10))
-    for offset in range(0, len(pending), batch_size):
-        batch = pending[offset : offset + batch_size]
-        texts = [item[1] for item in batch]
-        vectors = openai_compatible_embed(texts, config)
+    max_async = max(1, int(config.get("max_async") or 1))
+    batches = [pending[offset : offset + batch_size] for offset in range(0, len(pending), batch_size)]
+
+    def _embed_batch(batch: list[tuple[dict[str, Any], str, str]]) -> tuple[list[tuple[dict[str, Any], str, str]], list[list[float]]]:
+        return batch, openai_compatible_embed([item[1] for item in batch], config)
+
+    batch_results: list[tuple[list[tuple[dict[str, Any], str, str]], list[list[float]]]] = []
+    if max_async <= 1 or len(batches) <= 1:
+        for batch in batches:
+            batch_results.append(_embed_batch(batch))
+    else:
+        with ThreadPoolExecutor(max_workers=max_async, thread_name_prefix="section-embed") as pool:
+            for result in [pool.submit(_embed_batch, batch) for batch in batches]:
+                batch_results.append(result.result())
+    for batch, vectors in batch_results:
         for (section, text, text_hash), vector in zip(batch, vectors):
             rows.append(
                 {
@@ -204,7 +224,7 @@ def main() -> int:
     index_path = None if args.no_section_similarity_index else (args.section_similarity_index or args.state_dir / "section_similarity_index.sqlite")
 
     config = embedding_config(args.workdir)
-    embedding_path = args.state_dir / "section_embeddings.jsonl"
+    embedding_path = sidecar_path(args.state_dir)
     try:
         embedding_rows, embedding_stats = build_embedding_rows(rows, config, embedding_path, reuse_cache=not args.no_reuse_cache)
     except Exception as exc:
@@ -224,7 +244,10 @@ def main() -> int:
             }
         )
         return 1
-    jsonl_write(embedding_path, embedding_rows)
+    # section_embeddings.jsonl is retired (migration E-migration-f approved
+    # 2026-08-21): the sqlite sidecar is the only write target. The legacy
+    # jsonl stays on disk only as a read fallback for pre-migration states.
+    upsert_rows(args.state_dir, embedding_rows)
     embeddings = {str(row["section_id"]): row["embedding"] for row in embedding_rows}
     del embedding_rows
     release_process_memory()
@@ -246,7 +269,8 @@ def main() -> int:
     jsonl_write(candidates_path, edges)
     report = {
         "generated_at": now_stamp(),
-        "phase": "sidecar-dry-run",
+        "phase": "sidecar-primary",
+        "jsonl_stop_write": True,
         "imported_to_custom_kg": False,
         "raw_sections_path": raw_sections_path.as_posix(),
         "embedding_path": embedding_path.as_posix(),

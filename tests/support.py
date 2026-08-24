@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from llm_wiki_native.section_embedding_store import upsert_rows
 from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
 
 WORKSPACE_TABLES = ("record", "vector", "edge", "lexical_span", "lexical_span_fts")
@@ -84,6 +85,7 @@ def write_kg_state(
     write_jsonl(state / "raw_sections.jsonl", raw_sections)
     if section_embeddings is not None:
         write_jsonl(state / "section_embeddings.jsonl", section_embeddings)
+        upsert_rows(state, section_embeddings)
     if vectors is not None:
         write_vector_cache(state / "vector_cache.sqlite", vectors)
     return state

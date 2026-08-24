@@ -212,6 +212,13 @@ def test_build_section_similarity_graph_writes_section_similarity_index_summary(
     report = json.loads(reports[-1].read_text(encoding="utf-8"))
     assert report["section_similarity_index"]["directed_rows"] == 2
     assert len(jsonl_read(state / "section_similarity_edges.candidates.jsonl")) == 1
+    # Post-migration (E-migration-f): the sqlite sidecar is the only write
+    # target; the jsonl artifact must not be (re)created.
+    assert (state / "section_embeddings.sqlite").exists()
+    assert not (state / "section_embeddings.jsonl").exists()
+    assert report["phase"] == "sidecar-primary"
+    assert report["jsonl_stop_write"] is True
+    assert report["embedding_stats"]["cache_path"].endswith("section_embeddings.sqlite")
 
 
 def test_build_section_similarity_graph_reports_provider_failure_without_partial_outputs(

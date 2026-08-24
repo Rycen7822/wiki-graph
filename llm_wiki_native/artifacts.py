@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from llm_wiki_native.section_embedding_store import load_rows
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -43,4 +47,18 @@ def load_raw_sections(state_dir: Path) -> list[dict[str, Any]]:
 
 
 def load_section_embeddings(state_dir: Path) -> list[dict[str, Any]]:
-    return _read_jsonl(Path(state_dir) / "section_embeddings.jsonl")
+    # Prefer the sqlite sidecar (dual-read window); fall back to the jsonl.
+    sidecar_rows = load_rows(state_dir)
+    if sidecar_rows is not None:
+        rows = sidecar_rows
+    else:
+        rows = _read_jsonl(Path(state_dir) / "section_embeddings.jsonl")
+    # Box floats once into float32 ndarrays; consumers (zvec insert, sqlite
+    # vector blobs) convert at their own boundaries instead of re-listing per hop.
+    for row in rows:
+        embedding = row.get("embedding")
+        if isinstance(embedding, list):
+            row["embedding"] = np.asarray(embedding, dtype=np.float32)
+        elif isinstance(embedding, np.ndarray) and embedding.dtype != np.float32:
+            row["embedding"] = embedding.astype(np.float32)
+    return rows

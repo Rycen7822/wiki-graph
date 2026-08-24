@@ -32,15 +32,18 @@ def section_similarity_embedding_text(section: dict[str, Any], max_content_chars
     return "\n".join(line for line in lines if line is not None).strip() + "\n"
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
+def cosine_similarity(a: Any, b: Any) -> float:
+    if a is None or b is None:
+        return 0.0
+    len_a, len_b = len(a), len(b)
+    if len_a == 0 or len_b == 0 or len_a != len_b:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5
     norm_b = sum(y * y for y in b) ** 0.5
     if norm_a == 0 or norm_b == 0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(dot / (norm_a * norm_b))
 
 
 def _ordered_section_pair_key(src_id: str, tgt_id: str) -> str:
@@ -99,11 +102,11 @@ def _section_rank_lists_vectorized(
     try:
 
         def matrix_for(items: list[dict[str, Any]]):
-            vectors: list[list[float]] = []
+            vectors: list[list[float] | np.ndarray] = []
             dim: int | None = None
             for section in items:
                 vector = embeddings.get(str(section["section_id"]))
-                if not isinstance(vector, list) or not vector:
+                if not isinstance(vector, (list, np.ndarray)) or len(vector) == 0:
                     return None
                 if dim is None:
                     dim = len(vector)

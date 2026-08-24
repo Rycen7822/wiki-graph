@@ -8,6 +8,8 @@ import hashlib
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
+
 from llm_wiki_native.contracts import (
     RECORD_TYPE_CODES,
     SECTION_KIND_CODES,
@@ -248,11 +250,16 @@ class ZvecWorkspace:
 
 
 def zvec_doc_from_record(record: ZvecRecord) -> Doc:
-    if not record.embedding:
+    embedding = record.embedding
+    if embedding is None or len(embedding) == 0:
         raise ValueError("embedding must not be empty")
+    if isinstance(embedding, np.ndarray):
+        embedding = embedding.tolist()
+    elif not isinstance(embedding, list):
+        embedding = list(embedding)
     return Doc(
         id=zvec_doc_id(record.record_type, record.record_id),
-        vectors={"embedding": list(record.embedding)},
+        vectors={"embedding": embedding},
         fields={
             "record_type_code": record_type_code(record.record_type),
             "section_kind_code": section_kind_code(record.section_kind),

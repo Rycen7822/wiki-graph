@@ -293,7 +293,6 @@ def build_prepared_workspace(
             workspace_id=workspace_id,
             embedding_profile=embedding_profile,
             fill_missing_vectors=fill_missing_vectors,
-            reuse_unchanged_workspace=True,
             prepare_only=True,
         )
     )

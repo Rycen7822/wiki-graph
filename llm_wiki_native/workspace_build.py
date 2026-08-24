@@ -62,13 +62,15 @@ def _manifest_vector_hashes(manifest: dict[str, Any]) -> set[str]:
     return hashes
 
 
-def _load_vector_cache_vectors(state_dir: Path, vector_hashes: set[str]) -> dict[str, list[float]]:
+def _load_vector_cache_vectors(state_dir: Path, vector_hashes: set[str]) -> dict[str, Any]:
     if not vector_hashes:
         return {}
     db_path = Path(state_dir) / "vector_cache.sqlite"
     if not db_path.exists():
         return {}
-    vectors: dict[str, list[float]] = {}
+    # Keep float32 ndarrays zero-copy; conversion to Python floats happens once at the
+    # zvec insert boundary (zvec_doc_from_record), not per loader/record hop.
+    vectors: dict[str, Any] = {}
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         ordered = sorted(vector_hashes)
@@ -84,12 +86,12 @@ def _load_vector_cache_vectors(state_dir: Path, vector_hashes: set[str]) -> dict
                 vector = np.frombuffer(bytes(row["vector_blob"]), dtype=np.float32)
                 if vector.size != dim:
                     raise ValueError(f"vector_cache dimension mismatch for {row['vector_hash']}: expected {dim}, found {vector.size}")
-                vectors[str(row["vector_hash"])] = [float(value) for value in vector]
+                vectors[str(row["vector_hash"])] = vector
     return vectors
 
 
 def _section_embeddings_by_id(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {str(row["section_id"]): row for row in rows if row.get("section_id") and isinstance(row.get("embedding"), list)}
+    return {str(row["section_id"]): row for row in rows if row.get("section_id") and isinstance(row.get("embedding"), (list, np.ndarray))}
 
 
 def _default_zvec_workspace_factory(path: Path, embedding_dim: int) -> Any:
@@ -374,10 +376,10 @@ def apply_incremental_workspace_from_state(
         native = _section_record(workspace_id, section, section_embeddings_by_id.get(section_id))
         current_records[("section", native.record_id)] = native
 
-    def _vector_for(native: NativeRecord) -> list[float] | None:
+    def _vector_for(native: NativeRecord) -> Any | None:
         if native.record_type == "section":
             embedding_row = section_embeddings_by_id.get(native.record_id)
-            if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), list):
+            if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), (list, np.ndarray)):
                 return embedding_row["embedding"]
             return None
         return vectors_by_hash.get(native.vector_hash)

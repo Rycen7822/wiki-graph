@@ -245,6 +245,50 @@ def test_stage_failure_redacts_secret_values(tmp_path: Path) -> None:
     assert "[REDACTED]" in str(exc_info.value)
 
 
+def test_parallel_extract_stages_share_single_walk(tmp_path: Path, monkeypatch) -> None:
+    root = sample_wiki(tmp_path)
+    state = tmp_path / "state"
+    docs = collect_source_docs(root)
+
+    from ops import wiki_native_artifacts, wiki_native_raw_section_extract
+
+    def _forbidden_walk(_root):
+        raise AssertionError("extract stage re-walked the corpus despite shared docs")
+
+    monkeypatch.setattr(wiki_native_artifacts, "collect_source_docs", _forbidden_walk)
+    monkeypatch.setattr(wiki_native_raw_section_extract, "collect_source_docs", _forbidden_walk)
+
+    results = native_semantic_artifact_refresh._run_parallel_extract_stages(root.resolve(), state, docs)
+
+    assert set(results) == {"method_atoms", "raw_sections", "seed_edges"}
+    for stage in ("method_atoms", "raw_sections", "seed_edges"):
+        assert results[stage]["exit_code"] == 0
+        assert results[stage]["runner"] == "in_process_shared_walk"
+    assert (state / "raw_sections.jsonl").exists()
+    assert (state / "method_atoms.jsonl").exists()
+    assert (state / "seed_edges.jsonl").exists()
+
+
+def test_extract_stages_with_shared_docs_match_self_walk_parity(tmp_path: Path) -> None:
+    from ops.wiki_native_artifacts import build_seed_edges, extract_method_atoms
+    from ops.wiki_native_raw_section_extract import extract_raw_sections
+
+    root = sample_wiki(tmp_path)
+    docs = collect_source_docs(root)
+    state_shared = tmp_path / "shared"
+    state_walked = tmp_path / "walked"
+
+    extract_method_atoms(root, state_shared, docs=docs)
+    extract_raw_sections(root, state_shared, docs=docs)
+    build_seed_edges(root, state_shared, docs=docs)
+    extract_method_atoms(root, state_walked)
+    extract_raw_sections(root, state_walked)
+    build_seed_edges(root, state_walked)
+
+    for name in ("method_atoms.jsonl", "raw_sections.jsonl", "seed_edges.jsonl"):
+        assert (state_shared / name).read_bytes() == (state_walked / name).read_bytes()
+
+
 def test_refresh_converts_validator_crash_to_saved_machine_failure(tmp_path: Path, monkeypatch) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "state"

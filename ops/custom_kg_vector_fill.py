@@ -7,6 +7,7 @@ import json
 import os
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -176,26 +177,46 @@ def fill_missing_manifest_vectors(
     embedding_dim = int(metadata.get("embedding_dim") or env_int("EMBEDDING_DIM", 1536, runtime_env))
     embedding_params_version = str(metadata.get("embedding_params_version") or runtime_env.get("EMBEDDING_PARAMS_VERSION", "v1"))
     embedder = embed_texts_func or embed_texts_openai_compatible
+    max_async = max(1, int(profile_report["concurrency"]["embedding_func_max_async"]))
+    batches = [
+        missing_records[offset : offset + batch_size]
+        for offset in range(0, len(missing_records), batch_size)
+    ]
+    for batch in batches:
+        for _collection, key, record in batch:
+            if str(record.get("content") or "") == "":
+                raise RuntimeError(f"cannot fill missing vector for empty content record: {key}")
+
+    def _embed_batch(batch: list[tuple[str, str, dict[str, Any]]]) -> tuple[list[tuple[str, str, dict[str, Any]]], list[list[float]], float]:
+        texts = [str(record.get("content") or "") for _collection, _key, record in batch]
+        batch_started = time.perf_counter()
+        vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
+        return batch, vectors, round(time.perf_counter() - batch_started, 6)
+
     cache_records: list[dict[str, Any]] = []
     by_collection: dict[str, int] = {"chunks": 0, "entities": 0, "relationships": 0}
     elapsed_by_collection: dict[str, float] = {"chunks": 0.0, "entities": 0.0, "relationships": 0.0}
-    total_batches = 0
+    total_batches = len(batches)
     failed_batches = 0
     provider_retries = 0
-    for offset in range(0, len(missing_records), batch_size):
-        batch = missing_records[offset : offset + batch_size]
-        texts = [str(record.get("content") or "") for _collection, _key, record in batch]
-        if any(text == "" for text in texts):
-            empty_key = batch[texts.index("")][1]
-            raise RuntimeError(f"cannot fill missing vector for empty content record: {empty_key}")
-        batch_started = time.perf_counter()
-        total_batches += 1
-        try:
-            vectors = embedder(texts, workdir=workdir, embedding_model=embedding_model, embedding_dim=embedding_dim)
-        except Exception:
-            failed_batches += 1
-            raise
-        batch_elapsed = round(time.perf_counter() - batch_started, 6)
+    batch_results: list[tuple[list[tuple[str, str, dict[str, Any]]], list[list[float]], float]] = []
+    if max_async <= 1 or total_batches <= 1:
+        for batch in batches:
+            try:
+                batch_results.append(_embed_batch(batch))
+            except Exception:
+                failed_batches += 1
+                raise
+    else:
+        with ThreadPoolExecutor(max_workers=max_async, thread_name_prefix="vector-fill") as pool:
+            futures = [pool.submit(_embed_batch, batch) for batch in batches]
+            for future in futures:
+                try:
+                    batch_results.append(future.result())
+                except Exception:
+                    failed_batches += 1
+                    raise
+    for batch, vectors, batch_elapsed in batch_results:
         for collection in {collection for collection, _key, _record in batch}:
             elapsed_by_collection[collection] = round(elapsed_by_collection.get(collection, 0.0) + batch_elapsed, 6)
         if len(vectors) != len(batch):

@@ -244,7 +244,7 @@ def test_build_reuses_existing_candidate_when_state_fingerprints_match(tmp_path,
     "with_state_files,expected_names",
     [
         (False, ["custom_kg_manifest.json", "raw_sections.jsonl", "section_similarity_edges.jsonl"]),
-        (True, ["vector_cache.sqlite", "section_embeddings.jsonl"]),
+        (True, ["vector_cache.sqlite", "section_embeddings.sqlite"]),
     ],
     ids=["missing_state_inputs", "missing_vector_prerequisites"],
 )
