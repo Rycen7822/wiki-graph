@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -20,5 +21,7 @@ class ZvecRecord:
     metadata_hash: str
     content: str
     tokens: int
-    embedding: list[float]
+    # list[float] or float32 np.ndarray; compare=False avoids ndarray-equality
+    # blowups in generated dataclass __eq__.
+    embedding: Any = field(compare=False)
     section_kind: str | None = None

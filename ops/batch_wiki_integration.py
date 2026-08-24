@@ -317,6 +317,13 @@ def _resolve_native_embedding_profile(profile: str | None = None) -> str:
     return name
 
 
+def _only_policy_due_pending(status: dict[str, Any]) -> bool:
+    entries = status.get("pending") or []
+    return bool(entries) and all(
+        entry.get("reason") == batch_native_refresh.FULL_REBUILD_DUE_REASON for entry in entries
+    )
+
+
 def run_native_refresh_after_wiki_integration(
     root: Path,
     state_dir: Path,
@@ -373,6 +380,11 @@ def run_native_refresh_after_wiki_integration(
     for pass_index in range(max_passes):
         current_status = batch_native_refresh.status(root, state_dir)
         if not current_status.get("should_refresh"):
+            break
+        if pass_index > 0 and _only_policy_due_pending(current_status):
+            # A successful pass marks policy:full-rebuild-due-after-incrementals when
+            # the incremental threshold is reached; that full rebuild belongs to the
+            # next pickup, not a second build in this run.
             break
         workspace_id = f"native-{time.strftime('%Y%m%d%H%M%S')}-{pass_index + 1}"
         args, workspace_root, required_unchanged_paths, config_summary = _native_refresh_cutover_args(
@@ -432,7 +444,7 @@ def run_native_refresh_after_wiki_integration(
         runs.append(refresh_result)
 
     final_status = batch_native_refresh.status(root, state_dir)
-    if final_status.get("should_refresh"):
+    if final_status.get("should_refresh") and not _only_policy_due_pending(final_status):
         return 17, _native_refresh_failure(
             reason="native-refresh-incomplete",
             message=f"native refresh still pending after {max_passes} guarded pass(es)",

@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+import numpy as np
+
 from llm_wiki_native.storage.sqlite_workspace import NativeRecord, SQLiteWorkspace
 
 
@@ -77,7 +79,7 @@ def materialize_raw_sections(
         embedding_row = section_embeddings_by_id.get(section_id)
         native = _section_record(workspace_id, section, embedding_row)
         records.append(native)
-        if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), list):
+        if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), (list, np.ndarray)):
             vectors.append(("section", native.record_id, native.vector_hash, embedding_row["embedding"]))
     db.put_records(records)
     db.put_vectors(workspace_id, vectors)

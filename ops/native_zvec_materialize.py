@@ -38,7 +38,7 @@ MANIFEST_VECTOR_COLLECTIONS = ("chunks", "entities", "relationships")
 STATE_FINGERPRINT_INPUTS = (
     *REQUIRED_STATE_INPUTS,
     "vector_cache.sqlite",
-    "section_embeddings.jsonl",
+    "section_embeddings.sqlite",
 )
 
 
@@ -166,7 +166,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     if manifest_path.exists() and _manifest_record_count(json.loads(manifest_path.read_text(encoding="utf-8"))):
         required.append(state_dir / "vector_cache.sqlite")
     if raw_sections_path.exists() and _jsonl_has_rows(raw_sections_path):
-        required.append(state_dir / "section_embeddings.jsonl")
+        required.append(state_dir / "section_embeddings.sqlite")
     missing = [str(path) for path in required if not path.exists()]
     return {
         "ok": not missing,

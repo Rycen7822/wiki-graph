@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+import numpy as np
+
 from llm_wiki_native.contracts import SECTION_KIND_CODES, SOURCE_KIND_CODES
 from llm_wiki_native.storage.zvec_records import ZvecRecord
 
@@ -65,7 +67,7 @@ def missing_vector_report(
         if not section_id:
             continue
         embedding_row = section_embeddings_by_id.get(section_id)
-        if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), list):
+        if isinstance(embedding_row, dict) and isinstance(embedding_row.get("embedding"), (list, np.ndarray)):
             continue
         add_count("section")
         section_missing.append(
@@ -172,7 +174,7 @@ def _manifest_record(
         metadata_hash=str(record.get("metadata_hash") or record.get("record_hash") or content_hash),
         content=content,
         tokens=_token_count(content),
-        embedding=list(vector),
+        embedding=vector,
     )
 
 
@@ -198,7 +200,7 @@ def _section_record(
     if not section_id:
         raise ValueError("raw section missing section_id")
     embedding_row = section_embeddings_by_id.get(section_id)
-    if not isinstance(embedding_row, dict) or not isinstance(embedding_row.get("embedding"), list):
+    if not isinstance(embedding_row, dict) or not isinstance(embedding_row.get("embedding"), (list, np.ndarray)):
         raise ValueError(f"missing section embedding for section: {section_id}")
     content = str(section.get("content", ""))
     content_hash = str(section.get("content_hash") or section.get("text_hash") or _stable_hash(content))
@@ -223,7 +225,7 @@ def _section_record(
         metadata_hash=metadata_hash,
         content=content,
         tokens=_token_count(content),
-        embedding=list(embedding_row["embedding"]),
+        embedding=embedding_row["embedding"],
         section_kind=_normalize_section_kind(section.get("section_kind")),
     )
 

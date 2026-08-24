@@ -65,7 +65,7 @@ def raw_section_markdown(section: dict[str, Any]) -> str:
     )
 
 
-def extract_raw_sections(root: Path, state_dir: Path) -> dict[str, Any]:
+def extract_raw_sections(root: Path, state_dir: Path, *, docs: list | None = None) -> dict[str, Any]:
     from ops.wiki_native_lib import jsonl_write
 
     ensure_state_dirs(state_dir)
@@ -74,7 +74,7 @@ def extract_raw_sections(root: Path, state_dir: Path) -> dict[str, Any]:
     docs_dir.mkdir(parents=True, exist_ok=True)
     for stale in docs_dir.glob("*.md"):
         stale.unlink()
-    for doc in collect_source_docs(root):
+    for doc in (docs if docs is not None else collect_source_docs(root)):
         if doc.doc_type != "raw_note":
             continue
         for section in extract_raw_note_sections(doc):

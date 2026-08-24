@@ -156,7 +156,7 @@ def _stub_semantic_artifact_refresh(monkeypatch) -> None:
     )
 
 
-def test_native_refresh_followthrough_runs_incremental_then_due_full_rebuild_with_vector_cache(tmp_path: Path, monkeypatch) -> None:
+def test_native_refresh_followthrough_marks_due_full_rebuild_for_next_pickup(tmp_path: Path, monkeypatch) -> None:
     root = sample_wiki(tmp_path)
     state = tmp_path / "work" / "wikigraph" / "state"
     watched_dir = tmp_path / "watched"
@@ -212,7 +212,22 @@ def test_native_refresh_followthrough_runs_incremental_then_due_full_rebuild_wit
     code, payload = batch_wiki_integration.run_native_refresh_after_wiki_integration(root, state, workdir=ROOT, reason="threshold")
 
     assert code == 0
-    assert [row[0] for row in runs] == ["incremental", "full-rebuild"]
+    assert [row[0] for row in runs] == ["incremental"]
+    assert all(row[2] is True for row in runs)
+    assert payload["status_after"]["should_refresh"] is True
+    assert payload["status_after"]["next_refresh_kind"] == "full-rebuild"
+    assert payload["semantic_artifacts"]["ok"] is True
+    assert payload["active_workspace_coverage"]["ok"] is True
+    assert [entry["reason"] for entry in batch_native_refresh.pending_entries(state)] == [
+        batch_native_refresh.FULL_REBUILD_DUE_REASON
+    ]
+
+    # The due full rebuild rides to the next pickup instead of doubling this run.
+    runs.clear()
+    code, payload = batch_wiki_integration.run_native_refresh_after_wiki_integration(root, state, workdir=ROOT, reason="policy-pickup")
+
+    assert code == 0
+    assert [row[0] for row in runs] == ["full-rebuild"]
     assert all(row[2] is True for row in runs)
     assert payload["status_after"]["should_refresh"] is False
     assert payload["semantic_artifacts"]["ok"] is True

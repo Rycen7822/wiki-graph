@@ -98,14 +98,14 @@ def method_type_for(doc: WikiDoc) -> str:
     return "methodological_pattern"
 
 
-def extract_method_atoms(root: Path, state_dir: Path) -> dict[str, Any]:
+def extract_method_atoms(root: Path, state_dir: Path, *, docs: list | None = None) -> dict[str, Any]:
     ensure_state_dirs(state_dir)
     rows = []
     docs_dir = state_dir / "method_atom_docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     for stale in docs_dir.glob("*.md"):
         stale.unlink()
-    for doc in collect_source_docs(root):
+    for doc in (docs if docs is not None else collect_source_docs(root)):
         if doc.doc_type != "raw_note":
             continue
         methodology = section_text(doc.body, ["methodology", "方法"])
@@ -172,9 +172,9 @@ def method_atom_markdown(atom: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_seed_edges(root: Path, state_dir: Path) -> dict[str, Any]:
+def build_seed_edges(root: Path, state_dir: Path, *, docs: list | None = None) -> dict[str, Any]:
     ensure_state_dirs(state_dir)
-    docs = collect_source_docs(root)
+    docs = docs if docs is not None else collect_source_docs(root)
     by_rel = {d.rel_path: d for d in docs}
     by_stem = {Path(d.rel_path).stem: d for d in docs}
     edges: list[dict[str, Any]] = []
