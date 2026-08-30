@@ -100,6 +100,14 @@ def test_batch_wiki_integration_auto_integrate_defaults_to_local_runner_at_thres
     assert len(batch_native_refresh.pending_entries(state)) == 0
     assert native_calls == [(root, state, ROOT, "threshold", 1)]
 
+    second_code, second_payload = batch_wiki_integration.run_auto_integration(root, state, reason="threshold")
+
+    assert second_code == 0
+    assert second_payload["ran"] is False
+    assert second_payload["skipped"] is True
+    assert second_payload["skip_reason"] == "integration_not_required"
+    assert native_calls == [(root, state, ROOT, "threshold", 1)]
+
 
 def test_batch_wiki_integration_auto_integrate_runs_configured_runner_at_threshold_and_requires_cleared_ledger(tmp_path: Path, monkeypatch) -> None:
     root = sample_wiki(tmp_path)

@@ -165,6 +165,10 @@ def test_wiki_integration_plan_is_order_independent_and_keeps_ambiguous_items_in
     assert plan_a["dry_run"] is True
     assert plan_a["writes_wiki"] is False
     assert plan_a["compiled_page_writes"] == []
+    assert plan_a["planned_raw_paths"] == [
+        "raw/clip/2601/26010101_Ambiguous.md",
+        "raw/clip/2601/26010102_Routed.md",
+    ]
     operations = plan_a["operations"]
     assert [op["raw_path"] for op in operations if op["op"] == "raw_map_upsert"] == [
         "raw/clip/2601/26010102_Routed.md"

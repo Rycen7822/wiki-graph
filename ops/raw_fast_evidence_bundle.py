@@ -2502,6 +2502,7 @@ def build_note_block_drafts(frontmatter: dict[str, Any], resource_draft: dict[st
 
 
 def next_raw_path(root: Path, title: str, now: dt.datetime | None = None) -> str:
+    """Return a provisional path; final allocation belongs to raw_fast_publish."""
     now = now or dt.datetime.now()
     yymm = now.strftime("%y%m")
     yymmdd = now.strftime("%y%m%d")
@@ -2658,6 +2659,7 @@ def build_raw_fast_preflight(
         "title": title,
         "source_identity": _source_identity(url, kind),
         "next_raw_path": next_raw_path(root, title, now=now),
+        "next_raw_path_provisional": True,
         "duplicate_terms": _duplicate_terms(title, url, kind),
         "duplicate_hits": duplicate_hits,
         "duplicate_summary": duplicate_summary,
@@ -2671,7 +2673,7 @@ def render_preflight_markdown(preflight: dict[str, Any]) -> str:
         "",
         f"- title: {preflight.get('title')}",
         f"- kind: {preflight.get('kind')}",
-        f"- next_raw_path: `{preflight.get('next_raw_path')}`",
+        f"- next_raw_path (provisional): `{preflight.get('next_raw_path')}`",
     ]
     duplicate_summary = preflight.get("duplicate_summary") or {}
     lines.append(f"- duplicate_hits: raw={duplicate_summary.get('raw', 0)}, compiled={duplicate_summary.get('compiled', 0)}, meta={duplicate_summary.get('meta', 0)}, log={duplicate_summary.get('log', 0)}")

@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ops.wiki_mutation_lock import wiki_mutation_lock
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -949,14 +951,15 @@ def build_compact_log_entry(args: argparse.Namespace, output: dict[str, Any]) ->
 def append_compact_log(args: argparse.Namespace, output: dict[str, Any]) -> dict[str, Any]:
     log_path = args.root / "log.md"
     entry = build_compact_log_entry(args, output)
-    if log_path.exists():
-        existing = log_path.read_text(encoding="utf-8", errors="replace")
-    else:
-        existing = "# llm-wiki log\n"
-    if args.raw_file in existing:
-        return {"ok": True, "appended": False, "skip_reason": "raw_file_already_in_log", "log_path": str(log_path), "entry": entry}
-    sep = "\n\n" if existing and not existing.endswith("\n\n") else ""
-    log_path.write_text(existing.rstrip() + sep + entry, encoding="utf-8")
+    with wiki_mutation_lock(args.state_dir):
+        if log_path.exists():
+            existing = log_path.read_text(encoding="utf-8", errors="replace")
+        else:
+            existing = "# llm-wiki log\n"
+        if args.raw_file in existing:
+            return {"ok": True, "appended": False, "skip_reason": "raw_file_already_in_log", "log_path": str(log_path), "entry": entry}
+        sep = "\n\n" if existing and not existing.endswith("\n\n") else ""
+        log_path.write_text(existing.rstrip() + sep + entry, encoding="utf-8")
     return {"ok": True, "appended": True, "log_path": str(log_path), "entry": entry}
 
 

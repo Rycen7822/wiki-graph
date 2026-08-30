@@ -61,6 +61,9 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
 
 def _write_plan(path: Path, root: Path, state: Path, operations: list[dict], *, compiled_page_writes: list[dict] | None = None, plan_hash: str | None = None) -> dict:
     compiled_page_writes = compiled_page_writes or []
+    planned_raw_paths = sorted(
+        {str(operation.get("raw_path") or "") for operation in operations if str(operation.get("raw_path") or "")}
+    )
     plan = {
         "schema_version": 1,
         "dry_run": True,
@@ -68,10 +71,11 @@ def _write_plan(path: Path, root: Path, state: Path, operations: list[dict], *, 
         "root": str(root),
         "state_dir": str(state),
         "reason": "threshold",
+        "planned_raw_paths": planned_raw_paths,
         "operations": operations,
         "compiled_page_writes": compiled_page_writes,
     }
-    plan["plan_hash"] = plan_hash or _canonical_plan_hash(operations, compiled_page_writes)
+    plan["plan_hash"] = plan_hash or _canonical_plan_hash(operations, compiled_page_writes, planned_raw_paths)
     write(path, json.dumps(plan, ensure_ascii=False, indent=2))
     return plan
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ops.raw_fast_evidence_bundle import yamlish
+from ops.raw_fast_publish import RawPublishError, publish_raw_note
 
 DEFAULT_BODY_DRAFT = "raw_body_draft.md"
 DEFAULT_FRONTMATTER = "candidate_frontmatter.json"
@@ -145,6 +146,56 @@ def validate_body_draft(text: str) -> dict[str, Any]:
     return {"ok": True, "stage": "body_draft", "heading_count": len(headings), "missing_headings": []}
 
 
+def render_raw_note(
+    frontmatter: dict[str, Any],
+    body_text: str,
+    *,
+    now: dt.datetime | None = None,
+    preserved_created: str | None = None,
+) -> dict[str, Any]:
+    """Render one canonical note without mutating wiki or state."""
+    body_checks = validate_body_draft(body_text)
+    if not body_checks.get("ok"):
+        return body_checks
+    final_frontmatter = refresh_frontmatter_timestamps(frontmatter, now=now)
+    if preserved_created:
+        final_frontmatter["created"] = preserved_created
+    raw_text = yamlish(final_frontmatter).rstrip() + "\n\n" + body_text.strip() + "\n"
+    validation = validate_raw_note_text(raw_text)
+    if not validation.get("ok"):
+        return validation
+    return {
+        "ok": True,
+        "stage": "rendered",
+        "raw_text": raw_text,
+        "frontmatter": final_frontmatter,
+        "body_checks": body_checks,
+        "validation": validation,
+    }
+
+
+def validate_raw_note_text(raw_text: str) -> dict[str, Any]:
+    """Validate the shared staged/full-note structural contract."""
+    if not raw_text.startswith("---\n"):
+        return _fail("raw_note", "frontmatter_missing")
+    parts = raw_text.split("---", 2)
+    if len(parts) != 3:
+        return _fail("raw_note", "frontmatter_unterminated")
+    frontmatter_text, body_text = parts[1], parts[2].lstrip("\n")
+    required = ["title", "source", "created", "updated", "type", "domain", "captured"]
+    missing = [
+        key
+        for key in required
+        if re.search(rf"^{re.escape(key)}:\s*\S", frontmatter_text, flags=re.MULTILINE) is None
+    ]
+    if missing:
+        return _fail("raw_note", "frontmatter_fields_missing", missing_fields=missing)
+    body_checks = validate_body_draft(body_text)
+    if not body_checks.get("ok"):
+        return body_checks
+    return {"ok": True, "stage": "raw_note", "body_checks": body_checks}
+
+
 def run_verifier(root: Path, raw_file: str, *, verifier: Path, frontmatter: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
     patterns = [str(frontmatter.get("title") or "").strip(), str(frontmatter.get("source") or "").strip()]
     command = [sys.executable, str(verifier), "--wiki", str(root), "--raw-file", raw_file, "--structured-paper"]
@@ -179,6 +230,7 @@ def assemble_raw_note(
     *,
     root: Path,
     workdir: Path,
+    state_dir: Path | None = None,
     body_draft: Path | str | None = None,
     candidate_frontmatter: Path | str | None = None,
     raw_file: str | None = None,
@@ -190,6 +242,7 @@ def assemble_raw_note(
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     workdir = workdir.expanduser().resolve()
+    state_dir = state_dir.expanduser().resolve() if state_dir else None
     frontmatter_path = _resolve_workdir_path(workdir, candidate_frontmatter, DEFAULT_FRONTMATTER)
     body_path = _resolve_workdir_path(workdir, body_draft, DEFAULT_BODY_DRAFT)
 
@@ -202,41 +255,62 @@ def assemble_raw_note(
         return _finalize_report(workdir, output_report, _fail("raw_file", str(resolved.get("error") or "invalid_raw_file"), raw_file=resolved.get("raw_file"), source=resolved.get("source")))
     raw_rel = str(resolved["raw_file"])
     raw_path = root / raw_rel
-    if raw_path.exists() and not overwrite_existing:
-        return _finalize_report(workdir, output_report, _fail("raw_file", "raw_file_exists", raw_file=raw_rel, raw_path=str(raw_path)))
     preserved_created = read_existing_created(raw_path) if raw_path.exists() and overwrite_existing else None
 
     try:
         body_text = body_path.read_text(encoding="utf-8")
     except OSError as exc:
         return _finalize_report(workdir, output_report, _fail("body_draft", "body_draft_missing", body_draft=str(body_path), detail=str(exc)))
-    body_checks = validate_body_draft(body_text)
-    if not body_checks.get("ok"):
-        return _finalize_report(workdir, output_report, {**body_checks, "body_draft": str(body_path)})
+    rendered = render_raw_note(frontmatter, body_text, preserved_created=preserved_created)
+    if not rendered.get("ok"):
+        return _finalize_report(workdir, output_report, {**rendered, "body_draft": str(body_path)})
+    final_frontmatter = rendered["frontmatter"]
+    try:
+        publication = publish_raw_note(
+            root,
+            state_dir,
+            title=str(final_frontmatter.get("title") or "Untitled"),
+            raw_text=str(rendered["raw_text"]),
+            requested_raw_file=raw_rel,
+            overwrite_existing=overwrite_existing,
+        )
+    except RawPublishError as exc:
+        return _finalize_report(
+            workdir,
+            output_report,
+            _fail("publish", exc.code, detail=str(exc), **exc.details),
+        )
+    final_raw_rel = str(publication["raw_file"])
+    final_raw_path = Path(str(publication["raw_path"]))
 
-    final_frontmatter = refresh_frontmatter_timestamps(frontmatter)
-    if preserved_created:
-        final_frontmatter["created"] = preserved_created
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_text = yamlish(final_frontmatter).rstrip() + "\n\n" + body_text.strip() + "\n"
-    raw_path.write_text(raw_text, encoding="utf-8")
+    if publication.get("reallocated") and (workdir / "evidence_bundle.json").is_file():
+        from ops.raw_fast_ingest_prepare import sync_closeout_artifacts_after_publish
+
+        sync_closeout_artifacts_after_publish(
+            workdir,
+            root=root,
+            state_dir=Path(str(publication["state_dir"])),
+            raw_file=final_raw_rel,
+        )
 
     payload: dict[str, Any] = {
         "ok": True,
         "stage": "assembled",
-        "raw_file": raw_rel,
-        "raw_path": str(raw_path),
+        "raw_file": final_raw_rel,
+        "raw_path": str(final_raw_path),
+        "requested_raw_file": raw_rel,
+        "publication": publication,
         "root": str(root),
         "workdir": str(workdir),
         "frontmatter_path": str(frontmatter_path),
         "body_draft": str(body_path),
         "frontmatter_fields": list(final_frontmatter.keys()),
-        "body_checks": body_checks,
+        "body_checks": rendered["body_checks"],
     }
     if preserved_created:
         payload["preserved_created"] = preserved_created
     if verify:
-        verify_result = run_verifier(root, raw_rel, verifier=(verifier or DEFAULT_VERIFIER), frontmatter=final_frontmatter, timeout=verify_timeout)
+        verify_result = run_verifier(root, final_raw_rel, verifier=(verifier or DEFAULT_VERIFIER), frontmatter=final_frontmatter, timeout=verify_timeout)
         payload["verify"] = verify_result
         if not verify_result.get("ok"):
             payload["ok"] = False
@@ -248,6 +322,7 @@ def assemble_raw_note(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Assemble a raw-fast raw note from script-owned metadata and a body-only draft")
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--state-dir", type=Path, default=None)
     parser.add_argument("--workdir", required=True, type=Path)
     parser.add_argument("--body-draft", type=Path, default=Path(DEFAULT_BODY_DRAFT))
     parser.add_argument("--candidate-frontmatter", type=Path, default=Path(DEFAULT_FRONTMATTER))
@@ -265,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = assemble_raw_note(
         root=args.root,
         workdir=args.workdir,
+        state_dir=args.state_dir,
         body_draft=args.body_draft,
         candidate_frontmatter=args.candidate_frontmatter,
         raw_file=args.raw_file,

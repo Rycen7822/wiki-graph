@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,12 +39,18 @@ def _pending_sort_key(item: dict[str, Any]) -> tuple[str, str, str]:
     return (str(item.get("raw_path") or ""), str(item.get("title") or ""), str(item.get("source_id") or ""))
 
 
-def _canonical_plan_hash(operations: list[dict[str, Any]], compiled_page_writes: list[dict[str, Any]]) -> str:
+def _canonical_plan_hash(
+    operations: list[dict[str, Any]],
+    compiled_page_writes: list[dict[str, Any]],
+    planned_raw_paths: list[str] | None = None,
+) -> str:
+    planned_raw_paths = planned_raw_paths or []
     return sha256_text(
         json.dumps(
             {
                 "operations": operations,
                 "compiled_page_writes": compiled_page_writes,
+                "planned_raw_paths": planned_raw_paths,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -62,6 +69,9 @@ def build_wiki_integration_plan(root: Path, state_dir: Path, reason: str = "manu
     state_dir = Path(state_dir)
     status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
     actionable = [item for item in status.get("actionable_pending") or [] if isinstance(item, dict)]
+    planned_raw_paths = sorted(
+        {str(item.get("raw_path") or "") for item in actionable if str(item.get("raw_path") or "")}
+    )
     operations: list[dict[str, Any]] = []
     routed_paths: list[str] = []
     review_paths: list[str] = []
@@ -112,7 +122,7 @@ def build_wiki_integration_plan(root: Path, state_dir: Path, reason: str = "manu
         )
 
     compiled_page_writes: list[dict[str, Any]] = []
-    plan_hash = _canonical_plan_hash(operations, compiled_page_writes)
+    plan_hash = _canonical_plan_hash(operations, compiled_page_writes, planned_raw_paths)
     return {
         "schema_version": 1,
         "created_at": now_stamp(),
@@ -125,6 +135,7 @@ def build_wiki_integration_plan(root: Path, state_dir: Path, reason: str = "manu
         "actionable_pending_count": status.get("actionable_pending_count"),
         "review_pending_count": status.get("review_pending_count"),
         "plan_hash": plan_hash,
+        "planned_raw_paths": planned_raw_paths,
         "operations": operations,
         "compiled_page_writes": compiled_page_writes,
         "status_reasons": status.get("reasons") or [],
@@ -137,7 +148,8 @@ def write_wiki_integration_plan_report(state_dir: Path, plan: dict[str, Any], ou
     if output is None:
         report_dir = state_dir / "wiki_integration_plans"
         report_dir.mkdir(parents=True, exist_ok=True)
-        output = report_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_wiki_integration_plan.json"
+        run_id = f"{time.strftime('%Y%m%d_%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        output = report_dir / f"{run_id}-wiki_integration_plan.json"
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -164,6 +176,9 @@ def validate_wiki_integration_plan(
     compiled_page_writes = plan.get("compiled_page_writes")
     if not isinstance(compiled_page_writes, list):
         compiled_page_writes = []
+    planned_raw_paths = plan.get("planned_raw_paths")
+    if not isinstance(planned_raw_paths, list) or not all(isinstance(item, str) for item in planned_raw_paths):
+        planned_raw_paths = []
 
     errors: list[str] = []
     if plan.get("schema_version") != 1:
@@ -175,7 +190,7 @@ def validate_wiki_integration_plan(
     if plan_state_dir and Path(str(plan_state_dir)).resolve() != Path(state_dir).resolve():
         errors.append("state_dir_mismatch")
 
-    canonical_hash = _canonical_plan_hash(operations, compiled_page_writes)
+    canonical_hash = _canonical_plan_hash(operations, compiled_page_writes, planned_raw_paths)
     plan_hash = str(plan.get("plan_hash") or "")
     if plan_hash != canonical_hash:
         errors.append("plan_hash_mismatch")

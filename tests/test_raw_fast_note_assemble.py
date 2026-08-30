@@ -162,8 +162,8 @@ def test_raw_fast_note_assemble_rejects_invalid_body(tmp_path: Path, body: str, 
     assert not (root / "raw/clip/2607/26070401_Assembler-Paper.md").exists()
 
 
-def test_raw_fast_note_assemble_refuses_unsafe_and_existing_raw_paths(tmp_path: Path) -> None:
-    root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="../bad.md")
+def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence(tmp_path: Path) -> None:
+    root, workdir, _raw_file = _write_assembly_fixture(tmp_path, raw_file="../bad.md")
 
     unsafe = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir)
     assert unsafe["ok"] is False
@@ -172,10 +172,30 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_existing_raw_paths(tmp_path: 
 
     root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070402_Existing-Paper.md")
     write(root / raw_file, "already here")
-    existing = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir)
-    assert existing["ok"] is False
-    assert existing["stage"] == "raw_file"
-    assert existing["error"] == "raw_file_exists"
+    write(
+        workdir / "evidence_bundle.json",
+        json.dumps(
+            {
+                "kind": "arxiv",
+                "source_url": "https://arxiv.org/abs/2607.0401",
+                "title_guess": "Assembler Paper",
+                "next_raw_path": raw_file,
+                "preflight": {"next_raw_path": raw_file, "source_identity": {"arxiv_id_base": "2607.0401"}},
+                "files": {"evidence_report": "evidence_report.json"},
+            }
+        ),
+    )
+    state_dir = tmp_path / "state"
+    allocated = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir, state_dir=state_dir)
+    assert allocated["ok"] is True
+    assert allocated["raw_file"] == "raw/clip/2607/26070403_Assembler-Paper.md"
+    assert allocated["publication"]["reallocated"] is True
+    assert (root / raw_file).read_text(encoding="utf-8") == "already here"
+    assert (root / allocated["raw_file"]).is_file()
+    closeout_args = json.loads((workdir / "closeout_args.json").read_text(encoding="utf-8"))
+    assert closeout_args["raw_file"] == allocated["raw_file"]
+    assert allocated["raw_file"] in (workdir / "closeout_command.preview.sh").read_text(encoding="utf-8")
+    assert f"--state-dir {state_dir}" in (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
 
 
 @pytest.mark.external_skill
