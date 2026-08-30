@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import shlex
@@ -24,6 +25,7 @@ from ops.raw_fast_evidence_bundle import (
     RAW_BODY_DRAFT_FILE,
     RAW_FAST_QUALITY_GATE,
     WRITING_CONTRACT_REFS,
+    arxiv_id_from_url,
     canonical_openreview_pdf_url,
     detect_kind,
     has_tex_filtered_source_refs,
@@ -34,6 +36,7 @@ from ops.raw_fast_evidence_bundle import (
     tex_filtered_fallback_policy,
 )
 from ops.raw_fast_closeout import derive_closeout_args_from_bundle
+from ops.raw_fast_publish import default_mutation_state_dir
 
 PROD_WIKI_ROOT = Path("/mnt/d/data/Clippings/llm-wiki")
 PROD_STATE_DIR = Path("/home/xu/project/wiki/storage/zvec/llm-wiki-prod")
@@ -65,9 +68,12 @@ def _env_path(name: str) -> Path | None:
 def default_slug(url: str, kind: str) -> str:
     parsed = urllib.parse.urlparse(url)
     openreview_id = openreview_id_from_url(url)
-    stem = openreview_id or Path(parsed.path).stem or kind or "source"
+    arxiv_id = arxiv_id_from_url(url)
+    stem = arxiv_id or openreview_id or Path(parsed.path).stem or kind or "source"
+    source_key = slugify(stem).lower()
+    source_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
     date_prefix = dt.datetime.now().strftime("%y%m%d")
-    return f"{date_prefix}_{slugify(stem).lower()}"
+    return f"{date_prefix}_{source_key}_{source_hash}"
 
 
 def normalize_source_url(url: str) -> dict[str, Any]:
@@ -100,7 +106,11 @@ def resolve_prepare_paths(args: argparse.Namespace) -> dict[str, Any]:
         profile_state = PROD_STATE_DIR
         profile_tmp = _env_path("LLM_WIKI_RAW_FAST_TMP_ROOT") or PROD_TMP_ROOT
     root = (args.root or profile_root).expanduser().resolve()
-    state_dir = (args.state_dir.expanduser().resolve() if args.state_dir else (profile_state.expanduser().resolve() if not explicit_root else None))
+    state_dir = (
+        args.state_dir.expanduser().resolve()
+        if args.state_dir
+        else (profile_state.expanduser().resolve() if not explicit_root else default_mutation_state_dir(root))
+    )
     tmp_root = (args.tmp_root or profile_tmp).expanduser().resolve()
     source_url_normalization = normalize_source_url(args.url)
     args.url = str(source_url_normalization["url"])
@@ -229,9 +239,14 @@ def _manual_reason_from_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def write_closeout_artifacts(workdir: Path, paths: dict[str, Any]) -> dict[str, Any]:
+def write_closeout_artifacts(
+    workdir: Path,
+    paths: dict[str, Any],
+    *,
+    raw_file: str | None = None,
+) -> dict[str, Any]:
     bundle_path = workdir / "evidence_bundle.json"
-    closeout_args = derive_closeout_args_from_bundle(bundle_path)
+    closeout_args = derive_closeout_args_from_bundle(bundle_path, raw_file=raw_file)
     args_path = workdir / "closeout_args.json"
     args_path.write_text(json.dumps(closeout_args, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     preview_path = workdir / "closeout_command.preview.sh"
@@ -272,6 +287,8 @@ def write_assemble_artifacts(workdir: Path, paths: dict[str, Any], closeout: dic
         "--output-report",
         str(report_path),
     ]
+    if paths.get("state_dir"):
+        command.extend(["--state-dir", str(paths["state_dir"])])
     if closeout_args.get("raw_file"):
         command.extend(["--raw-file", str(closeout_args["raw_file"])])
     preview_path.write_text("#!/usr/bin/env bash\nset -euo pipefail\ncd " + shlex.quote(str(Path(__file__).resolve().parents[1])) + "\n" + " ".join(shlex.quote(str(part)) for part in command) + "\n", encoding="utf-8")
@@ -281,6 +298,21 @@ def write_assemble_artifacts(workdir: Path, paths: dict[str, Any], closeout: dic
         "body_draft_path": str((workdir / RAW_BODY_DRAFT_FILE).resolve()),
         "raw_file": closeout_args.get("raw_file"),
     }
+
+
+def sync_closeout_artifacts_after_publish(
+    workdir: Path,
+    *,
+    root: Path,
+    state_dir: Path,
+    raw_file: str,
+) -> dict[str, Any]:
+    """Rewrite prepared commands when the locked allocator changes the provisional path."""
+    paths = {"root": root, "state_dir": state_dir}
+    closeout = write_closeout_artifacts(workdir, paths, raw_file=raw_file)
+    assemble = write_assemble_artifacts(workdir, paths, closeout)
+    handoff = update_agent_handoff(workdir, closeout, assemble=assemble)
+    return {"closeout": closeout, "assemble": assemble, "handoff": handoff}
 
 
 def update_agent_handoff(workdir: Path, closeout: dict[str, Any], assemble: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -67,6 +67,15 @@ def test_raw_fast_ingest_prepare_url_only_prod_profile_prints_command(tmp_path: 
     assert "manual_reference_paths" not in payload
 
 
+def test_default_slug_keeps_full_arxiv_identity_and_hash() -> None:
+    first = raw_fast_ingest_prepare.default_slug("https://arxiv.org/abs/2608.20195", "arxiv")
+    second = raw_fast_ingest_prepare.default_slug("https://arxiv.org/abs/2608.12345", "arxiv")
+
+    assert first != second
+    assert "2608-20195" in first
+    assert "2608-12345" in second
+
+
 def test_raw_fast_ingest_prepare_print_command_normalizes_github_blob_pdf_to_raw_download(tmp_path: Path) -> None:
     result = _print_command(
         "https://github.com/areal-project/AReaL/blob/main/docs/paper/AReaL2.0_report.pdf",
@@ -213,6 +222,8 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert payload["ok"] is True
     assert payload["stage"] == "prepared"
     assert payload["workdir"] == str(workdir.resolve())
+    expected_state_dir = raw_fast_ingest_prepare.default_mutation_state_dir(root)
+    assert payload["state_dir"] == str(expected_state_dir)
     evidence = payload["evidence_bundle"]
     assert evidence["ok"] is True
     assert evidence["pdf_backend_effective"] == "docling"
@@ -236,7 +247,9 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     preview = (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
     assert "ops.raw_fast_note_assemble" in preview
     assert "raw_body_draft.md" in preview
+    assert f"--state-dir {expected_state_dir}" in preview
     closeout_preview = (workdir / "closeout_command.preview.sh").read_text(encoding="utf-8")
+    assert f"--state-dir {expected_state_dir}" in closeout_preview
     assert closeout_preview.count("--output-mode") == 1
     assert "--output-mode compact" in closeout_preview
     assert "--auto-integrate" in closeout_preview

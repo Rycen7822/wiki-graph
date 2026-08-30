@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_wiki_native.source_docs import raw_clip_files
+from ops.wiki_mutation_lock import atomic_write_json, wiki_mutation_lock
 from ops.wiki_native_state import ensure_state_dirs
 from ops.wiki_native_wiki_checks import now_stamp
 
@@ -79,11 +80,65 @@ def load_pending_wiki_integration_ledger(state_dir: Path, threshold: int | None 
 def save_pending_wiki_integration_ledger(state_dir: Path, ledger: dict[str, Any]) -> Path:
     ensure_state_dirs(state_dir)
     path = pending_wiki_integration_ledger_path(state_dir)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     ledger = normalize_pending_wiki_integration_ledger(ledger)
-    tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_json(path, ledger)
     return path
+
+
+def _mark_pending_wiki_integration_batch_locked(
+    state_dir: Path,
+    root: Path,
+    entries: list[dict[str, Any]],
+    threshold: int | None = None,
+) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+    ledger = load_pending_wiki_integration_ledger(state_dir, threshold=threshold)
+    effective_threshold = int(
+        threshold if threshold is not None else (ledger.get("threshold") or DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD)
+    )
+    ledger["threshold"] = effective_threshold
+    captured_at = now_stamp()
+    pending = list(ledger.get("pending") or [])
+    marked: list[dict[str, Any]] = []
+    for item in entries:
+        raw_path = str(item.get("raw_path") or "")
+        entry = {
+            "raw_path": raw_path,
+            "title": str(item.get("title") or (Path(raw_path).stem if raw_path else "")),
+            "source_id": str(item.get("source_id") or ""),
+            "captured_at": captured_at,
+            "status": str(item.get("status") or "raw_saved"),
+            "topic_hints": list(item.get("topic_hints") or []),
+            "required_sections": list(item.get("required_sections") or []),
+            "resource_status_summary": str(item.get("resource_status_summary") or ""),
+        }
+        replaced = False
+        if raw_path:
+            for index, old in enumerate(pending):
+                if isinstance(old, dict) and old.get("raw_path") == raw_path:
+                    pending[index] = {**old, **entry}
+                    replaced = True
+                    break
+        if not replaced:
+            pending.append(entry)
+        marked.append(entry)
+    ledger["pending"] = pending
+    ledger["dirty"] = True
+    ledger["last_pending_update_at"] = captured_at
+    ledger["current_raw_count_at_last_pending_update"] = len(raw_clip_files(root))
+    save_pending_wiki_integration_ledger(state_dir, ledger)
+    return marked
+
+
+def mark_pending_wiki_integration_batch(
+    state_dir: Path,
+    root: Path,
+    entries: list[dict[str, Any]],
+    threshold: int | None = None,
+) -> list[dict[str, Any]]:
+    with wiki_mutation_lock(state_dir):
+        return _mark_pending_wiki_integration_batch_locked(state_dir, root, entries, threshold=threshold)
 
 
 def mark_pending_wiki_integration(
@@ -98,38 +153,23 @@ def mark_pending_wiki_integration(
     status: str = "raw_saved",
     threshold: int | None = None,
 ) -> dict[str, Any]:
-    ledger = load_pending_wiki_integration_ledger(state_dir, threshold=threshold)
-    effective_threshold = int(
-        threshold if threshold is not None else (ledger.get("threshold") or DEFAULT_PENDING_WIKI_INTEGRATION_THRESHOLD)
+    entries = mark_pending_wiki_integration_batch(
+        state_dir,
+        root,
+        [
+            {
+                "raw_path": raw_path,
+                "title": title,
+                "source_id": source_id,
+                "topic_hints": topic_hints or [],
+                "required_sections": required_sections or [],
+                "resource_status_summary": resource_status_summary,
+                "status": status,
+            }
+        ],
+        threshold=threshold,
     )
-    ledger["threshold"] = effective_threshold
-    captured_at = now_stamp()
-    entry = {
-        "raw_path": raw_path,
-        "title": title or (Path(raw_path).stem if raw_path else ""),
-        "source_id": source_id,
-        "captured_at": captured_at,
-        "status": status,
-        "topic_hints": topic_hints or [],
-        "required_sections": required_sections or [],
-        "resource_status_summary": resource_status_summary,
-    }
-    pending = list(ledger.get("pending") or [])
-    replaced = False
-    if raw_path:
-        for index, old in enumerate(pending):
-            if isinstance(old, dict) and old.get("raw_path") == raw_path:
-                pending[index] = {**old, **entry}
-                replaced = True
-                break
-    if not replaced:
-        pending.append(entry)
-    ledger["pending"] = pending
-    ledger["dirty"] = True
-    ledger["last_pending_update_at"] = captured_at
-    ledger["current_raw_count_at_last_pending_update"] = len(raw_clip_files(root))
-    save_pending_wiki_integration_ledger(state_dir, ledger)
-    return entry
+    return entries[0]
 
 
 def pending_wiki_integration_status(
@@ -217,7 +257,7 @@ def pending_wiki_integration_status(
     }
 
 
-def clear_pending_wiki_integration_after_success(
+def _clear_pending_wiki_integration_after_success_locked(
     root: Path,
     state_dir: Path,
     integrated_paths: list[str] | None = None,
@@ -271,10 +311,30 @@ def clear_pending_wiki_integration_after_success(
     }
 
 
-def record_pending_wiki_integration_failure(state_dir: Path, reason: str, message: str = "") -> dict[str, Any]:
+def clear_pending_wiki_integration_after_success(
+    root: Path,
+    state_dir: Path,
+    integrated_paths: list[str] | None = None,
+    reason: str = "integration",
+) -> dict[str, Any]:
+    with wiki_mutation_lock(state_dir):
+        return _clear_pending_wiki_integration_after_success_locked(
+            root,
+            state_dir,
+            integrated_paths=integrated_paths,
+            reason=reason,
+        )
+
+
+def _record_pending_wiki_integration_failure_locked(state_dir: Path, reason: str, message: str = "") -> dict[str, Any]:
     ledger = load_pending_wiki_integration_ledger(state_dir)
     failure = {"at": now_stamp(), "reason": reason, "message": message}
     ledger["last_failed_integration"] = failure
     ledger["dirty"] = True
     save_pending_wiki_integration_ledger(state_dir, ledger)
     return failure
+
+
+def record_pending_wiki_integration_failure(state_dir: Path, reason: str, message: str = "") -> dict[str, Any]:
+    with wiki_mutation_lock(state_dir):
+        return _record_pending_wiki_integration_failure_locked(state_dir, reason, message)

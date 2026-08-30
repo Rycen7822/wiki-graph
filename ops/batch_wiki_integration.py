@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -27,6 +28,7 @@ from ops.wiki_native_wiki_integration_pending import (
     record_pending_wiki_integration_failure,
 )
 from ops.validate_wiki import validation_summary
+from ops.wiki_mutation_lock import wiki_mutation_lock
 from ops.wiki_integration_plan import (
     apply_wiki_integration_plan,
     build_wiki_integration_plan,
@@ -113,7 +115,8 @@ Closeout:
 def write_auto_integration_prompt(state_dir: Path, prompt: str) -> Path:
     run_dir = state_dir / "wiki_integration_runs"
     run_dir.mkdir(parents=True, exist_ok=True)
-    path = run_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_auto_integration_prompt.md"
+    run_id = f"{time.strftime('%Y%m%d_%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    path = run_dir / f"{run_id}-auto_integration_prompt.md"
     path.write_text(prompt, encoding="utf-8")
     return path
 
@@ -507,35 +510,81 @@ def run_integrate_local(
     workdir: Path | None = None,
     dry_run: bool = False,
     defer_native_refresh: bool = False,
+    refresh_stale_plan: bool = False,
 ) -> tuple[int, dict[str, Any]]:
-    plan = load_wiki_integration_plan(plan_path)
-    apply_result = apply_wiki_integration_plan(root, state_dir, plan, reason=reason, dry_run=dry_run)
-    if apply_result.get("errors"):
-        return 13, {"local_runner": True, "plan_path": str(plan_path), **apply_result}
+    provided_plan = load_wiki_integration_plan(plan_path)
     if dry_run:
-        return 0, {"local_runner": True, "plan_path": str(plan_path), **apply_result}
-
-    validation = validate_wiki(
-        root,
-        state_dir,
-        workdir or DEFAULT_NATIVE_WORKDIR,
-        full=True,
-        write_report=True,
-        sync_raw_map_snapshot=True,
-    )
-    validation_compact = validation_summary(validation)
-    validation_ok = not bool(validation.get("errors"))
-    if not validation_ok:
-        failure = record_pending_wiki_integration_failure(state_dir, "local-validation-failed", "local integration validation reported errors")
-        return 14, {
+        apply_result = apply_wiki_integration_plan(root, state_dir, provided_plan, reason=reason, dry_run=True)
+        return (0 if not apply_result.get("errors") else 13), {
             "local_runner": True,
             "plan_path": str(plan_path),
-            "apply": apply_result,
-            "validation": validation_compact,
-            "failure": failure,
+            **apply_result,
         }
-    clear = clear_pending_wiki_integration_after_success(root, state_dir, reason=reason)
-    post_status = pending_wiki_integration_status(root, state_dir, reason=reason)
+
+    effective_plan_path = Path(plan_path)
+    with wiki_mutation_lock(state_dir):
+        current_plan = build_wiki_integration_plan(root, state_dir, reason=reason)
+        if provided_plan.get("plan_hash") != current_plan.get("plan_hash"):
+            if not refresh_stale_plan:
+                return 15, {
+                    "local_runner": True,
+                    "stale_plan": True,
+                    "plan_path": str(plan_path),
+                    "provided_plan_hash": provided_plan.get("plan_hash"),
+                    "current_plan_hash": current_plan.get("plan_hash"),
+                    "error": "stale_plan",
+                }
+            provided_plan = current_plan
+            effective_plan_path = write_wiki_integration_plan_report(state_dir, current_plan)
+
+        planned_raw_paths = [str(path) for path in provided_plan.get("planned_raw_paths") or [] if str(path)]
+        if not planned_raw_paths:
+            post_status = pending_wiki_integration_status(root, state_dir, reason=reason)
+            return 0, {
+                "local_runner": True,
+                "skipped": True,
+                "skip_reason": "integration_not_required_after_lock",
+                "plan_path": str(effective_plan_path),
+                "plan_hash": provided_plan.get("plan_hash"),
+                "post_status": post_status,
+                "native_refresh": {"skipped": True, "skip_reason": "integration_not_required_after_lock"},
+            }
+
+        apply_result = apply_wiki_integration_plan(root, state_dir, provided_plan, reason=reason, dry_run=False)
+        if apply_result.get("errors"):
+            return 13, {"local_runner": True, "plan_path": str(effective_plan_path), **apply_result}
+
+        validation = validate_wiki(
+            root,
+            state_dir,
+            workdir or DEFAULT_NATIVE_WORKDIR,
+            full=True,
+            write_report=True,
+            sync_raw_map_snapshot=True,
+        )
+        validation_compact = validation_summary(validation)
+        validation_ok = not bool(validation.get("errors"))
+        if not validation_ok:
+            failure = record_pending_wiki_integration_failure(
+                state_dir,
+                "local-validation-failed",
+                "local integration validation reported errors",
+            )
+            return 14, {
+                "local_runner": True,
+                "plan_path": str(effective_plan_path),
+                "apply": apply_result,
+                "validation": validation_compact,
+                "failure": failure,
+            }
+        clear = clear_pending_wiki_integration_after_success(
+            root,
+            state_dir,
+            integrated_paths=planned_raw_paths,
+            reason=reason,
+        )
+        post_status = pending_wiki_integration_status(root, state_dir, reason=reason)
+
     native_code, native_refresh = run_native_refresh_after_wiki_integration(
         root,
         state_dir,
@@ -545,7 +594,9 @@ def run_integrate_local(
     )
     result = {
         "local_runner": True,
-        "plan_path": str(plan_path),
+        "plan_path": str(effective_plan_path),
+        "plan_hash": provided_plan.get("plan_hash"),
+        "planned_raw_paths": planned_raw_paths,
         "apply": apply_result,
         "validation": validation_compact,
         "clear_success": clear,
@@ -617,14 +668,24 @@ def run_auto_integration(
             plan_path=plan_path,
             workdir=DEFAULT_NATIVE_WORKDIR,
             defer_native_refresh=defer_native_refresh,
+            refresh_stale_plan=True,
         )
-        result = {**base, "ran": True, "runner_returncode": local_code, "local_result": local_result}
+        result = {
+            **base,
+            "ran": True,
+            "runner_returncode": local_code,
+            "local_result": local_result,
+            "plan_path": local_result.get("plan_path") or base.get("plan_path"),
+            "plan_hash": local_result.get("plan_hash") or base.get("plan_hash"),
+        }
         if local_code != 0:
             return local_code, result
-        post_status = pending_wiki_integration_status(root, state_dir, reason=reason, threshold=threshold)
+        post_status = local_result.get("post_status") or pending_wiki_integration_status(
+            root, state_dir, reason=reason, threshold=threshold
+        )
         result["post_status"] = post_status
         if post_status.get("should_integrate") or post_status.get("should_review"):
-            failure = record_pending_wiki_integration_failure(state_dir, "auto-integrate-incomplete", "local integration returned successfully but pending wiki integration ledger still requires action")
+            failure = record_pending_wiki_integration_failure(state_dir, "auto-integrate-incomplete", "local integration returned successfully but its locked post-status still requires action")
             return 12, {**result, "failure": failure}
         return 0, result
 
@@ -815,10 +876,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if not result.get("errors") else 13
     if args.command == "integrate-local":
         plan_path = args.plan
+        generated_plan = plan_path is None
         if plan_path is None:
             plan = build_wiki_integration_plan(root, state_dir, reason=args.reason, threshold=args.threshold)
             plan_path = write_wiki_integration_plan_report(state_dir, plan)
-        code, result = run_integrate_local(root, state_dir, reason=args.reason, plan_path=plan_path, dry_run=args.dry_run, defer_native_refresh=args.defer_native_refresh)
+        code, result = run_integrate_local(
+            root,
+            state_dir,
+            reason=args.reason,
+            plan_path=plan_path,
+            dry_run=args.dry_run,
+            defer_native_refresh=args.defer_native_refresh,
+            refresh_stale_plan=generated_plan,
+        )
         print_json(result)
         return code
     if args.command == "clear-success":
