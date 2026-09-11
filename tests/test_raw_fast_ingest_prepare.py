@@ -224,13 +224,17 @@ def test_raw_fast_ingest_prepare_wrapper_writes_single_handoff_and_closeout_args
     assert payload["workdir"] == str(workdir.resolve())
     expected_state_dir = raw_fast_ingest_prepare.default_mutation_state_dir(root)
     assert payload["state_dir"] == str(expected_state_dir)
-    evidence = payload["evidence_bundle"]
-    assert evidence["ok"] is True
-    assert evidence["pdf_backend_effective"] == "docling"
-    assert evidence["source_read_plan"]["source_kind"] == "docling_pdf"
+    assert "evidence_bundle" not in payload
+    assert payload["evidence_bundle_path"] == str((workdir / "evidence_bundle.json").resolve())
+    summary = payload["evidence_bundle_summary"]
+    assert summary["ok"] is True
+    assert summary["pdf_backend_effective"] == "docling"
+    assert summary["source_kind"] == "docling_pdf"
+    bundle = json.loads(Path(payload["evidence_bundle_path"]).read_text(encoding="utf-8"))
+    assert bundle["source_read_plan"]["source_kind"] == "docling_pdf"
     for key in ["raw_fast_preflight", "agent_brief", "evidence_report", "note_candidate"]:
-        assert key in evidence["files"]
-        assert (workdir / evidence["files"][key]).exists()
+        assert key in bundle["files"]
+        assert (workdir / bundle["files"][key]).exists()
     assert payload["agent_next_reads"][0] == str((workdir / "agent_handoff.md").resolve())
     assert any(path.endswith("structured-paper-note-contract.md") for path in payload["agent_next_reads"])
     assert payload["writing_contract_refs"][0]["read_before"] == "source_read_plan"

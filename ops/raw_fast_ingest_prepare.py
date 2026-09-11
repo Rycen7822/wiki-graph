@@ -239,6 +239,42 @@ def _manual_reason_from_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def summarize_evidence_bundle(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact agent-facing rollup; full diagnostics stay in workdir evidence_bundle.json / source_inventory.json."""
+    summary: dict[str, Any] = {
+        "ok": payload.get("ok"),
+        "kind": payload.get("kind"),
+        "title_guess": payload.get("title_guess"),
+        "next_raw_path": payload.get("next_raw_path"),
+        "pdf_backend_effective": payload.get("pdf_backend_effective"),
+        "warnings": payload.get("warnings"),
+    }
+    read_plan = payload.get("source_read_plan")
+    if isinstance(read_plan, dict):
+        summary["source_kind"] = read_plan.get("source_kind")
+    automation = payload.get("agent_automation")
+    if isinstance(automation, dict):
+        summary["agent_automation"] = {
+            "status": automation.get("status"),
+            "handoff_status": automation.get("handoff_status"),
+            "resource_review_required": automation.get("resource_review_required"),
+            "brief_cards": automation.get("brief_cards"),
+        }
+    arxiv = payload.get("arxiv")
+    if isinstance(arxiv, dict):
+        raw_selection = arxiv.get("tex_selection")
+        selection = raw_selection if isinstance(raw_selection, dict) else {}
+        summary["arxiv"] = {
+            "id": arxiv.get("id"),
+            "abs_ok": arxiv.get("abs_ok"),
+            "eprint_ok": arxiv.get("eprint_ok"),
+            "tex_main": selection.get("main_tex"),
+            "tex_candidate_count": len(selection.get("candidates") or []),
+            "tex_file_count": len(arxiv.get("tex_files") or []),
+        }
+    return summary
+
+
 def write_closeout_artifacts(
     workdir: Path,
     paths: dict[str, Any],
@@ -433,7 +469,8 @@ def run_prepare(args: argparse.Namespace, paths: dict[str, Any]) -> dict[str, An
         "automation_next_action": prepare_automation_next_action(workdir, ok=ok),
     }
     if payload is not None:
-        output["evidence_bundle"] = payload
+        output["evidence_bundle_path"] = str((workdir / "evidence_bundle.json").resolve())
+        output["evidence_bundle_summary"] = summarize_evidence_bundle(payload)
     else:
         output["stdout_tail"] = result.get("stdout_tail")
     if not ok:
