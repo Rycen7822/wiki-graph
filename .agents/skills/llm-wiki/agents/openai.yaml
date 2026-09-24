@@ -1,0 +1,6 @@
+interface:
+  display_name: Llm Wiki
+  short_description: Thin router for the user's layered Markdown llm-wiki. Bare paper/blog/article links are clipping requests by default; routes structured pap…
+  default_prompt: 'Use $llm-wiki when the task matches this skill: Thin router for the user''s layered Markdown llm-wiki. Bare paper/blog/article links are clipping requests by default; routes structured paper raw-fast ingest, ordinary URL/blog clipping, wiki queries, maintenance, and L…'
+policy:
+  allow_implicit_invocation: true

@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ops.raw_fast_closeout import DEFAULT_VERIFIER
 from ops.raw_fast_evidence_bundle import yamlish
 from ops.raw_fast_publish import RawPublishError, publish_raw_note
 
@@ -23,7 +24,6 @@ DEFAULT_BODY_DRAFT = "raw_body_draft.md"
 DEFAULT_FRONTMATTER = "candidate_frontmatter.json"
 DEFAULT_HANDOFF = "agent_handoff.json"
 DEFAULT_REPORT = "assembled_raw_note_report.json"
-DEFAULT_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 
 REQUIRED_HEADINGS = [
     "一句话总结",

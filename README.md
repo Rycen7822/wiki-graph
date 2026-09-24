@@ -6,13 +6,17 @@ Production retrieval is native-only. The previous `wikigraph` / `custom_kg` live
 
 ## Configure your environment
 
-This README intentionally uses environment variables instead of machine-specific paths. Set these values for your deployment before running the examples:
+This README intentionally uses environment variables instead of machine-specific paths. Start with the tracked template, replace all six required paths with absolute paths for your machine, and verify them before using the commands below:
 
 ```bash
-export LLM_WIKI_ROOT="/path/to/your/wiki"
-export LLM_WIKI_STATE_DIR="/path/to/your/native-zvec-state"
-export WIKI_GRAPH_REPO="$(pwd)"
+cp -n .env.example .env  # First-time setup only; never overwrite an existing .env.
+chmod 600 .env
+# Edit .env: especially WIKI_GRAPH_REPO (this checkout), LLM_WIKI_ROOT, and LLM_WIKI_STATE_DIR.
+python3 .agents/skills/llm-wiki/scripts/load_env_paths.py --check
+WIKI_PATH_EXPORTS="$(python3 .agents/skills/llm-wiki/scripts/load_env_paths.py --shell)" && eval "$WIKI_PATH_EXPORTS"
 ```
+
+The loader exports only allowlisted paths; it never prints provider keys from `.env`. Do not `source .env` into your shell. Optional embedding/server settings are documented in `.env.example` and should be enabled only for the relevant runtime.
 
 Recommended conventions:
 

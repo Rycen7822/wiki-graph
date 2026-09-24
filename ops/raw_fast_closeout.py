@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic closeout wrapper for llm-wiki raw-fast paper notes.
 
-The wrapper intentionally keeps the canonical raw-note verifier in the llm-wiki
-Hermes skill. It orchestrates the existing verifier and ledgers so agents do not
+The wrapper uses the tracked project llm-wiki verifier by default (or an explicit
+path override). It orchestrates verification and ledgers so agents do not
 forget pre-mark verification, pending marking, cleanup proof, or threshold-gated
 wiki/native graph follow-through.
 """
@@ -35,9 +35,10 @@ def _env_path(name: str, default: Path) -> Path:
 DEFAULT_WORKDIR = _env_path("LLM_WIKI_WORKDIR", _env_path("WIKI_GRAPH_REPO", REPO_ROOT))
 DEFAULT_ROOT = _env_path("LLM_WIKI_ROOT", DEFAULT_WORKDIR)
 DEFAULT_STATE_DIR = _env_path("LLM_WIKI_STATE_DIR", DEFAULT_WORKDIR / "tmp" / "native_refresh" / "state")
+PROJECT_VERIFIER = REPO_ROOT / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 DEFAULT_VERIFIER = _env_path(
     "LLM_WIKI_RAW_FAST_VERIFIER",
-    Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py",
+    PROJECT_VERIFIER if PROJECT_VERIFIER.is_file() else Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py",
 )
 DEFAULT_REQUIRED_SECTIONS = [
     "summary",

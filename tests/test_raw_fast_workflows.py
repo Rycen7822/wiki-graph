@@ -6,14 +6,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
+RAW_FAST_VERIFIER = ROOT / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 
 from support import sample_wiki, structured_raw_fast_note, write  # noqa: E402
 
-pytestmark = [pytest.mark.external_skill, pytest.mark.subprocess]
-
-if not RAW_FAST_VERIFIER.is_file():
-    pytest.skip(f"external skill missing: {RAW_FAST_VERIFIER}", allow_module_level=True)
+pytestmark = pytest.mark.subprocess
 
 
 def _run_verifier(root: Path, raw_rel: str) -> subprocess.CompletedProcess[str]:

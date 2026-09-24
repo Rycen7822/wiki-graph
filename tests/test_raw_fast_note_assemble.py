@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW_FAST_VERIFIER = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
+RAW_FAST_VERIFIER = ROOT / ".agents" / "skills" / "llm-wiki" / "scripts" / "raw_fast_note_verify.py"
 
 from support import sample_wiki, write  # noqa: E402
 from ops import raw_fast_note_assemble  # noqa: E402
@@ -198,11 +198,8 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence
     assert f"--state-dir {state_dir}" in (workdir / "assemble_command.preview.sh").read_text(encoding="utf-8")
 
 
-@pytest.mark.external_skill
 @pytest.mark.subprocess
 def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path) -> None:
-    if not RAW_FAST_VERIFIER.is_file():
-        pytest.skip(f"external skill missing: {RAW_FAST_VERIFIER}")
     root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070403_Roundtrip-Paper.md")
 
     assemble = subprocess.run(

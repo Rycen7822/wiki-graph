@@ -22,6 +22,7 @@ from typing import Any
 
 from ops.raw_fast_evidence_bundle import (
     ASSEMBLED_RAW_NOTE_REPORT_FILE,
+    LLM_WIKI_SKILL_ROOT,
     RAW_BODY_DRAFT_FILE,
     RAW_FAST_QUALITY_GATE,
     WRITING_CONTRACT_REFS,
@@ -43,9 +44,12 @@ PROD_STATE_DIR = Path("/home/xu/project/wiki/storage/zvec/llm-wiki-prod")
 PROD_TMP_ROOT = Path("/home/xu/tmp/llm_wiki_raw_fast")
 DEFAULT_TMP_ROOT = PROD_TMP_ROOT
 MANUAL_REFERENCE_PATHS = [
-    "/home/xu/.hermes/skills/research/llm-wiki/references/structured-paper-ingest-router.md",
-    "/home/xu/.hermes/skills/research/llm-wiki/references/raw-fast-resource-probe-boundaries.md",
-    "/home/xu/.hermes/skills/research/llm-wiki/references/raw-fast-batch-wiki-integration.md",
+    str(LLM_WIKI_SKILL_ROOT / "references" / name)
+    for name in (
+        "structured-paper-ingest-router.md",
+        "raw-fast-resource-probe-boundaries.md",
+        "raw-fast-batch-wiki-integration.md",
+    )
 ]
 
 

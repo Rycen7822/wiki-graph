@@ -38,7 +38,11 @@ SUPPLIED_RESOURCE_DISCOVERY_TIMEOUT = 8
 RAW_BODY_DRAFT_FILE = "raw_body_draft.md"
 TEX_AGENT_SOURCE_FILE = "paper_source.agent.tex"
 ASSEMBLED_RAW_NOTE_REPORT_FILE = "assembled_raw_note_report.json"
-LLM_WIKI_SKILL_ROOT = Path.home() / ".hermes" / "skills" / "research" / "llm-wiki"
+PROJECT_SKILL_ROOT = Path(__file__).resolve().parents[1] / ".agents" / "skills" / "llm-wiki"
+LLM_WIKI_SKILL_ROOT = Path(
+    os.environ.get("LLM_WIKI_SKILL_DIR")
+    or (PROJECT_SKILL_ROOT if (PROJECT_SKILL_ROOT / "SKILL.md").is_file() else Path.home() / ".hermes" / "skills" / "research" / "llm-wiki")
+).expanduser()
 STRUCTURED_PAPER_NOTE_CONTRACT_PATH = str(LLM_WIKI_SKILL_ROOT / "references" / "structured-paper-note-contract.md")
 WRITING_CONTRACT_REFS = [
     {

@@ -19,8 +19,11 @@ share/
 # Local reference checkouts
 reference/
 
-# Codex project-local agents
-.agents/
+# Project-local agent skill: track llm-wiki only; keep other local agent data ignored
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/llm-wiki/
 .codex
 
 # Local env file
