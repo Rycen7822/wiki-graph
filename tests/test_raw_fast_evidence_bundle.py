@@ -72,11 +72,25 @@ def test_raw_fast_evidence_bundle_recognizes_cross_site_arxiv_routes() -> None:
         ("https://www.modelscope.ai/papers/2606.07591v2", "2606.07591"),
         ("https://www.alphaxiv.org/abs/2606.04036", "2606.04036"),
         ("https://alphaxiv.org/overview/2606.04036v3?tab=discussion", "2606.04036"),
+        ("https://academy.dair.ai/papers/jev-as-a-judge-accept-when-confident-escalate-when-unsure-2609.26550", "2609.26550"),
+        ("https://academy.dair.ai/papers/gauge-when-not-to-trust-llm-as-a-judge-in-user-simulated-evaluation-of-task-orie-2609.12191v2", "2609.12191"),
     ]
 
     for url, expected_id in cases:
         assert raw_fast_evidence_bundle.arxiv_id_from_url(url) == expected_id
         assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "arxiv"
+
+def test_raw_fast_evidence_bundle_ignores_non_paper_dair_pages() -> None:
+    from ops import raw_fast_evidence_bundle
+
+    for url in [
+        "https://academy.dair.ai/papers",
+        "https://academy.dair.ai/papers/collections/harness-engineering",
+        "https://academy.dair.ai/papers/week/2023-04-03-april-9",
+        "https://academy.dair.ai/papers/hero/cmu17w26g000404l3zlepg46n-pdf-page-1.png",
+    ]:
+        assert raw_fast_evidence_bundle.arxiv_id_from_url(url) is None
+        assert raw_fast_evidence_bundle.detect_kind(url, "auto") == "direct-pdf"
 
 def test_raw_fast_evidence_bundle_pdf_download_limit_is_large_and_configurable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ops import raw_fast_evidence_bundle

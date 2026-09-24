@@ -403,7 +403,9 @@ def fetch_text(url: str, timeout: float, max_bytes: int = DEFAULT_MAX_TEXT_BYTES
 
 
 ARXIV_ID_IN_PATH_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
+ARXIV_TRAILING_ID_RE = re.compile(r"(?:^|-)(\d{4}\.\d{4,5})(?:v\d+)?$")
 ARXIV_DIRECT_HOSTS = {"arxiv.org", "export.arxiv.org"}
+DAIR_PAPER_HOSTS = {"academy.dair.ai"}
 MODELSCOPE_HOST = "modelscope.ai"
 OPENREVIEW_HOST = "openreview.net"
 OPENREVIEW_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -436,6 +438,11 @@ def _last_arxiv_id(parts: list[str]) -> str | None:
     return None
 
 
+def _trailing_arxiv_id(segment: str) -> str | None:
+    match = ARXIV_TRAILING_ID_RE.search(segment)
+    return match.group(1) if match else None
+
+
 def arxiv_id_from_url(url: str) -> str | None:
     host = _url_host(url)
     parts = _path_parts(url)
@@ -458,6 +465,13 @@ def arxiv_id_from_url(url: str) -> str | None:
     if host == "alphaxiv.org":
         if parts and parts[0] in {"abs", "paper", "papers", "overview"}:
             return _last_arxiv_id(parts[1:])
+        return None
+    if host in DAIR_PAPER_HOSTS:
+        # DAIR academy paper pages are `/papers/<title-slug>-<arxiv-id>`; the
+        # collection/week/hero pages share the `/papers/` prefix but expose no
+        # arXiv id, so require a single slug segment carrying a trailing id.
+        if parts[:1] == ["papers"] and len(parts) == 2:
+            return _trailing_arxiv_id(parts[1])
         return None
     return None
 

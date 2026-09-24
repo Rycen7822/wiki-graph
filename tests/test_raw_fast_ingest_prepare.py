@@ -97,6 +97,7 @@ def test_raw_fast_ingest_prepare_print_command_plumbs_cross_site_arxiv_kind(tmp_
     urls = [
         "https://paperswithcode.co/paper/2606.28436",
         "https://modelscope.ai/papers/2606.07591",
+        "https://academy.dair.ai/papers/sol-pi-recursively-scaling-auto-research-loops-for-efficient-agent-harness-2609.20519",
     ]
     for url in urls:
         result = _print_command(url, tmp_path)
