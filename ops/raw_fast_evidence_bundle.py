@@ -222,8 +222,8 @@ def run_command(command: list[str], timeout: int = 60) -> dict[str, Any]:
         return {
             "ok": False,
             "returncode": None,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": exc.stdout if isinstance(exc.stdout, str) else "",
+            "stderr": exc.stderr if isinstance(exc.stderr, str) else "",
             "command": command,
             "error": "TimeoutExpired",
             "timeout": timeout,
@@ -249,32 +249,42 @@ def fetch_url_to_file(url: str, dest: Path, timeout: int, max_bytes: int | None 
             "dest": str(dest),
         }
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        h = hashlib.sha256()
-        total = 0
-        with urllib.request.urlopen(req, timeout=timeout) as response, dest.open("wb") as out:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if max_bytes is not None and total > max_bytes:
-                    out.close()
-                    dest.unlink(missing_ok=True)
-                    return {"ok": False, "url": url, "dest": str(dest), "error": "DownloadTooLarge", "bytes": total, "max_bytes": max_bytes}
-                h.update(chunk)
-                out.write(chunk)
-            return {
-                "ok": True,
-                "url": url,
-                "status": getattr(response, "status", None),
-                "content_type": response.headers.get("content-type"),
-                "bytes": total,
-                "sha256": h.hexdigest(),
-                "dest": str(dest),
-            }
-    except Exception as exc:
-        return {"ok": False, "url": url, "dest": str(dest), "error": type(exc).__name__, "message": str(exc)}
+    retryable_status = {406, 429, 500, 502, 503, 504}
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            h = hashlib.sha256()
+            total = 0
+            with urllib.request.urlopen(req, timeout=timeout) as response, dest.open("wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        out.close()
+                        dest.unlink(missing_ok=True)
+                        return {"ok": False, "url": url, "dest": str(dest), "error": "DownloadTooLarge", "bytes": total, "max_bytes": max_bytes}
+                    h.update(chunk)
+                    out.write(chunk)
+                return {
+                    "ok": True,
+                    "url": url,
+                    "status": getattr(response, "status", None),
+                    "content_type": response.headers.get("content-type"),
+                    "bytes": total,
+                    "sha256": h.hexdigest(),
+                    "dest": str(dest),
+                }
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_status and attempt < attempts:
+                time.sleep(3)
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                continue
+            return {"ok": False, "url": url, "dest": str(dest), "error": type(exc).__name__, "message": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "url": url, "dest": str(dest), "error": type(exc).__name__, "message": str(exc)}
+    return {"ok": False, "url": url, "dest": str(dest), "error": "RetriesExhausted", "message": f"failed after {attempts} attempts"}
 
 
 def read_key_value_env(path: Path) -> dict[str, str]:
@@ -616,7 +626,10 @@ except Exception as exc:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        payload = {"ok": False, "error": "TimeoutExpired", "message": f"Docling exceeded {timeout}s", "outputs": {"markdown": str(out_md), "json": str(out_json)}, "stderr_tail": (exc.stderr or "")[-800:]}
+        stderr_tail = exc.stderr[-800:] if isinstance(exc.stderr, (bytes, bytearray)) else (exc.stderr or "")[-800:]
+        if isinstance(stderr_tail, (bytes, bytearray)):
+            stderr_tail = stderr_tail.decode("utf-8", errors="replace")
+        payload = {"ok": False, "error": "TimeoutExpired", "message": f"Docling exceeded {timeout}s", "outputs": {"markdown": str(out_md), "json": str(out_json)}, "stderr_tail": stderr_tail}
         if strict:
             payload["strict_failure"] = True
         write_json(out_json, payload)

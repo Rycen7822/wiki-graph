@@ -18,6 +18,11 @@ from typing import Any
 
 import numpy as np
 
+from llm_wiki_native.embedding_transport import (
+    EmbeddingTransportOptions,
+    build_embedding_payload,
+    embedding_vectors_from_payload,
+)
 from llm_wiki_native.section_embedding_store import jsonl_path, load_rows, sidecar_path, upsert_rows
 
 from ops.native_runtime_env import load_env_file, redact_summary
@@ -71,6 +76,8 @@ def parse_cross_kind_pairs(raw: str) -> list[tuple[str, str]]:
 
 def embedding_config(workdir: Path) -> dict[str, Any]:
     env_values = load_env_file(workdir / ".env")
+    runtime_env = dict(env_values)
+    runtime_env.update({key: value for key, value in os.environ.items() if value})
     model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
     host = os.environ.get("EMBEDDING_BINDING_HOST") or os.environ.get("OPENAI_BASE_URL")
     key = os.environ.get("EMBEDDING_BINDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -87,6 +94,7 @@ def embedding_config(workdir: Path) -> dict[str, Any]:
         "timeout": timeout,
         "batch_size": batch,
         "max_async": max(1, max_async),
+        "transport": EmbeddingTransportOptions.from_env(runtime_env),
         "env": redact_summary({
             "EMBEDDING_BINDING": env_values.get("EMBEDDING_BINDING", ""),
             "EMBEDDING_BINDING_HOST": env_values.get("EMBEDDING_BINDING_HOST", ""),
@@ -106,7 +114,19 @@ def openai_compatible_embed(texts: list[str], config: dict[str, Any], max_attemp
     if not api_key:
         raise RuntimeError("EMBEDDING_BINDING_API_KEY or OPENAI_API_KEY is required for section embeddings")
     url = f"{host}/embeddings"
-    body = json.dumps({"model": model, "input": texts}, ensure_ascii=False).encode("utf-8")
+    transport = config.get("transport")
+    if not isinstance(transport, EmbeddingTransportOptions):
+        transport = EmbeddingTransportOptions()
+    body = json.dumps(
+        build_embedding_payload(
+            model=str(model),
+            inputs=texts,
+            expected_dim=config.get("embedding_dim"),
+            options=transport,
+            input_type="passage",
+        ),
+        ensure_ascii=False,
+    ).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -118,12 +138,11 @@ def openai_compatible_embed(texts: list[str], config: dict[str, Any], max_attemp
         try:
             with urllib.request.urlopen(req, timeout=int(config.get("timeout") or 120)) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            data = payload.get("data") or []
-            data = sorted(data, key=lambda row: row.get("index", 0))
-            embeddings = [row.get("embedding") for row in data]
-            if len(embeddings) != len(texts) or not all(isinstance(vec, list) for vec in embeddings):
-                raise RuntimeError(f"embedding response count mismatch: expected {len(texts)}, got {len(embeddings)}")
-            return embeddings  # type: ignore[return-value]
+            return embedding_vectors_from_payload(
+                payload,
+                expected_count=len(texts),
+                expected_dim=config.get("embedding_dim"),
+            )
         except Exception as exc:  # pragma: no cover - network retry path
             last_exc = exc
             if attempt >= max_attempts:

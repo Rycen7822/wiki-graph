@@ -19,6 +19,8 @@ import urllib.request
 
 from llm_wiki_native.contracts import DEFAULT_QUERY_MODE
 from llm_wiki_native.query_contract import query_vector as normalize_native_query_vector
+from llm_wiki_native.workspace_lock import workspace_mutation_lock
+from ops.native_workspace_retention import cleanup_obsolete_workspaces
 
 PENDING_NATIVE_REFRESH_LEDGER = "pending_native_refresh.json"
 NATIVE_INCREMENTAL_REFRESH_THRESHOLD = 5
@@ -949,6 +951,44 @@ def _refresh_cutover_success_result(
 
 
 def refresh_cutover(
+    *,
+    root: Path,
+    state_dir: Path,
+    workspace_root: Path,
+    workspace_id: str,
+    embedding_profile: str,
+    build_workspace: Any = build_prepared_workspace,
+    finalize_workspace: Any = finalize_prepared_workspace_for_state,
+    restart_service: Any | None = None,
+    query_smoke: Any | None = None,
+    fill_missing_vectors: bool = True,
+    force: bool = False,
+    required_unchanged_paths: list[Path] | None = None,
+    cleanup_workspaces: bool = True,
+) -> dict[str, Any]:
+    # Validate before acquiring a lock that may create its parent directory.
+    _validate_refresh_cutover_preconditions(
+        state_dir=state_dir, workspace_root=workspace_root,
+        required_unchanged_paths=required_unchanged_paths, query_smoke=query_smoke,
+    )
+    with workspace_mutation_lock(Path(workspace_root).parent):
+        result = _refresh_cutover(
+            root=root, state_dir=state_dir, workspace_root=workspace_root,
+            workspace_id=workspace_id, embedding_profile=embedding_profile,
+            build_workspace=build_workspace, finalize_workspace=finalize_workspace,
+            restart_service=restart_service, query_smoke=query_smoke,
+            fill_missing_vectors=fill_missing_vectors, force=force,
+            required_unchanged_paths=required_unchanged_paths,
+        )
+        if cleanup_workspaces and result.get("cutover_executed"):
+            result["workspace_cleanup"] = cleanup_obsolete_workspaces(
+                workspace_root=workspace_root,
+                expected_active_id=str(result["active"]["workspace_id"]),
+            )
+        return result
+
+
+def _refresh_cutover(
     *,
     root: Path,
     state_dir: Path,

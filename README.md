@@ -71,7 +71,15 @@ python3 -m ops.batch_wiki_integration refresh-native-after-integration \
   --workdir "$WIKI_GRAPH_REPO"
 ```
 
-The command returns compact `semantic_artifacts`, `active_workspace_coverage`, and pending-state fields. Code 18 blocks cutover; code 19 requeues native refresh after an active-coverage failure. Inspect saved detail only for returned failure codes. Intentional embedding migrations additionally require `--allow-embedding-contract-change`.
+The command returns compact `semantic_artifacts`, `active_workspace_coverage`, `embedding_service`, and pending-state fields. When `LLM_WIKI_NATIVE_LOCAL_EMBEDDING_DOCKER_MANAGED=true`, it starts the configured Compose service, waits for its health endpoint, runs the complete refresh, and stops plus verifies the service in every success or failure path. Code 18 blocks cutover; code 19 requeues native refresh; codes 20/21 report managed embedding startup/configuration or shutdown failures. Inspect saved detail only for returned failure codes. Intentional embedding migrations additionally require `--allow-embedding-contract-change`.
+
+### Automatic native workspace retention
+
+Successful refreshes keep the current workspace and its immediate rollback predecessor, then remove older published workspaces. Shadow builds remain in place; this bounds normal retained versions without updating the live SQLite/zvec pair in place. The automatic integration path waits for health/query checks, semantic coverage, and managed embedding-service teardown before cleanup. Direct guarded cutover cleans after its own acceptance checks; prepare-only, skipped, or failed refreshes do not clean.
+
+Prepared workspaces and process-referenced workspaces are protected. Unpublished/failed staging directories are retained for inspection rather than deleted by age. Builds, pointer changes, and cleanup share a reentrant process lock. Cleanup validates canonical paths and history, rejects symlinks/mounts, and checks same-user fd/cwd/mmap references on Linux; inspection gaps or detected cross-user native processes produce a warning instead of deletion.
+
+Results include `workspace_cleanup` (`status`, `deleted`, `protected`, `retained_unpublished`, `reclaimed_bytes`, `warnings`). The last cleanup report is saved beside the workspace pointers as `workspace_cleanup.json`. Cleanup warnings do not turn an otherwise successful refresh into a failure; a later successful refresh retries eligible old workspaces. Pointer history remains intact for audit/policy accounting, but deleted historical versions are no longer rollback targets. No cron job or manual cleanup command is required for the normal success path.
 
 Mark native refresh as pending when upstream integration or reviewed changes require a graph refresh:
 

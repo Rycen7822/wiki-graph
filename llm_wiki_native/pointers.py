@@ -7,8 +7,25 @@ import json
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_native.workspace_lock import workspace_mutation_lock
+
 
 def finalize_prepared_workspace(
+    prepared_workspace_path: Path,
+    active_workspace_path: Path,
+    history_path: Path,
+    *,
+    reason: str,
+    finalized_at: str | None = None,
+) -> dict[str, Any]:
+    with workspace_mutation_lock(Path(active_workspace_path).parent):
+        return _finalize_prepared_workspace(
+            prepared_workspace_path, active_workspace_path, history_path,
+            reason=reason, finalized_at=finalized_at,
+        )
+
+
+def _finalize_prepared_workspace(
     prepared_workspace_path: Path,
     active_workspace_path: Path,
     history_path: Path,
@@ -37,6 +54,14 @@ def finalize_prepared_workspace(
 
 
 def rollback_active_workspace(
+    active_workspace_path: Path,
+    history_path: Path,
+) -> dict[str, Any]:
+    with workspace_mutation_lock(Path(active_workspace_path).parent):
+        return _rollback_active_workspace(active_workspace_path, history_path)
+
+
+def _rollback_active_workspace(
     active_workspace_path: Path,
     history_path: Path,
 ) -> dict[str, Any]:

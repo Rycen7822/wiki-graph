@@ -15,6 +15,7 @@ from llm_wiki_native.build import MissingNativeVectorsError  # noqa: E402
 from llm_wiki_native.storage.sqlite_workspace import SQLiteWorkspace  # noqa: E402
 from llm_wiki_native.workspace_build import apply_incremental_workspace_from_state, build_workspace_from_state  # noqa: E402
 from llm_wiki_native.pointers import finalize_prepared_workspace, rollback_active_workspace  # noqa: E402
+from llm_wiki_native.workspace_lock import workspace_mutation_lock
 
 
 class VectorFillFailedError(RuntimeError):
@@ -259,6 +260,11 @@ def _incremental_source_integrity(source_dir: Path, source_workspace_id: str) ->
 
 
 def build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
+    with workspace_mutation_lock(Path(args.workspace_root).parent):
+        return _build(args, embed_texts_func=embed_texts_func)
+
+
+def _build(args: Any, *, embed_texts_func: Any | None = None) -> dict[str, Any]:
     build_started = time.perf_counter()
     root = args.root.resolve()
     state_dir = args.state_dir.resolve()

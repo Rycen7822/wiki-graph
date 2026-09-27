@@ -15,6 +15,11 @@ from ops.wiki_native_wiki_integration_pending import DEFAULT_PENDING_WIKI_INTEGR
 from ops.wiki_native_wiki_integration_pending import load_pending_wiki_integration_ledger  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _disable_real_managed_embedding_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_WIKI_NATIVE_LOCAL_EMBEDDING_DOCKER_MANAGED", "false")
+
+
 def _fake_native_refresh(native_calls):
     def fake(root_arg, state_arg, *, workdir, reason, defer_native_refresh=False):
         native_calls.append((root_arg, state_arg, workdir, reason, len(batch_native_refresh.pending_entries(state_arg))))
@@ -186,6 +191,7 @@ def test_native_refresh_followthrough_marks_due_full_rebuild_for_next_pickup(tmp
             )
         )
         assert kwargs["force"] is True
+        assert kwargs["cleanup_workspaces"] is False
 
         def build_workspace(**build_kwargs):
             return {"ok": True, "workspace_id": build_kwargs["workspace_id"]}

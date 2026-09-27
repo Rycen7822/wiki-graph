@@ -11,6 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from llm_wiki_native.embedding_transport import (
+    EmbeddingTransportOptions,
+    build_embedding_payload,
+    embedding_vectors_from_payload,
+)
+
 EMBEDDING_PROFILES = {
     "conservative": {"EMBEDDING_FUNC_MAX_ASYNC": "1", "EMBEDDING_BATCH_NUM": "10", "MAX_PARALLEL_INSERT": "1"},
     "balanced-medium": {"EMBEDDING_FUNC_MAX_ASYNC": "2", "EMBEDDING_BATCH_NUM": "20", "MAX_PARALLEL_INSERT": "1"},
@@ -111,22 +117,25 @@ def embed_texts_openai_compatible(
     if not api_key:
         raise RuntimeError("EMBEDDING_BINDING_API_KEY or OPENAI_API_KEY is required to fill missing vectors")
     url = f"{host}/embeddings"
+    transport = EmbeddingTransportOptions.from_env(env)
     request = urllib.request.Request(
         url,
-        data=json.dumps({"model": embedding_model, "input": texts}, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps(
+            build_embedding_payload(
+                model=embedding_model,
+                inputs=texts,
+                expected_dim=embedding_dim,
+                options=transport,
+                input_type="passage",
+            ),
+            ensure_ascii=False,
+        ).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout or env_int("EMBEDDING_TIMEOUT", 120, env)) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    data = sorted(payload.get("data") or [], key=lambda row: row.get("index", 0))
-    vectors = [row.get("embedding") for row in data]
-    if len(vectors) != len(texts) or not all(isinstance(vector, list) for vector in vectors):
-        raise RuntimeError(f"embedding response count mismatch: expected {len(texts)}, got {len(vectors)}")
-    for index, vector in enumerate(vectors):
-        if len(vector) != embedding_dim:
-            raise RuntimeError(f"embedding response dimension mismatch at {index}: expected {embedding_dim}, got {len(vector)}")
-    return vectors  # type: ignore[return-value]
+    return embedding_vectors_from_payload(payload, expected_count=len(texts), expected_dim=embedding_dim)
 
 
 def _missing_manifest_records(manifest: dict[str, Any], vector_report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:

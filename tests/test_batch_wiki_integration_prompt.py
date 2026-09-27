@@ -53,9 +53,9 @@ def test_batch_wiki_integration_prompt_uses_repo_local_workdir_paths(tmp_path: P
     assert "--sync-raw-map-snapshot" in prompt
     assert "python -m ops.batch_wiki_integration clear-success" in prompt
     assert "python -m ops.batch_native_refresh status" in prompt
-    assert "python -m ops.batch_native_refresh preflight-cutover" in prompt
-    assert "python -m ops.batch_native_refresh refresh" in prompt
-    assert "--fill-missing-vectors" in prompt
+    assert "python -m ops.batch_wiki_integration refresh-native-after-integration" in prompt
+    assert "Do not call `batch_native_refresh preflight-cutover` or `batch_native_refresh refresh` directly." in prompt
+    assert "embedding_service.stopped=true" in prompt
     assert "Use bounded reads/searches for `_meta/raw-clip-map.md` and `_meta/topic-map.md`; keep large map files out of context." in prompt
 
 

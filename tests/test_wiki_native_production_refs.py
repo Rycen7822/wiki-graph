@@ -27,6 +27,7 @@ def test_active_production_surfaces_restrict_retired_compat_registry_refs(active
         "ops/custom_kg_incremental.py",
         "ops/vector_cache.py",
         "ops/native_zvec_materialize.py",
+        "ops/native_workspace_retention.py",
         "ops/raw_fast_evidence_bundle.py",
         "llm_wiki_native/api/server.py",
     } <= set(report["checked_paths"])
@@ -51,6 +52,7 @@ def test_audit_native_production_refs_imports_active_modules_with_retired_packag
         "ops.custom_kg_incremental",
         "ops.custom_kg_vector_fill",
         "ops.native_zvec_materialize",
+        "ops.native_workspace_retention",
         "ops.raw_fast_closeout",
         "ops.raw_fast_evidence_bundle",
         "ops.vector_cache",

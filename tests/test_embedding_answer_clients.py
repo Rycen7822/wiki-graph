@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 import json
+import struct
 import urllib.request
 
 import pytest
 
 from llm_wiki_native.answer import NativeAnswerConfig, NativeAnswerGenerator
 from llm_wiki_native.embedding import NativeEmbedding, NativeEmbeddingConfig
+from llm_wiki_native.embedding_transport import EmbeddingTransportOptions
 
 
 def _embed_cfg(**over) -> NativeEmbeddingConfig:
@@ -54,6 +57,34 @@ def test_native_embedding_posts_openai_compatible_request(monkeypatch) -> None:
     assert body == {"model": "embed-small", "input": "alpha"}
 
 
+def test_native_embedding_posts_local_asymmetric_base64_request(monkeypatch) -> None:
+    calls = []
+    encoded = base64.b64encode(struct.pack("<2f", 0.25, 0.75)).decode("ascii")
+    _install_urlopen(monkeypatch, {"data": [{"index": 0, "embedding": encoded}]}, calls)
+    provider = NativeEmbedding(
+        _embed_cfg(
+            embedding_dim=2,
+            transport=EmbeddingTransportOptions(
+                send_dimensions=True,
+                use_base64=True,
+                token_limit=4096,
+                truncation_side="right",
+                asymmetric=True,
+            ),
+        )
+    )
+
+    assert provider.embed_query("alpha") == [0.25, 0.75]
+    assert json.loads(calls[0]["request"].data.decode("utf-8")) == {
+        "model": "embed-small",
+        "input": "query: alpha",
+        "dimensions": 2,
+        "encoding_format": "base64",
+        "truncate_prompt_tokens": 4096,
+        "truncation_side": "right",
+    }
+
+
 def test_native_embedding_cache_modes(monkeypatch) -> None:
     for cache_size, mutate_first, expected_calls in [(4, True, 1), (0, False, 2)]:
         calls = []
@@ -95,6 +126,11 @@ def test_native_embedding_config_from_env_aliases_and_native_precedence() -> Non
             "EMBEDDING_TIMEOUT": "77",
             "EMBEDDING_DIM": "1024",
             "EMBEDDING_CACHE_SIZE": "17",
+            "EMBEDDING_SEND_DIM": "true",
+            "EMBEDDING_USE_BASE64": "true",
+            "EMBEDDING_TOKEN_LIMIT": "4096",
+            "EMBEDDING_TRUNCATION_SIDE": "right",
+            "EMBEDDING_ASYMMETRIC": "true",
         }
     )
     assert compatible.base_url == "https://embedding.local/v1"
@@ -103,6 +139,13 @@ def test_native_embedding_config_from_env_aliases_and_native_precedence() -> Non
     assert compatible.timeout_seconds == 77.0
     assert compatible.embedding_dim == 1024
     assert compatible.cache_size == 17
+    assert compatible.transport == EmbeddingTransportOptions(
+        send_dimensions=True,
+        use_base64=True,
+        token_limit=4096,
+        truncation_side="right",
+        asymmetric=True,
+    )
     assert "secret" not in repr(compatible)
 
     native = NativeEmbeddingConfig.from_env(

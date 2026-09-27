@@ -19,6 +19,12 @@ from urllib.parse import urlparse, urlunparse
 
 from ops import batch_native_refresh, native_semantic_artifact_refresh
 from ops.custom_kg_vector_fill import EMBEDDING_PROFILES
+from ops.native_workspace_retention import cleanup_obsolete_workspaces
+from ops.local_embedding_service import (
+    ManagedLocalEmbeddingServiceError,
+    managed_local_embedding_service,
+    managed_local_embedding_service_config,
+)
 from ops.wiki_native_cli import DEFAULT_STATE_DIR, DEFAULT_WIKI_ROOT, print_json
 from ops.wiki_native_wiki_integration_bridge import clear_pending_wiki_integration_after_success
 from ops.wiki_native_wiki_integration_pending import (
@@ -100,11 +106,11 @@ Execution contract:
 4. Read native status:
    `{native_refresh_command} status --root {root} --state-dir {state_dir} --workdir {native_workdir}`
    Use `next_refresh_kind`; after 5 completed incremental graph updates the policy queues `full-rebuild`.
-5. Validate cutover guards before the build attempt:
-   `{native_refresh_command} preflight-cutover --root {root} --state-dir {state_dir} --workdir {native_workdir} --restart-command "$LLM_WIKI_NATIVE_RESTART_COMMAND" --smoke-url "$LLM_WIKI_NATIVE_SMOKE_URL" --smoke-query "$LLM_WIKI_NATIVE_SMOKE_QUERY" --require-unchanged-path "$LLM_WIKI_NATIVE_UNCHANGED_PATH"`
-6. When guards are available, execute guarded cutover with vector cache:
-   `{native_refresh_command} refresh --root {root} --state-dir {state_dir} --workdir {native_workdir} --cutover --fill-missing-vectors --restart-command "$LLM_WIKI_NATIVE_RESTART_COMMAND" --health-url "$LLM_WIKI_NATIVE_HEALTH_URL" --smoke-url "$LLM_WIKI_NATIVE_SMOKE_URL" --smoke-query "$LLM_WIKI_NATIVE_SMOKE_QUERY" --smoke-query-vector-source active-first-vector --require-unchanged-path "$LLM_WIKI_NATIVE_UNCHANGED_PATH"`
-   Live graph freshness is complete after cutover, service restart, `/health`, `/query/data`, unchanged-path audit, and native pending clear succeed; prepare-only output is a prepared artifact, not live graph freshness.
+5. Run the single native follow-through owner:
+   `{wiki_integration_command} refresh-native-after-integration --root {root} --state-dir {state_dir} --workdir {native_workdir} --reason {reason}`
+   This command owns the semantic gate, vector-cache-backed build, cutover guards, service restart, and the configured local embedding Docker start/health/stop lifecycle. Do not call `batch_native_refresh preflight-cutover` or `batch_native_refresh refresh` directly.
+6. Require exit code 0, `status_after.should_refresh=false` (except a returned policy-only next-cycle full rebuild), `active_workspace_coverage.ok=true`, and—when managed—`embedding_service.stopped=true`.
+   Live graph freshness is complete only after cutover, service restart, `/health`, `/query/data`, unchanged-path audit, native pending clear, and managed embedding shutdown succeed.
 
 Closeout:
 - Redact secrets as `[REDACTED]` in logs.
@@ -327,7 +333,7 @@ def _only_policy_due_pending(status: dict[str, Any]) -> bool:
     )
 
 
-def run_native_refresh_after_wiki_integration(
+def _run_native_refresh_after_wiki_integration(
     root: Path,
     state_dir: Path,
     *,
@@ -380,6 +386,7 @@ def run_native_refresh_after_wiki_integration(
         )
 
     runs: list[dict[str, Any]] = []
+    workspace_root = batch_native_refresh.default_workspace_root(state_dir)
     for pass_index in range(max_passes):
         current_status = batch_native_refresh.status(root, state_dir)
         if not current_status.get("should_refresh"):
@@ -431,6 +438,7 @@ def run_native_refresh_after_wiki_integration(
                 fill_missing_vectors=True,
                 force=True,
                 required_unchanged_paths=required_unchanged_paths,
+                cleanup_workspaces=False,  # Coverage and embedding teardown still must pass.
             )
         except Exception as exc:
             return 16, _native_refresh_failure(
@@ -498,7 +506,95 @@ def run_native_refresh_after_wiki_integration(
         "status_after": final_status,
         "semantic_artifacts": semantic_artifacts,
         "active_workspace_coverage": active_workspace_coverage,
+        "workspace_root": str(workspace_root),
     }
+
+
+def run_native_refresh_after_wiki_integration(
+    root: Path,
+    state_dir: Path,
+    *,
+    workdir: Path | None = None,
+    reason: str,
+    max_passes: int = 2,
+    allow_embedding_contract_change: bool = False,
+    defer_native_refresh: bool = False,
+    embedding_profile: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Run native follow-through with an opt-in, fail-closed embedding service lifecycle."""
+
+    native_workdir = (workdir or DEFAULT_NATIVE_WORKDIR).resolve()
+    resolved_embedding_profile = _resolve_native_embedding_profile(embedding_profile)
+    status_before = batch_native_refresh.status(root, state_dir)
+    inner_kwargs = {
+        "workdir": native_workdir,
+        "reason": reason,
+        "max_passes": max_passes,
+        "allow_embedding_contract_change": allow_embedding_contract_change,
+        "defer_native_refresh": defer_native_refresh,
+        "embedding_profile": resolved_embedding_profile,
+    }
+    if not status_before.get("should_refresh") or defer_native_refresh:
+        code, payload = _run_native_refresh_after_wiki_integration(root, state_dir, **inner_kwargs)
+        payload["embedding_service"] = {
+            "managed": False,
+            "skip_reason": payload.get("skip_reason") or "native_refresh_not_required",
+        }
+        return code, payload
+
+    try:
+        service_config = managed_local_embedding_service_config(
+            _native_refresh_config(native_workdir),
+            workdir=native_workdir,
+        )
+    except ValueError as exc:
+        payload = _native_refresh_failure(
+            reason="local-embedding-service-config-failed",
+            message=str(exc),
+            status_before=status_before,
+            status_after=batch_native_refresh.status(root, state_dir),
+            runs=[],
+            exception_type=type(exc).__name__,
+        )
+        payload["embedding_service"] = {
+            "managed": True,
+            "phase": "config",
+            "started": False,
+            "stop_requested": False,
+            "stopped": False,
+        }
+        return 20, payload
+
+    inner_code: int | None = None
+    inner_payload: dict[str, Any] | None = None
+    try:
+        with managed_local_embedding_service(service_config) as service_report:
+            inner_code, inner_payload = _run_native_refresh_after_wiki_integration(root, state_dir, **inner_kwargs)
+            inner_payload["embedding_service"] = service_report
+        # Do not prune before semantic coverage OR managed-service teardown succeeds.
+        if inner_code == 0 and inner_payload.get("runs"):
+            active = inner_payload["runs"][-1].get("active") or {}
+            inner_payload["workspace_cleanup"] = cleanup_obsolete_workspaces(
+                workspace_root=Path(inner_payload["workspace_root"]),
+                expected_active_id=str(active.get("workspace_id") or ""),
+            )
+        return inner_code, inner_payload
+    except ManagedLocalEmbeddingServiceError as exc:
+        failure_reason = f"local-embedding-service-{exc.phase}-failed"
+        payload = _native_refresh_failure(
+            reason=failure_reason,
+            message=str(exc),
+            status_before=status_before,
+            status_after=batch_native_refresh.status(root, state_dir),
+            runs=list((inner_payload or {}).get("runs") or []),
+            semantic_artifacts=(inner_payload or {}).get("semantic_artifacts"),
+            active_workspace_coverage=(inner_payload or {}).get("active_workspace_coverage"),
+            exception_type=type(exc).__name__,
+        )
+        payload["embedding_service"] = exc.report
+        if inner_payload and inner_payload.get("failure"):
+            payload["refresh_failure_before_service_cleanup"] = inner_payload["failure"]
+        return (21 if exc.phase in {"stop", "stop-verification"} else 20), payload
 
 
 def run_integrate_local(
@@ -791,7 +887,7 @@ def main(argv: list[str] | None = None) -> int:
 
     native_retry_parser = sub.add_parser(
         "refresh-native-after-integration",
-        help="Rebuild semantic artifacts and retry guarded native refresh after wiki integration",
+        help="Rebuild semantic artifacts with the managed local embedding service, then stop it after guarded native refresh",
     )
     add_common_paths(native_retry_parser)
     native_retry_parser.add_argument("--workdir", type=Path, default=DEFAULT_NATIVE_WORKDIR)

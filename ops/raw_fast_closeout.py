@@ -135,7 +135,11 @@ def run_json(command: list[str], *, cwd: Path | None = None, timeout: int = 7200
             "command": command,
         }
     except subprocess.TimeoutExpired as exc:
-        return {"returncode": 124, "json": None, "stdout_tail": (exc.stdout or "")[-4000:], "stderr_tail": (exc.stderr or "")[-4000:], "command": command, "error": "TimeoutExpired", "message": f"command exceeded {timeout}s"}
+        def _tail(value: str | bytes | bytearray | None) -> str:
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value).decode("utf-8", errors="replace")[-4000:]
+            return (value or "")[-4000:]
+        return {"returncode": 124, "json": None, "stdout_tail": _tail(exc.stdout), "stderr_tail": _tail(exc.stderr), "command": command, "error": "TimeoutExpired", "message": f"command exceeded {timeout}s"}
     except Exception as exc:  # pragma: no cover - subprocess environment failure
         return {"returncode": 1, "json": None, "stdout_tail": "", "stderr_tail": "", "command": command, "error": type(exc).__name__, "message": str(exc)}
 

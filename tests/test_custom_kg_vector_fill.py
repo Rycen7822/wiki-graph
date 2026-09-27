@@ -1,3 +1,6 @@
+import base64
+import json
+import struct
 import threading
 import time
 from pathlib import Path
@@ -7,6 +10,7 @@ import pytest
 from ops import build_section_similarity_graph  # noqa: E402
 from ops import custom_kg_vector_fill  # noqa: E402
 from ops.vector_cache import VectorCache, resolve_manifest_vectors  # noqa: E402
+from llm_wiki_native.embedding_transport import EmbeddingTransportOptions
 from support import clear_embedding_env  # noqa: E402
 
 
@@ -212,6 +216,54 @@ def test_build_embedding_rows_parallelizes_with_max_async(tmp_path: Path, monkey
     assert tracker.max_in_flight <= 4
     assert [row["section_id"] for row in rows] == sorted(f"sec:{index:03d}" for index in range(12))
     assert len(tracker.calls) == 4
+
+
+def test_section_embedding_provider_uses_local_passage_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    encoded = base64.b64encode(struct.pack("<2f", 0.1, 0.2)).decode("ascii")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"index": 0, "embedding": encoded}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append({"request": request, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(build_section_similarity_graph.urllib.request, "urlopen", fake_urlopen)
+    vectors = build_section_similarity_graph.openai_compatible_embed(
+        ["Section content"],
+        {
+            "host": "https://embedding.local/v1",
+            "api_key": "secret",
+            "model": "embed-local",
+            "embedding_dim": 2,
+            "timeout": 17,
+            "transport": EmbeddingTransportOptions(
+                send_dimensions=True,
+                use_base64=True,
+                token_limit=4096,
+                asymmetric=True,
+            ),
+        },
+    )
+
+    assert vectors[0] == pytest.approx([0.1, 0.2])
+    assert calls[0]["timeout"] == 17
+    assert json.loads(calls[0]["request"].data.decode("utf-8")) == {
+        "model": "embed-local",
+        "input": ["passage: Section content"],
+        "dimensions": 2,
+        "encoding_format": "base64",
+        "truncate_prompt_tokens": 4096,
+        "truncation_side": "right",
+    }
 
 
 def test_build_embedding_rows_default_serial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

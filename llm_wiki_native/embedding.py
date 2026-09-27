@@ -5,11 +5,16 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import json
-import math
 import os
 from threading import Lock
 from typing import Mapping, Protocol
 import urllib.request
+
+from llm_wiki_native.embedding_transport import (
+    EmbeddingTransportOptions,
+    build_embedding_payload,
+    embedding_vectors_from_payload,
+)
 
 
 class EmbeddingProvider(Protocol):
@@ -25,6 +30,7 @@ class NativeEmbeddingConfig:
     timeout_seconds: float = 60.0
     embedding_dim: int | None = None
     cache_size: int = 512
+    transport: EmbeddingTransportOptions = field(default_factory=EmbeddingTransportOptions)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "NativeEmbeddingConfig":
@@ -62,6 +68,7 @@ class NativeEmbeddingConfig:
             timeout_seconds=timeout,
             embedding_dim=embedding_dim,
             cache_size=cache_size,
+            transport=EmbeddingTransportOptions.from_env(values),
         )
 
 
@@ -82,7 +89,15 @@ class NativeEmbedding:
     def _fetch_embedding(self, query: str) -> list[float]:
         request = urllib.request.Request(
             f"{self.config.base_url.rstrip('/')}/embeddings",
-            data=json.dumps({"model": self.config.model, "input": query}).encode("utf-8"),
+            data=json.dumps(
+                build_embedding_payload(
+                    model=self.config.model,
+                    inputs=query,
+                    expected_dim=self.config.embedding_dim,
+                    options=self.config.transport,
+                    input_type="query",
+                )
+            ).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
@@ -138,25 +153,4 @@ def _first_env_int(values: Mapping[str, str], names: tuple[str, ...]) -> int | N
 
 
 def _embedding_from_payload(payload: object, *, expected_dim: int | None = None) -> list[float]:
-    if not isinstance(payload, dict):
-        raise ValueError("embedding response must be a JSON object")
-    data = payload.get("data")
-    if not isinstance(data, list) or not data:
-        raise ValueError("embedding response must include data[0].embedding")
-    first = data[0]
-    if not isinstance(first, dict):
-        raise ValueError("embedding response must include data[0].embedding")
-    embedding = first.get("embedding")
-    if not isinstance(embedding, list) or not embedding:
-        raise ValueError("embedding response must include a non-empty embedding list")
-    vector: list[float] = []
-    for value in embedding:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("embedding response must contain finite numbers")
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError("embedding response must contain finite numbers")
-        vector.append(number)
-    if expected_dim is not None and len(vector) != expected_dim:
-        raise ValueError(f"embedding response dimension mismatch: expected {expected_dim}, got {len(vector)}")
-    return vector
+    return embedding_vectors_from_payload(payload, expected_count=1, expected_dim=expected_dim)[0]

@@ -1,5 +1,7 @@
 import argparse
+import base64
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -178,6 +180,60 @@ def test_openai_compatible_vector_fill_provider_loads_workdir_env(tmp_path, monk
     assert calls[0]["request"].full_url == "https://embedding.local/v1/embeddings"
     assert calls[0]["request"].headers["Authorization"] == "Bearer secret"
     assert json.loads(calls[0]["request"].data.decode("utf-8")) == {"model": "BAAI/bge-m3", "input": ["Doc A content"]}
+
+
+def test_openai_compatible_vector_fill_uses_local_passage_transport(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_embed_env(
+        tmp_path,
+        "EMBEDDING_SEND_DIM=true",
+        "EMBEDDING_USE_BASE64=true",
+        "EMBEDDING_TOKEN_LIMIT=4096",
+        "EMBEDDING_TRUNCATION_SIDE=right",
+        "EMBEDDING_ASYMMETRIC=true",
+    )
+    clear_embedding_env(
+        monkeypatch,
+        "EMBEDDING_BINDING_HOST",
+        "EMBEDDING_BINDING_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "EMBEDDING_SEND_DIM",
+        "EMBEDDING_USE_BASE64",
+        "EMBEDDING_TOKEN_LIMIT",
+        "EMBEDDING_TRUNCATION_SIDE",
+        "EMBEDDING_ASYMMETRIC",
+    )
+    calls = []
+    encoded = base64.b64encode(struct.pack("<2f", 0.1, 0.2)).decode("ascii")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"index": 0, "embedding": encoded}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append({"request": request, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(custom_kg_vector_fill.urllib.request, "urlopen", fake_urlopen)
+
+    vectors = custom_kg_vector_fill.embed_texts_openai_compatible(
+        ["Doc A content"], workdir=tmp_path, embedding_model="embed-local", embedding_dim=2
+    )
+    assert vectors[0] == pytest.approx([0.1, 0.2])
+    assert json.loads(calls[0]["request"].data.decode("utf-8")) == {
+        "model": "embed-local",
+        "input": ["passage: Doc A content"],
+        "dimensions": 2,
+        "encoding_format": "base64",
+        "truncate_prompt_tokens": 4096,
+        "truncation_side": "right",
+    }
 
 
 def test_fill_missing_manifest_vectors_reports_redacted_embedding_env(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

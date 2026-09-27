@@ -23,7 +23,7 @@ def test_refresh_cutover_cli_uses_explicit_restart_command_hook(tmp_path, capsys
     def fake_build_prepared_workspace(**kwargs):
         calls.append(("build", kwargs["workspace_id"]))
         prepared_path = kwargs["workspace_root"].parent / "prepared_workspace.json"
-        prepared_path.parent.mkdir(parents=True)
+        prepared_path.parent.mkdir(parents=True, exist_ok=True)
         prepared_path.write_text(
             json.dumps({"schema_version": 1, "workspace_id": kwargs["workspace_id"], "status": "prepared"}),
             encoding="utf-8",
