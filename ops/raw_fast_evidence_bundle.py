@@ -372,7 +372,54 @@ def fetch_openreview_pdf_to_file(note_id: str, dest: Path, timeout: int, max_byt
         return {"ok": False, "url": canonical_openreview_pdf_url(note_id), "dest": str(dest), "error": type(exc).__name__, "message": _redact_known_values(str(exc), credentials), "openreview": {"id": note_id, "auth_used": bool(credentials)}}
 
 
+def fetch_alphaxiv_pdf_to_file(identifier: str, dest: Path, timeout: int, max_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+    """Resolve native origin/version first; only download a validated PDF asset."""
+    metadata_url = "https://api.alphaxiv.org/papers/v3/" + urllib.parse.quote(identifier, safe="")
+    fetched = fetch_text(metadata_url, timeout)
+    base = {"ok": False, "url": metadata_url, "dest": str(dest)}
+    if not fetched.get("ok"):
+        return {**base, "error": "AlphaXivMetadataUnavailable", "metadata_fetch": fetched}
+    try:
+        metadata = json.loads(fetched.get("text") or "")
+    except (ValueError, TypeError):
+        return {**base, "error": "AlphaXivMetadataInvalid", "message": "Expected alphaXiv paper metadata JSON, not a webpage."}
+    if not isinstance(metadata, dict) or metadata.get("sourceName") != "alphaXiv" or metadata.get("type") != "public":
+        return {**base, "error": "AlphaXivNotNative", "message": "The resolved record is not a public alphaXiv-native paper."}
+    universal_id = metadata.get("universalId")
+    order = metadata.get("versionOrder")
+    title = metadata.get("title")
+    if not isinstance(universal_id, str) or not ALPHAXIV_NATIVE_ID_RE.fullmatch(universal_id) or type(order) is not int or order < 1 or not isinstance(title, str) or not title.strip():
+        return {**base, "error": "AlphaXivMetadataInvalid", "message": "Native paper ID, version order, or title is missing/invalid."}
+    versioned_id = f"{universal_id}v{order}"
+    if identifier not in {universal_id, versioned_id}:
+        return {**base, "error": "AlphaXivIdentityMismatch", "message": "Resolved paper ID/version does not match the supplied identifier."}
+    pdf_url = "https://pdfs.assets.alphaxiv.org/" + urllib.parse.quote(versioned_id, safe="") + ".pdf"
+    alphaxiv = {
+        "id": universal_id,
+        "requested_id": identifier,
+        "source_name": metadata["sourceName"],
+        "version_order": order,
+        "version_id": metadata.get("versionId"),
+        "title": title.strip(),
+        "abs_url": canonical_alphaxiv_abs_url(identifier),
+        "pdf_url": pdf_url,
+        "metadata_url": metadata_url,
+    }
+    result = fetch_url_to_file(pdf_url, dest, timeout, max_bytes=max_bytes)
+    result["alphaxiv"] = alphaxiv
+    if result.get("ok"):
+        with dest.open("rb") as stream:
+            is_pdf = stream.read(5) == b"%PDF-"
+        if not is_pdf:
+            dest.unlink(missing_ok=True)
+            result.update(ok=False, error="InvalidPDF", message="alphaXiv asset is not a PDF; HTML/Markdown must not enter PDF extraction.")
+    return result
+
+
 def fetch_pdf_source_to_file(url: str, dest: Path, timeout: int, max_bytes: int | None = DEFAULT_MAX_DOWNLOAD_BYTES) -> dict[str, Any]:
+    alphaxiv_id = alphaxiv_native_id_from_url(url)
+    if alphaxiv_id:
+        return fetch_alphaxiv_pdf_to_file(alphaxiv_id, dest, timeout, max_bytes=max_bytes)
     note_id = openreview_id_from_url(url)
     if note_id:
         return fetch_openreview_pdf_to_file(note_id, dest, timeout, max_bytes=max_bytes)
@@ -419,6 +466,8 @@ def fetch_text(url: str, timeout: float, max_bytes: int = DEFAULT_MAX_TEXT_BYTES
 ARXIV_ID_IN_PATH_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
 ARXIV_TRAILING_ID_RE = re.compile(r"(?:^|-)(\d{4}\.\d{4,5})(?:v\d+)?$")
 ARXIV_DIRECT_HOSTS = {"arxiv.org", "export.arxiv.org"}
+ALPHAXIV_PAPER_ROUTES = {"abs", "pdf", "paper", "papers", "overview"}
+ALPHAXIV_NATIVE_ID_RE = re.compile(r"\d{2}(?:0[1-9]|1[0-2])\.[a-z][a-z0-9-]*")
 DAIR_PAPER_HOSTS = {"academy.dair.ai"}
 MODELSCOPE_HOST = "modelscope.ai"
 OPENREVIEW_HOST = "openreview.net"
@@ -457,6 +506,34 @@ def _trailing_arxiv_id(segment: str) -> str | None:
     return match.group(1) if match else None
 
 
+def alphaxiv_paper_id_from_url(url: str) -> str | None:
+    """Return a complete paper identifier, never a numeric substring of a slug."""
+    host = _url_host(url)
+    parts = _path_parts(url)
+    if host == "alphaxiv.org" and len(parts) == 2 and parts[0] in ALPHAXIV_PAPER_ROUTES:
+        identifier = parts[1]
+    elif host == "pdfs.assets.alphaxiv.org" and len(parts) == 1 and parts[0].endswith(".pdf"):
+        identifier = parts[0]
+    else:
+        return None
+    for suffix in (".pdf", ".md"):
+        if identifier.endswith(suffix):
+            identifier = identifier.removesuffix(suffix)
+            break
+    if ARXIV_ID_IN_PATH_RE.fullmatch(identifier) or ALPHAXIV_NATIVE_ID_RE.fullmatch(identifier):
+        return identifier
+    return None
+
+
+def alphaxiv_native_id_from_url(url: str) -> str | None:
+    identifier = alphaxiv_paper_id_from_url(url)
+    return identifier if identifier and ALPHAXIV_NATIVE_ID_RE.fullmatch(identifier) else None
+
+
+def canonical_alphaxiv_abs_url(identifier: str) -> str:
+    return "https://www.alphaxiv.org/abs/" + urllib.parse.quote(identifier, safe="")
+
+
 def arxiv_id_from_url(url: str) -> str | None:
     host = _url_host(url)
     parts = _path_parts(url)
@@ -476,10 +553,10 @@ def arxiv_id_from_url(url: str) -> str | None:
         if parts[:1] == ["papers"]:
             return _first_arxiv_id(parts[1:])
         return None
-    if host == "alphaxiv.org":
-        if parts and parts[0] in {"abs", "paper", "papers", "overview"}:
-            return _last_arxiv_id(parts[1:])
-        return None
+    if host in {"alphaxiv.org", "pdfs.assets.alphaxiv.org"}:
+        identifier = alphaxiv_paper_id_from_url(url)
+        match = ARXIV_ID_IN_PATH_RE.fullmatch(identifier or "")
+        return match.group(1) if match else None
     if host in DAIR_PAPER_HOSTS:
         # DAIR academy paper pages are `/papers/<title-slug>-<arxiv-id>`; the
         # collection/week/hero pages share the `/papers/` prefix but expose no
@@ -518,6 +595,16 @@ def canonical_openreview_forum_url(note_id: str) -> str:
 
 
 def detect_kind(url: str, requested: str) -> str:
+    if _url_host(url) in {"alphaxiv.org", "pdfs.assets.alphaxiv.org"}:
+        identifier = alphaxiv_paper_id_from_url(url)
+        if not identifier:
+            raise ValueError("alphaXiv URL must contain one complete arXiv ID or native paper slug.")
+        detected = "alphaxiv-native" if alphaxiv_native_id_from_url(url) else "arxiv"
+        if requested not in {"auto", detected}:
+            raise ValueError(f"alphaXiv source kind mismatch: expected {detected}, received {requested}.")
+        return detected
+    if requested == "alphaxiv-native":
+        raise ValueError("alphaxiv-native requires an alphaXiv-native paper URL.")
     if requested != "auto":
         return requested
     if arxiv_id_from_url(url):
@@ -2788,6 +2875,8 @@ def build_agent_brief(bundle: dict[str, Any], *, preflight: dict[str, Any] | Non
         "scientific_digest": files.get("paper_digest_markdown") or "paper_digest.md",
         "body_draft": RAW_BODY_DRAFT_FILE,
     }
+    if files.get("alphaxiv_metadata"):
+        source_refs["alphaxiv_metadata"] = files["alphaxiv_metadata"]
     if files.get("tex_read_plan"):
         source_refs["tex_read_plan"] = files.get("tex_read_plan")
     if files.get("source_read_plan"):
@@ -3016,6 +3105,7 @@ def build_agent_handoff(bundle: dict[str, Any], *, brief: dict[str, Any], eviden
         "ok": True,
         "status": "ready" if not resource_review_required else "manual_required",
         "protected_anchors": brief.get("protected_anchors") or {},
+        "alphaxiv": bundle.get("alphaxiv"),
         "duplicate_summary": brief.get("duplicate_summary") or {},
         "queue_status": brief.get("queue_status") or {},
         "evidence_cards": brief.get("evidence_cards") or [],
@@ -3045,10 +3135,15 @@ def render_agent_handoff_markdown(handoff: dict[str, Any]) -> str:
         "",
         f"- status: {handoff.get('status')}",
         f"- title: {safe_title}",
+        f"- source kind: {anchors.get('kind')}",
         f"- next_raw_path: `{anchors.get('next_raw_path')}`",
         f"- resource_review_required: {handoff.get('resource_review_required')}",
         "- resource metadata: script-managed; not agent-facing",
     ]
+    alphaxiv = handoff.get("alphaxiv")
+    if isinstance(alphaxiv, dict):
+        lines.append(f"- alphaXiv native PDF version: v{alphaxiv.get('version_order')}")
+        lines.append("- source availability: alphaXiv-native PDF; no arXiv e-print/TeX source was fetched; site .md is extracted text, not original TeX.")
     dup = handoff.get("duplicate_summary") or {}
     raw_policy = handoff.get("manual_reference_policy")
     policy = raw_policy if isinstance(raw_policy, dict) else manual_reference_policy(visible=bool(handoff.get("manual_reference_paths")))
@@ -3428,13 +3523,18 @@ def process_pdf(
     files: dict[str, str] = {}
     supplied_url = url
     openreview_id = openreview_id_from_url(url)
-    canonical_source_url = canonical_openreview_pdf_url(openreview_id) if openreview_id else url
+    alphaxiv_id = alphaxiv_native_id_from_url(url)
+    canonical_source_url = canonical_alphaxiv_abs_url(alphaxiv_id) if alphaxiv_id else canonical_openreview_pdf_url(openreview_id) if openreview_id else url
     if supplied_page_resources:
         write_json(workdir / "supplied_page_resources.json", supplied_page_resources)
         files["supplied_page_resources"] = "supplied_page_resources.json"
     pdf_path = workdir / "paper.pdf"
     fetch = timings.record("fetch_pdf", fetch_pdf_source_to_file, canonical_source_url, pdf_path, timeout, max_bytes=max_download_bytes)
     files["pdf"] = "paper.pdf"
+    alphaxiv_metadata = fetch.get("alphaxiv") if isinstance(fetch.get("alphaxiv"), dict) else None
+    if alphaxiv_metadata:
+        write_json(workdir / "alphaxiv_metadata.json", alphaxiv_metadata)
+        files["alphaxiv_metadata"] = "alphaxiv_metadata.json"
     openreview_metadata = fetch.get("openreview") if isinstance(fetch.get("openreview"), dict) else None
     if openreview_metadata:
         write_json(workdir / "openreview_metadata.json", openreview_metadata)
@@ -3445,6 +3545,8 @@ def process_pdf(
             payload["supplied_url"] = supplied_url
         if openreview_metadata:
             payload["openreview"] = openreview_metadata
+        if alphaxiv_metadata:
+            payload["alphaxiv"] = alphaxiv_metadata
         attach_timings(payload, timings)
         write_json(workdir / "evidence_bundle.json", payload)
         return payload
@@ -3475,7 +3577,7 @@ def process_pdf(
         ctext = read_text(workdir / "docling.md")
         if ctext.strip():
             text += "\n" + ctext
-    metadata_title = (openreview_metadata or {}).get("title") if isinstance(openreview_metadata, dict) else None
+    metadata_title = (alphaxiv_metadata or openreview_metadata or {}).get("title")
     title = str(metadata_title) if metadata_title and not placeholder_title(str(metadata_title)) else pdf_title_from_text_or_url(text, canonical_source_url)
     inventory = timings.record("inventory", lambda: {"ok": True, "sections": section_inventory(text), "figures": figure_table_inventory(text)})
     sections = inventory["sections"]
@@ -3547,6 +3649,8 @@ def process_pdf(
         payload["supplied_url"] = supplied_url
     if openreview_metadata:
         payload["openreview"] = openreview_metadata
+    if alphaxiv_metadata:
+        payload["alphaxiv"] = alphaxiv_metadata
     payload["agent_automation"] = timings.record(
         "agent_automation_sidecars",
         write_agent_automation_sidecars,
@@ -3782,7 +3886,7 @@ def process_arxiv(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an llm-wiki raw-fast evidence bundle without writing the wiki")
     parser.add_argument("--url", required=True)
-    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview"], default="auto")
+    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview", "alphaxiv-native"], default="auto", help="auto separates alphaXiv-hosted arXiv IDs from native paper slugs")
     parser.add_argument("--root", type=Path, default=DEFAULT_WIKI_ROOT)
     parser.add_argument("--workdir", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=None, help="Optional native state dir to read pending queue counts for preflight; never mutated by this command")
@@ -3826,13 +3930,17 @@ def main() -> int:
         return 1
     workdir.mkdir(parents=True, exist_ok=True)
     probes = args.probe if args.probe is not None else ["arxiv", "doi"]
-    kind = detect_kind(args.url, args.kind)
+    try:
+        kind = detect_kind(args.url, args.kind)
+    except ValueError as exc:
+        print_json({"ok": False, "stage": "preflight", "error": "SourceKindMismatch", "message": str(exc), "source_url": args.url})
+        return 1
     if kind == "arxiv":
         payload = process_arxiv(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     elif kind == "openreview":
         payload = process_openreview(args.url, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     else:
-        payload = process_pdf(args.url, "direct-pdf", root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
+        payload = process_pdf(args.url, kind, root, workdir, args.pdf_backend, args.strict_pdf_backend, probes, args.timeout, timings, paper_digest=args.paper_digest, resource_draft=args.resource_draft, localize_figures=args.localize_figures, image_slug=args.image_slug, state_dir=state_dir, resource_health=args.resource_health, max_download_bytes=max_download_bytes)
     attach_timings(payload, timings)
     write_json(workdir / "evidence_bundle.json", payload)
     print_json(payload)

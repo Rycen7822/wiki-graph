@@ -26,7 +26,9 @@ from ops.raw_fast_evidence_bundle import (
     RAW_BODY_DRAFT_FILE,
     RAW_FAST_QUALITY_GATE,
     WRITING_CONTRACT_REFS,
+    alphaxiv_native_id_from_url,
     arxiv_id_from_url,
+    canonical_alphaxiv_abs_url,
     canonical_openreview_pdf_url,
     detect_kind,
     has_tex_filtered_source_refs,
@@ -73,7 +75,7 @@ def default_slug(url: str, kind: str) -> str:
     parsed = urllib.parse.urlparse(url)
     openreview_id = openreview_id_from_url(url)
     arxiv_id = arxiv_id_from_url(url)
-    stem = arxiv_id or openreview_id or Path(parsed.path).stem or kind or "source"
+    stem = arxiv_id or alphaxiv_native_id_from_url(url) or openreview_id or Path(parsed.path).stem or kind or "source"
     source_key = slugify(stem).lower()
     source_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
     date_prefix = dt.datetime.now().strftime("%y%m%d")
@@ -91,6 +93,10 @@ def normalize_source_url(url: str) -> dict[str, Any]:
         normalized = f"https://raw.githubusercontent.com/{'/'.join(quoted)}"
         reason = "github_blob_pdf" if marker == "blob" else "github_raw_pdf"
         return {"url": normalized, "original_url": url, "normalized": normalized != url, "reason": reason}
+    alphaxiv_id = alphaxiv_native_id_from_url(url)
+    if alphaxiv_id:
+        normalized = canonical_alphaxiv_abs_url(alphaxiv_id)
+        return {"url": normalized, "original_url": url, "normalized": normalized != url, "reason": "alphaxiv_native_abs", "alphaxiv_id": alphaxiv_id}
     openreview_id = openreview_id_from_url(url)
     if openreview_id:
         normalized = canonical_openreview_pdf_url(openreview_id)
@@ -192,6 +198,8 @@ def prepare_diagnostic_hint(reason: dict[str, Any] | None = None) -> str:
         return "PDF/source appears larger than the configured cap; for a trusted large PDF rerun with --max-download-bytes 4GiB or --max-download-bytes none, and keep bytes/status in temp evidence only."
     if "403" in combined or "forbidden" in combined or "cloudflare" in combined or "verification" in combined:
         return "Access is blocked or requires a route-specific fallback; read manual_reference_paths and keep route/probe details out of the raw note."
+    if "alphaxiv" in combined:
+        return "alphaXiv native preparation stopped at metadata/identity validation; inspect fetch diagnostics and the non-arXiv route reference. Preserve the supplied ID/version; do not guess a PDF or switch to arXiv e-print."
     if "openreview" in combined:
         return "OpenReview route failed inside the script-owned API2 path; read manual_reference_paths before any browser/curl fallback and do not print credentials."
     if "docling" in combined or "pdf" in combined:
@@ -264,6 +272,9 @@ def summarize_evidence_bundle(payload: dict[str, Any]) -> dict[str, Any]:
             "resource_review_required": automation.get("resource_review_required"),
             "brief_cards": automation.get("brief_cards"),
         }
+    alphaxiv = payload.get("alphaxiv")
+    if isinstance(alphaxiv, dict):
+        summary["alphaxiv"] = {key: alphaxiv.get(key) for key in ["id", "version_order", "pdf_url"]}
     arxiv = payload.get("arxiv")
     if isinstance(arxiv, dict):
         raw_selection = arxiv.get("tex_selection")
@@ -514,7 +525,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare tmp raw-fast evidence, resource triage, agent handoff, and closeout args without writing the wiki")
     parser.add_argument("--url", required=True)
     parser.add_argument("--profile", choices=["prod", "env"], default="prod")
-    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview"], default="auto")
+    parser.add_argument("--kind", choices=["auto", "direct-pdf", "arxiv", "openreview", "alphaxiv-native"], default="auto", help="auto separates alphaXiv-hosted arXiv IDs from native paper slugs")
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--state-dir", type=Path, default=None)
     parser.add_argument("--workdir", type=Path, default=None)
@@ -534,7 +545,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    paths = resolve_prepare_paths(args)
+    try:
+        paths = resolve_prepare_paths(args)
+    except ValueError as exc:
+        print_json({"ok": False, "stage": "preflight", "error": "SourceKindMismatch", "message": str(exc), "source_url": args.url, "manual_required": True, "diagnostic_hint": "Use --kind auto with the exact paper URL; alphaXiv native slugs and complete arXiv IDs are separate routes.", "manual_reference_paths": MANUAL_REFERENCE_PATHS, "manual_reference_policy": manual_reference_policy(visible=True)})
+        return 1
     output = run_prepare(args, paths)
     print_json(output)
     if not output.get("ok"):

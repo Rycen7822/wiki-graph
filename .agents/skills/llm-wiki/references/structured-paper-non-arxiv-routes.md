@@ -14,6 +14,12 @@ Use this file when the user supplies or the source resolves to:
 
 Choose one canonical raw-note `source`: normally the user-supplied stable DOI/article/landing/PDF route. Auxiliary PDF/raw routes, DOI/Crossref/publisher metadata, supplementary URLs, local attachment paths/checksums, hashes, page counts, and mismatch evidence stay in temp evidence, reports, closeout, ledgers, or compact `log.md`, not raw-note frontmatter/body.
 
+## alphaXiv paper routing
+
+- Run the normal `ops.raw_fast_ingest_prepare --url <alphaXiv-paper-url>` entry; the script owns classification. A complete numeric arXiv ID stays on the `arxiv` route, while a native `YYMM.<slug>` uses `alphaxiv-native`. Never infer an arXiv ID from a numeric substring of a native slug.
+- Native preparation validates public metadata origin/ID/version at `api.alphaxiv.org/papers/v3/<identifier>`, downloads the resolved versioned PDF from `pdfs.assets.alphaxiv.org`, and checks PDF magic bytes before extraction. Metadata failure, identity/version mismatch, or a non-PDF response stops preparation instead of guessing a download.
+- Keep the canonical alphaXiv abs URL in raw `source`; resolved version/PDF URL and provenance belong in `alphaxiv_metadata.json` and evidence reports. Native preparation uses the existing PDF/Docling path, not arXiv e-print/TeX. Site `.md` is extracted text, not original TeX source.
+
 ## Identity and route-resolution workflow
 
 1. Resolve identity independently across the user route, landing/article page, PDF route, DOI/Crossref/publisher metadata, local attachment, and any supplied arXiv/project/resource route.
