@@ -25,7 +25,7 @@ import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from ops.wiki_native_cli import DEFAULT_WIKI_ROOT
 
@@ -767,15 +767,38 @@ def figure_table_inventory(text: str) -> list[dict[str, Any]]:
     return rows[:200]
 
 
+SOURCE_URL_PATTERN = r"https?://[^\s)\]}>\"']+"
+MALFORMED_URL_CHARS = "[]{}<>\"'\\"
+
+
+def _wellformed_source_url(url: str) -> str | None:
+    """Normalize an extracted URL, rejecting markup noise (e.g. LaTeX macros) that breaks urlparse."""
+    url = html.unescape(str(url)).strip().rstrip(".,;:\\")
+    if not url or any(char in url for char in MALFORMED_URL_CHARS):
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
+    if not parsed.netloc:
+        return None
+    return url
+
+
+def iter_source_url_matches(text: str) -> Iterator[tuple[re.Match[str], str]]:
+    for match in re.finditer(SOURCE_URL_PATTERN, text):
+        url = _wellformed_source_url(match.group(0))
+        if url:
+            yield match, url
+
+
 def extract_urls(text: str) -> list[str]:
-    raw = re.findall(r"https?://[^\s)\]}>\"']+", text)
-    return sorted({u.rstrip(".,;:\\") for u in raw})
+    return sorted({url for _, url in iter_source_url_matches(text)})
 
 
 def extract_url_contexts(text: str, *, radius: int = 180) -> dict[str, list[str]]:
     contexts: dict[str, list[str]] = {}
-    for match in re.finditer(r"https?://[^\s)\]}>\"']+", text):
-        url = match.group(0).rstrip(".,;:")
+    for match, url in iter_source_url_matches(text):
         line_start = text.rfind("\n", 0, match.start()) + 1
         line_end = text.find("\n", match.end())
         if line_end == -1:
@@ -855,11 +878,17 @@ PAPER_ARTIFACT_CONTEXT_RE = re.compile(r"(?i)(official\s+(?:code|implementation|
 
 
 def _normalized_url_host(url: str) -> str:
-    return urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+    try:
+        return urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+    except ValueError:
+        return ""
 
 
 def _source_url_ignore_reason(url: str, contexts: list[str]) -> str | None:
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return "malformed_url"
     host = parsed.netloc.lower().removeprefix("www.")
     if host != "github.com" or not contexts:
         return None
@@ -878,7 +907,10 @@ def _resource_url_candidate(
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     url = html.unescape(str(url)).replace("\\/", "/").strip().rstrip(".,;:\\")
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
     host = parsed.netloc.lower().removeprefix("www.")
     parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
     base: dict[str, Any] = {"url": url, "source": source, "status": "not_checked"}
@@ -2628,12 +2660,10 @@ def next_raw_path(root: Path, title: str, now: dt.datetime | None = None) -> str
     used: set[int] = set()
     if month_dir.exists():
         for p in month_dir.glob(f"{yymmdd}*.md"):
-            match = re.match(rf"{re.escape(yymmdd)}(\d{{2}})_", p.name)
+            match = re.match(rf"{re.escape(yymmdd)}(\d{{2,}})_", p.name)
             if match:
                 used.add(int(match.group(1)))
     seq = (max(used) + 1) if used else 1
-    if seq > 99:
-        raise ValueError(f"raw clip sequence exhausted for {yymmdd}: max existing sequence is {max(used)}")
     return f"raw/clip/{yymm}/{yymmdd}{seq:02d}_{slugify(title)}.md"
 
 

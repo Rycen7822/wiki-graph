@@ -13,7 +13,8 @@ from typing import Any, Sequence
 from ops.raw_fast_evidence_bundle import slugify
 from ops.wiki_mutation_lock import wiki_mutation_lock
 
-RAW_PATH_RE = re.compile(r"^raw/clip/(?P<yymm>\d{4})/(?P<yymmdd>\d{6})(?P<seq>\d{2})_(?P<slug>[^/]+)\.md$")
+# Sequence width is a minimum: preserve 01..99, then grow to 100, 1000, ...
+RAW_PATH_RE = re.compile(r"^raw/clip/(?P<yymm>\d{4})/(?P<yymmdd>\d{6})(?P<seq>\d{2,})_(?P<slug>[^/]+)\.md$")
 
 
 class RawPublishError(RuntimeError):
@@ -50,7 +51,7 @@ def _used_sequences(root: Path, yymm: str, yymmdd: str) -> set[int]:
     month_dir = root / "raw" / "clip" / yymm
     if not month_dir.exists():
         return used
-    for path in month_dir.glob(f"{yymmdd}??_*.md"):
+    for path in month_dir.glob(f"{yymmdd}*_*.md"):
         match = RAW_PATH_RE.fullmatch(path.relative_to(root).as_posix())
         if match:
             used.add(int(match.group("seq")))
@@ -86,13 +87,6 @@ def allocate_raw_paths_locked(
         else:
             seq = (max(used) + 1) if used else 1
             raw_file = f"raw/clip/{yymm}/{yymmdd}{seq:02d}_{slugify(str(title))}.md"
-        if seq > 99:
-            raise RawPublishError(
-                "raw_sequence_exhausted",
-                f"raw clip sequence exhausted for {yymmdd}",
-                yymmdd=yymmdd,
-                max_sequence=max(used) if used else 0,
-            )
         used.add(seq)
         allocated.append(raw_file)
     return allocated

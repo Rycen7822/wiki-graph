@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -229,3 +230,39 @@ def test_raw_fast_evidence_bundle_cross_site_arxiv_uses_canonical_source(tmp_pat
     frontmatter = json.loads((workdir / "candidate_frontmatter.json").read_text(encoding="utf-8"))
     assert frontmatter["source"] == "https://arxiv.org/abs/2606.02572"
     assert supplied_url not in frontmatter.values()
+
+
+def test_url_extraction_rejects_latex_wrapped_url_noise() -> None:
+    """Activation-dump TeX wraps text in \\colorbox, which yielded unparsable URLs and crashed prepare."""
+    from ops import raw_fast_evidence_bundle as bundle
+
+    noisy = "http://join\\colorbox[rgb]{0.9,0.9,0.9}{\\vphantom{Ag}us}"
+    text = "Join " + noisy + " now\nCode: https://github.com/example/project\n"
+
+    assert bundle.extract_urls(text) == ["https://github.com/example/project"]
+    assert list(bundle.extract_url_contexts(text)) == ["https://github.com/example/project"]
+
+    classified = bundle.classify_source_exposed_resources([noisy], health_mode="none", timeout=1)
+    assert classified["ok"] is True
+    assert classified["candidates"] == []
+    assert classified["ignored"] == [{"url": noisy, "reason": "malformed_url", "contexts": []}]
+
+
+@pytest.mark.parametrize("existing_sequence", [0, 99, 100, 999])
+def test_next_raw_path_continues_legacy_and_expanded_disk_sequences(tmp_path: Path, existing_sequence: int) -> None:
+    from ops import raw_fast_evidence_bundle as bundle
+
+    root = sample_wiki(tmp_path)
+    month_dir = root / "raw/clip/2610"
+    month_dir.mkdir(parents=True, exist_ok=True)
+    if existing_sequence:
+        (month_dir / f"261011{existing_sequence:02d}_Existing.md").write_text("existing\n", encoding="utf-8")
+    # Other dates and malformed sequence names must not consume today's sequence.
+    (month_dir / "2610109999_Yesterday.md").write_text("yesterday\n", encoding="utf-8")
+    (month_dir / "2610119_Too-Short.md").write_text("invalid\n", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in month_dir.iterdir()}
+
+    raw_file = bundle.next_raw_path(root, "Next Paper", now=dt.datetime(2026, 10, 11, 12, 0))
+
+    assert raw_file == f"raw/clip/2610/261011{existing_sequence + 1:02d}_Next-Paper.md"
+    assert {path.name: path.read_bytes() for path in month_dir.iterdir()} == before

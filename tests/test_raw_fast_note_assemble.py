@@ -162,7 +162,8 @@ def test_raw_fast_note_assemble_rejects_invalid_body(tmp_path: Path, body: str, 
     assert not (root / "raw/clip/2607/26070401_Assembler-Paper.md").exists()
 
 
-def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("existing_sequence", [2, 99, 100, 999])
+def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence(tmp_path: Path, existing_sequence: int) -> None:
     root, workdir, _raw_file = _write_assembly_fixture(tmp_path, raw_file="../bad.md")
 
     unsafe = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir)
@@ -170,7 +171,7 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence
     assert unsafe["stage"] == "raw_file"
     assert unsafe["error"] == "invalid_raw_file"
 
-    root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070402_Existing-Paper.md")
+    root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file=f"raw/clip/2607/260704{existing_sequence:02d}_Existing-Paper.md")
     write(root / raw_file, "already here")
     write(
         workdir / "evidence_bundle.json",
@@ -188,7 +189,7 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence
     state_dir = tmp_path / "state"
     allocated = raw_fast_note_assemble.assemble_raw_note(root=root, workdir=workdir, state_dir=state_dir)
     assert allocated["ok"] is True
-    assert allocated["raw_file"] == "raw/clip/2607/26070403_Assembler-Paper.md"
+    assert allocated["raw_file"] == f"raw/clip/2607/260704{existing_sequence + 1:02d}_Assembler-Paper.md"
     assert allocated["publication"]["reallocated"] is True
     assert (root / raw_file).read_text(encoding="utf-8") == "already here"
     assert (root / allocated["raw_file"]).is_file()
@@ -199,8 +200,9 @@ def test_raw_fast_note_assemble_refuses_unsafe_and_reallocates_existing_sequence
 
 
 @pytest.mark.subprocess
-def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path) -> None:
-    root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file="raw/clip/2607/26070403_Roundtrip-Paper.md")
+@pytest.mark.parametrize("sequence", ["03", "100", "1000"])
+def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path, sequence: str) -> None:
+    root, workdir, raw_file = _write_assembly_fixture(tmp_path, raw_file=f"raw/clip/2607/260704{sequence}_Roundtrip-Paper.md")
 
     assemble = subprocess.run(
         [
@@ -221,5 +223,6 @@ def test_raw_fast_note_assemble_cli_can_verify_assembled_note(tmp_path: Path) ->
     )
     assembled = json.loads(assemble.stdout)
     assert assembled["ok"] is True
+    assert assembled["raw_file"] == raw_file
     assert assembled["verify"]["raw_fast_ok"] is True
     assert (root / raw_file).exists()
